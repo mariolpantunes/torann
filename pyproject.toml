@@ -1,15 +1,21 @@
 [project]
-name = "ann"
-version = "0.1.0"
-description = "Approximate Nearest Neighbor engine for toroidal space and fractional Minkowski distances"
+name = "torann"
+version = "0.2.0"
+description = "torann — TORoidal Approximate Nearest Neighbours: L1 LSH on the unit torus"
 authors = [
-    {name = "Mário Antunes", email = "mario.antunes@example.com"}
+    {name = "Mário Antunes", email = "mario.antunes@av.it.pt"}
 ]
-dependencies = [
-    "numpy",
-]
+readme = "README.md"
+dependencies = ["numpy"]
 requires-python = ">=3.10"
 
 [build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+# Mixed Rust/Python project: the `torann/` package plus a compiled
+# extension exposed as `torann._native`. `maturin build --release`
+# produces the complete wheel.
+module-name = "torann._native"
+features = ["pyo3/extension-module"]

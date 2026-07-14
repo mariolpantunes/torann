@@ -1,11 +1,13 @@
-# ToroidalLSH backend contract
+# torann LSH implementation contract
 
-Every backend (pure Python, C, Rust) implements the same class contract so
-the facade, the conformance tests and the benchmarks are backend-agnostic.
-The pure-Python `PythonLshIndex` is the **reference implementation**: given
-the same parameters, a native backend must produce **byte-identical hash
-tables** (keys and id order) and equivalent query results (identical ids up
-to float32 distance ties; distances within `1e-5`).
+Every LSH implementation (pure Python `lsh.py`, Rust `torann._native`)
+satisfies the same class contract — `torann/base.py` is the abstract base —
+so the wrapper, the conformance tests and the benchmarks are
+implementation-agnostic. The pure-Python `PythonLshIndex` is the
+**reference implementation**: given the same parameters, a native
+implementation must produce **byte-identical hash tables** (keys and id
+order) and equivalent query results (identical ids up to float32 distance
+ties; distances within `1e-5`).
 
 ## Construction
 
@@ -90,8 +92,9 @@ own copy of the points (float64 for keys, float32 for distance refinement).
 
 ## Packaging
 
-The native backend is a separate wheel: module `ann_backend_rust` exports
-`RustLshIndex`. `src/backends/__init__.py` resolves names;
-`backend="auto"` picks the first installed of `rust, python`. (The C
-contender from the phase-6 bake-off is preserved at tag
-`archive/backend-c`; it implements this same contract.)
+One maturin mixed Rust/Python wheel: the compiled core is
+`torann._native` (exporting `RustLshIndex`, adapted by `torann/rust.py`);
+`torann/wrapper.py` resolves names, and `backend="auto"` picks the first
+importable of `rust, python`. (The C contender from the phase-6 bake-off
+is preserved at tag `archive/backend-c`; it implements this same
+contract.)

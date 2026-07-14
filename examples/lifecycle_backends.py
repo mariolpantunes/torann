@@ -19,8 +19,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.ann import ToroidalNN            # noqa: E402
-from src.backends import available_backends  # noqa: E402
+from torann import ToroidalNN  # noqa: E402
+from torann import available_backends  # noqa: E402
 
 D = 16
 K = 2 * D

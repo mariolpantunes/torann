@@ -12,8 +12,7 @@ import unittest
 
 import numpy as np
 
-from src.ann import ToroidalNN
-from src.backends import available_backends
+from torann import ToroidalNN, available_backends
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -160,7 +159,7 @@ class TestLSHMode(unittest.TestCase):
         """The backend's tables must be exactly the CONTRACT.md hash of the
         current positions, key-sorted with ids aligned."""
         nn = self.make().fit(self.static, self.cands)
-        tab = nn._lsh.tables()
+        tab = nn._impl.tables()
         fresh_s = ref_keys(nn, np.arange(nn.n_static))
         fresh_c = ref_keys(nn, np.arange(nn.n_static, nn.n_points))
         np.testing.assert_array_equal(tab["cand_keys"], fresh_c)
@@ -222,10 +221,10 @@ class TestLifecycle(unittest.TestCase):
 
     def test_update_touches_only_changed_keys(self):
         nn = self.make().fit(self.static, self.cands)
-        keys_before = nn._lsh.tables()["cand_keys"]
+        keys_before = nn._impl.tables()["cand_keys"]
         step = self.rng.normal(0, 0.002, (800, self.D))
         nn.update(np.mod(nn.candidates + step, 1.0))
-        changed = (nn._lsh.tables()["cand_keys"] != keys_before).mean()
+        changed = (nn._impl.tables()["cand_keys"] != keys_before).mean()
         logger.info("[%s] keys changed by tiny step: %.3f", self.BACKEND, changed)
         self.assertLess(changed, 0.30)  # most keys survive a small step
 
@@ -234,7 +233,7 @@ class TestLifecycle(unittest.TestCase):
         for sigma in (0.001, 0.02, 0.3):  # few, some, most keys change
             step = self.rng.normal(0, sigma, (800, self.D))
             nn.update(np.mod(nn.candidates + step, 1.0))
-            tab = nn._lsh.tables()
+            tab = nn._impl.tables()
             fresh = ref_keys(nn, np.arange(nn.n_static, nn.n_points))
             np.testing.assert_array_equal(tab["cand_keys"], fresh)
             for t in range(nn._L):
@@ -249,7 +248,7 @@ class TestLifecycle(unittest.TestCase):
         new_batch = self.rng.random((500, self.D))
         nn.promote(new_batch)
         self.assertEqual((nn.n_static, nn.n_candidates), (6800, 500))
-        tab = nn._lsh.tables()
+        tab = nn._impl.tables()
         keys = ref_keys(nn, np.arange(nn.n_static))
         for t in range(nn._L):  # merged arrays must be perfectly sorted
             self.assertTrue((np.diff(tab["static_keys"][t]) >= 0).all())
@@ -262,7 +261,7 @@ class TestLifecycle(unittest.TestCase):
         nn = self.make().fit(self.static, self.cands)
         nn.update(self.rng.random((800, self.D)))  # teleport before freezing
         nn.promote(self.rng.random((100, self.D)))
-        tab = nn._lsh.tables()
+        tab = nn._impl.tables()
         keys = ref_keys(nn, np.arange(nn.n_static))
         for t in range(nn._L):  # frozen keys must reflect current positions
             np.testing.assert_array_equal(np.sort(keys[t]), tab["static_keys"][t])
@@ -402,13 +401,13 @@ class TestBackendEquivalence(unittest.TestCase):
 
     def test_tables_and_results_match_reference(self):
         ref_nn, ref_res = self._run_lifecycle("python")
-        ref_tab = ref_nn._lsh.tables()
+        ref_tab = ref_nn._impl.tables()
         for backend in BACKENDS:
             if backend == "python":
                 continue
             with self.subTest(backend=backend):
                 nn, res = self._run_lifecycle(backend)
-                tab = nn._lsh.tables()
+                tab = nn._impl.tables()
                 for name in ref_tab:  # byte-identical tables
                     np.testing.assert_array_equal(
                         tab[name], ref_tab[name], err_msg=name)

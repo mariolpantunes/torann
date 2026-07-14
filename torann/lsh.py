@@ -1,19 +1,21 @@
-"""Pure NumPy reference implementation of the ToroidalLSH contract.
+"""Pure NumPy reference implementation of the LSH index contract.
 
-This backend defines the normative behaviour (see CONTRACT.md): native
-backends must produce byte-identical hash tables and equivalent query
-results for the same parameters. Keep it readable — it is the specification
-the C and Rust ports are validated against.
+This implementation defines the normative behaviour (see CONTRACT.md): the
+native implementation must produce byte-identical hash tables and
+equivalent query results for the same parameters. Keep it readable — it is
+the specification the Rust port is validated against.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
+from .base import BaseIndex
+
 __all__ = ["PythonLshIndex"]
 
 
-class PythonLshIndex:
+class PythonLshIndex(BaseIndex):
     """Two-tier toroidal-L1 LSH index (pure NumPy)."""
 
     def __init__(self, B, K, L, probes, S, U, block=1024):
@@ -25,6 +27,7 @@ class PythonLshIndex:
         self.U = np.ascontiguousarray(U, dtype=np.float64)
         self.block = int(block)
         self._pw = self.B ** np.arange(self.K, dtype=np.int64)
+        self.n_points = 0
         self.n_static = 0
         self._pts = np.empty((0, 0))
 
@@ -35,6 +38,7 @@ class PythonLshIndex:
     def build(self, points: np.ndarray, n_static: int) -> None:
         self._pts = np.ascontiguousarray(points, dtype=np.float64).copy()
         self._pts32 = self._pts.astype(np.float32)
+        self.n_points = self._pts.shape[0]
         self.n_static = int(n_static)
         self._build_static()
         self._build_candidates()
@@ -78,6 +82,7 @@ class PythonLshIndex:
             C = np.ascontiguousarray(new_candidates, dtype=np.float64)
             self._pts = np.vstack([self._pts, C])
             self._pts32 = np.vstack([self._pts32, C.astype(np.float32)])
+            self.n_points = self._pts.shape[0]
         self._build_candidates()
 
     # ------------------------------------------------------------------ #
@@ -141,14 +146,6 @@ class PythonLshIndex:
             "cand_sorted_keys": self._skeys_c.copy(),
             "cand_sorted_ids": self._sids_c.copy(),
         }
-
-    @property
-    def n_points(self) -> int:
-        return self._pts.shape[0]
-
-    @property
-    def n_candidates(self) -> int:
-        return self.n_points - self.n_static
 
     # ------------------------------------------------------------------ #
     # Table construction

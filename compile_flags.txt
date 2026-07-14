@@ -1,3 +1,0 @@
--I/home/mantunes/git/ann/native/c/ann_backend_c
--fopenmp
--std=c11

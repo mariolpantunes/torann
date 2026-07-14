@@ -1,11 +1,11 @@
 [package]
-name = "ann-backend-rust"
-version = "0.1.0"
+name = "torann"
+version = "0.2.0"
 edition = "2021"
-description = "Rust backend for the ann toroidal L1 LSH index"
+description = "Rust core of torann — toroidal L1 LSH index"
 
 [lib]
-name = "ann_backend_rust"
+name = "torann"
 crate-type = ["cdylib"]
 
 [dependencies]

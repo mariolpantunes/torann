@@ -1,6 +1,6 @@
-//! Toroidal L1 LSH index — Rust backend.
+//! torann's native core: the toroidal L1 LSH index in Rust.
 //!
-//! Implements `src/backends/CONTRACT.md` exactly: given the same parameters
+//! Implements `torann/CONTRACT.md` exactly: given the same parameters
 //! the tables are byte-identical to the pure-NumPy reference. The tie rules
 //! that guarantee it:
 //!   - tier builds sort by (key, id)            [stable argsort of asc. ids]
@@ -725,7 +725,8 @@ impl RustLshIndex {
 }
 
 #[pymodule]
-fn ann_backend_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pyo3(name = "_native")]
+fn torann_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustLshIndex>()?;
     Ok(())
 }

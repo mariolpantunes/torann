@@ -21,7 +21,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.ann import ToroidalNN  # noqa: E402
+from torann import ToroidalNN  # noqa: E402
 
 D = 16
 K = 2 * D
@@ -66,7 +66,7 @@ def run(strategy):
 
             step = rng.normal(0, SIGMA, (nn.n_candidates, D))
             new = np.mod(nn.candidates + step, 1.0)
-            keys_before = (nn._lsh.tables()["cand_keys"]
+            keys_before = (nn._impl.tables()["cand_keys"]
                            if strategy == "selective" else None)
             t0 = time.perf_counter()
             if strategy == "refit":
@@ -76,14 +76,14 @@ def run(strategy):
             elif strategy == "tier-sort":
                 # full candidate-tier rebuild (python backend internals)
                 nn._arena[nn.n_static:] = new
-                lsh = nn._lsh
+                lsh = nn._impl
                 lsh._pts[lsh.n_static:] = new
                 lsh._pts32[lsh.n_static:] = new.astype(np.float32)
                 lsh._build_candidates()
             else:
                 nn.update(new)
                 moved.append(
-                    float((nn._lsh.tables()["cand_keys"] != keys_before).mean()))
+                    float((nn._impl.tables()["cand_keys"] != keys_before).mean()))
             t_maint += time.perf_counter() - t0
         recalls.append(sample_recall(nn, rng))
 

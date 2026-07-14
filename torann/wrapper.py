@@ -1,4 +1,4 @@
-"""Toroidal L1 nearest-neighbour search for ESS-style epoch workloads.
+"""torann — TORoidal Approximate Nearest Neighbours (public wrapper).
 
 Contract (PLAN.md, gate outcomes 2026-07-13):
 
@@ -17,24 +17,23 @@ Contract (PLAN.md, gate outcomes 2026-07-13):
   tier* refreshed per epoch. Queries default to "each candidate against
   everything" — the ESS inner loop.
 * **Selective updates**: ``update`` re-places only the points that moved far
-  enough to change a cell (P[change] = B*step per dimension, experiment D),
-  by delete + merge — never a full re-sort. The index is always exact after
-  an update: fast *and* accurate.
-* **No brute-force fallback**: an under-filled query widens its buckets by
-  *prefix relaxation* — keys are digit-concatenations, so dropping low-order
-  digits turns a bucket into a contiguous range of the sorted key array
-  (two searchsorted calls per table per level). Level K spans the whole
-  table, so k results are structurally guaranteed without a distance scan.
+  enough to change a cell, by delete + merge — never a full re-sort. The
+  index is always exact after an update: fast *and* accurate.
+* **No brute-force fallback in LSH mode**: an under-filled query widens its
+  buckets by *prefix relaxation* (keys are digit-concatenations; dropping
+  low-order digits turns a bucket into a contiguous sorted-key range), so k
+  results are structurally guaranteed without a distance scan.
 * **Tuning**: ``fit(..., k=...)`` or ``radius=...`` feeds ESS's own query
   heuristic into the index — B from the neighbour scale, K from the
   closed-form bucket load, L from a recall target. Explicit constructor
   arguments always win over tuning.
 
-This class is a *facade*: it owns validation, tuning, hash-parameter drawing
-and the exact brute-force path (used below ``brute_threshold`` total
-points). The LSH index itself lives behind the backend contract in
-``src/backends/CONTRACT.md`` — pure NumPy (``python``, the reference), C
-(``c``) or Rust (``rust``); ``backend="auto"`` picks the fastest installed.
+This class owns validation, tuning, hash-parameter drawing and *selection*;
+the search itself lives in interchangeable implementations of
+``base.BaseIndex``: exact brute force (``brute.py``) below the measured
+crossover threshold, and above it an LSH implementation — Rust
+(``torann._native``) when the compiled module is present, the pure-Python
+reference (``lsh.py``) otherwise. See ``CONTRACT.md`` and ANALYSIS.md.
 """
 
 from __future__ import annotations
@@ -44,17 +43,56 @@ from typing import Any
 
 import numpy as np
 
-from .backends import resolve_backend
+from . import rust
+from .brute import BruteIndex, exact_radius
+from .lsh import PythonLshIndex
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ToroidalNN"]
+__all__ = ["ToroidalNN", "available_backends"]
 
-# Element budget for temporary matrices in blocked exact search.
-_BRUTE_BUDGET = 1 << 24
 # Sampling caps for the tune() estimate of the neighbour scale.
 _TUNE_QUERIES = 256
 _TUNE_REFERENCE = 8192
+
+_AUTO_ORDER = ("rust", "python")
+
+
+def _lsh_class(name: str):
+    """The LSH implementation class for ``name``; ImportError if absent."""
+    if name == "python":
+        return PythonLshIndex
+    if name == "rust":
+        if not rust.AVAILABLE:
+            raise ImportError(
+                "torann._native is not installed (build with maturin)")
+        return rust.RustLshIndex
+    raise ValueError(f"unknown backend {name!r}; expected 'auto', "
+                     f"{', '.join(map(repr, _AUTO_ORDER))}")
+
+
+def _resolve(name: str = "auto"):
+    """``(name, class)``, resolving 'auto' to the fastest installed."""
+    if name != "auto":
+        return name, _lsh_class(name)
+    for cand in _AUTO_ORDER:
+        try:
+            return cand, _lsh_class(cand)
+        except ImportError:
+            continue
+    raise ImportError("no LSH implementation available (not even 'python')")
+
+
+def available_backends() -> list[str]:
+    """Names of the LSH implementations importable in this environment."""
+    out = []
+    for name in _AUTO_ORDER:
+        try:
+            _lsh_class(name)
+        except ImportError:
+            continue
+        out.append(name)
+    return out
 
 
 class ToroidalNN:
@@ -74,8 +112,7 @@ class ToroidalNN:
         seed: Seed for hash functions and tuning samples.
         brute_threshold: Exact search while total points <= this. ``None``
             (default) picks the measured brute/LSH crossover of the backend:
-            4096 for python, 512 for the native backends (see ANALYSIS.md,
-            crossover section).
+            4096 for python, 512 for rust (ANALYSIS.md, crossover section).
         num_tables: Tables L. ``None`` = tuned (default 16 without hints).
         resolution: Cells per dimension B >= 2. ``None`` = tuned (default 3).
         dims_per_table: Sampled dimensions K. ``None`` = closed-form bucket
@@ -83,14 +120,15 @@ class ToroidalNN:
         target_bucket_size: Bucket-load target for the K rule. ``None`` =
             ``max(32, k_hint)``.
         probes: Neighbour-cell probes per table per query.
-        query_block_size: Queries per vectorised block.
-        backend: LSH backend — ``"auto"`` (first installed of c, rust,
+        query_block_size: Queries per vectorised block (advisory).
+        backend: LSH implementation — ``"auto"`` (first installed of rust,
             python), or an explicit name.
     """
 
     # Measured brute/LSH crossover per backend (ANALYSIS.md): the NumPy
     # brute path stays competitive to ~4-8k points against the python
-    # backend, while the native backends win from the smallest sizes tested.
+    # LSH, while the native implementation wins from the smallest sizes
+    # tested.
     _BRUTE_DEFAULTS = {"python": 4096, "rust": 512}
 
     def __init__(
@@ -123,6 +161,7 @@ class ToroidalNN:
         self.probes = int(probes)
         self.query_block_size = int(query_block_size)
         self.backend = backend
+        self.backend_name: str | None = None
 
         self._rng = np.random.default_rng(seed)
         self._arena = np.empty((0, 0))
@@ -130,7 +169,7 @@ class ToroidalNN:
         self._d = 0
         self._use_lsh = False
         self._k_hint: int | None = None
-        self._lsh: Any = None  # backend instance; set when LSH mode engages
+        self._impl: Any = None  # BaseIndex instance; set at fit()
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -165,14 +204,17 @@ class ToroidalNN:
         if self._use_lsh:
             self._tune(radius)
             self._make_lsh()
+        else:
+            self._impl = BruteIndex()
+            self._impl.build(self._arena, self._n_static)
         return self
 
     def update(self, coordinates: np.ndarray) -> None:
         """Move the candidate tier (one epoch step).
 
-        The refresh is *selective*: only points whose key actually changed —
-        i.e. that moved far enough to leave a cell — are re-placed, by
-        delete + merge. The index is exact after every update.
+        In LSH mode the refresh is *selective*: only points whose key
+        actually changed — i.e. that moved far enough to leave a cell — are
+        re-placed, by delete + merge. The index is exact after every update.
 
         Args:
             coordinates: (n_candidates, d) new positions, same order as the
@@ -184,8 +226,7 @@ class ToroidalNN:
             raise ValueError(
                 f"expected coordinates of shape {(self.n_candidates, self._d)}")
         self._arena[self._n_static:] = new
-        if self._use_lsh:
-            self._lsh.update(np.ascontiguousarray(new))
+        self._impl.update(np.ascontiguousarray(new))
 
     def promote(self, new_candidates: np.ndarray | None = None) -> None:
         """Freeze the candidate tier into the static tier and install a new
@@ -193,8 +234,7 @@ class ToroidalNN:
         """
         self._check_fitted()
         C = self._as_batch(new_candidates)
-        if self._use_lsh:
-            self._lsh.promote(C)
+        self._impl.promote(np.ascontiguousarray(C))
         self._n_static = self.n_points  # old candidates are static now
         if C.size:
             self._arena = np.vstack([self._arena, C])
@@ -229,17 +269,15 @@ class ToroidalNN:
         Returns:
             (indices, distances) of shape (m, k), sorted by distance; rows
             are padded with -1 / inf only when fewer than k points exist.
-            Under-filled queries are completed by prefix relaxation, so k
-            results are guaranteed without any brute-force scan.
+            In LSH mode under-filled queries are completed by prefix
+            relaxation, so k results are guaranteed without a brute scan.
         """
         self._check_fitted()
         kq = int(k) if k is not None else (self._k_hint or 2 * self._d)
         if kq < 1:
             raise ValueError("k must be >= 1")
         Q, ex = self._resolve_queries(queries, exclude_ids)
-        if not self._use_lsh:
-            return self._brute_query(Q, kq, ex)
-        return self._lsh.query_knn(np.ascontiguousarray(Q), kq, ex)
+        return self._impl.query_knn(np.ascontiguousarray(Q), kq, ex)
 
     def query_radius(
         self,
@@ -259,29 +297,16 @@ class ToroidalNN:
         """
         self._check_fitted()
         Q, ex = self._resolve_queries(queries, None)
-        m = Q.shape[0]
-
-        if not self._use_lsh or exact:
-            out: list[tuple[np.ndarray, np.ndarray]] = []
-            block = max(1, _BRUTE_BUDGET // max(1, self.n_points * self._d))
-            for s in range(0, m, block):
-                e = min(m, s + block)
-                D = self._pairwise(Q[s:e])
-                if ex is not None:
-                    D[np.arange(e - s), ex[s:e]] = np.inf
-                for row in D:
-                    ids = np.flatnonzero(row <= radius)
-                    order = np.argsort(row[ids], kind="stable")
-                    out.append((ids[order], row[ids[order]]))
-            return out
-
-        indptr, ids, dst = self._lsh.query_radius(
-            np.ascontiguousarray(Q), float(radius), ex)
+        if exact and self._use_lsh:
+            indptr, ids, dst = exact_radius(self._arena, Q, float(radius), ex)
+        else:
+            indptr, ids, dst = self._impl.query_radius(
+                np.ascontiguousarray(Q), float(radius), ex)
         return [(ids[indptr[i]:indptr[i + 1]], dst[indptr[i]:indptr[i + 1]])
-                for i in range(m)]
+                for i in range(Q.shape[0])]
 
     # ------------------------------------------------------------------ #
-    # Tuning and backend construction
+    # Tuning and implementation selection
     # ------------------------------------------------------------------ #
 
     def _tune(self, radius: float | None) -> None:
@@ -332,47 +357,17 @@ class ToroidalNN:
         """Explicit brute_threshold, or the backend's measured crossover."""
         if self.brute_threshold is not None:
             return self.brute_threshold
-        name, _ = resolve_backend(self.backend)
+        name, _ = _resolve(self.backend)
         return self._BRUTE_DEFAULTS.get(name, 4096)
 
     def _make_lsh(self) -> None:
-        """Instantiate the backend and build both tiers from the arena."""
-        name, cls = resolve_backend(self.backend)
+        """Instantiate the LSH implementation and build both tiers."""
+        name, cls = _resolve(self.backend)
         self.backend_name = name
-        self._lsh = cls(self._B, self._K, self._L, self.probes,
-                        self._S, self._U, self.query_block_size)
-        self._lsh.build(np.ascontiguousarray(self._arena), self._n_static)
-        logger.info("LSH backend: %s", name)
-
-    # ------------------------------------------------------------------ #
-    # Exact path
-    # ------------------------------------------------------------------ #
-
-    def _pairwise(self, Qb: np.ndarray) -> np.ndarray:
-        diff = np.abs(Qb[:, None, :] - self._arena[None, :, :])
-        np.minimum(diff, 1.0 - diff, out=diff)
-        return diff.sum(-1)
-
-    def _brute_query(self, Q, k, exclude_ids) -> tuple[np.ndarray, np.ndarray]:
-        m, n = Q.shape[0], self.n_points
-        idx = np.full((m, k), -1, dtype=np.int64)
-        dst = np.full((m, k), np.inf)
-        kk = min(k, n)
-        block = max(1, _BRUTE_BUDGET // max(1, n * self._d))
-        for s in range(0, m, block):
-            e = min(m, s + block)
-            D = self._pairwise(Q[s:e])
-            if exclude_ids is not None:
-                D[np.arange(e - s), exclude_ids[s:e]] = np.inf
-            part = np.argpartition(D, kk - 1, axis=1)[:, :kk]
-            pd = np.take_along_axis(D, part, axis=1)
-            order = np.argsort(pd, axis=1, kind="stable")
-            part = np.take_along_axis(part, order, axis=1)
-            pd = np.take_along_axis(pd, order, axis=1)
-            finite = np.isfinite(pd)
-            idx[s:e, :kk] = np.where(finite, part, -1)
-            dst[s:e, :kk] = np.where(finite, pd, np.inf)
-        return idx, dst
+        self._impl = cls(self._B, self._K, self._L, self.probes,
+                         self._S, self._U, self.query_block_size)
+        self._impl.build(np.ascontiguousarray(self._arena), self._n_static)
+        logger.info("LSH implementation: %s", name)
 
     # ------------------------------------------------------------------ #
     # Helpers & introspection

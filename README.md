@@ -1,10 +1,11 @@
-# ann — toroidal L1 nearest-neighbour search for ESS
+# torann — TORoidal Approximate Nearest Neighbours
 
 Exact + approximate k-NN and range search on the unit torus `[0, 1)^d` under
-toroidal **L1** — the metric is the contract (see below). The facade and the
-exact path are pure Python + NumPy; the LSH index runs on swappable backends
-(`python` reference, native `c` and `rust` — see `src/backends/CONTRACT.md`
-and `ANALYSIS.md` for the bake-off; ~80 ms per ESS epoch, 25–75× NumPy).
+toroidal **L1** — the metric is the contract (see below). One Python package,
+three interchangeable implementations of one interface (`torann/base.py`):
+exact brute force (`brute.py`), the pure-Python LSH reference (`lsh.py`), and
+the Rust core (`torann._native`, built with maturin) — see `torann/CONTRACT.md`
+and `ANALYSIS.md` for the bake-off; ~80 ms per ESS epoch, 25–75× NumPy.
 
 Built for [ESS](https://github.com/mariolpantunes/ess): anchors that never
 move, candidate points that move a little every epoch, each candidate asking
@@ -64,7 +65,7 @@ L0.5 carries no guarantee, so those metrics are deliberately not offered
 
 ```python
 import numpy as np
-from src.ann import ToroidalNN
+from torann import ToroidalNN
 
 d = 16
 static = np.random.rand(15_000, d)      # anchors: never move
@@ -147,8 +148,10 @@ python exploration/exp_2d.py
 python exploration/exp_update.py
 ```
 
-The Rust backend was chosen in the phase-6 bake-off and lives in
-`native/rust` (built with `maturin build --release`; `backend="auto"`
-picks the wheel up once installed). The C contender is preserved at tag
-`archive/backend-c`. Benchmarks, crossover measurements, complexity tables
-and the code-quality comparison are in `ANALYSIS.md`.
+The project is a maturin mixed Rust/Python package: `maturin build --release`
+produces the complete wheel (`Cargo.toml` + `src/lib.rs` are the native core;
+`torann/` is the Python package). Without the compiled module everything
+still runs on the pure-Python reference. The C contender from the phase-6
+bake-off is preserved at tag `archive/backend-c`. Benchmarks, crossover
+measurements, complexity tables and the code-quality comparison are in
+`ANALYSIS.md`.
