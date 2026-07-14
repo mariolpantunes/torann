@@ -72,7 +72,10 @@ class ToroidalNN:
 
     Args:
         seed: Seed for hash functions and tuning samples.
-        brute_threshold: Exact search while total points <= this.
+        brute_threshold: Exact search while total points <= this. ``None``
+            (default) picks the measured brute/LSH crossover of the backend:
+            4096 for python, 512 for the native backends (see ANALYSIS.md,
+            crossover section).
         num_tables: Tables L. ``None`` = tuned (default 16 without hints).
         resolution: Cells per dimension B >= 2. ``None`` = tuned (default 3).
         dims_per_table: Sampled dimensions K. ``None`` = closed-form bucket
@@ -85,10 +88,15 @@ class ToroidalNN:
             python), or an explicit name.
     """
 
+    # Measured brute/LSH crossover per backend (ANALYSIS.md): the NumPy
+    # brute path stays competitive to ~4-8k points against the python
+    # backend, while the native backends win from the smallest sizes tested.
+    _BRUTE_DEFAULTS = {"python": 4096, "c": 512, "rust": 512}
+
     def __init__(
         self,
         seed: int | None = None,
-        brute_threshold: int = 4096,
+        brute_threshold: int | None = None,
         num_tables: int | None = None,
         resolution: int | None = None,
         dims_per_table: int | None = None,
@@ -106,7 +114,8 @@ class ToroidalNN:
         if probes < 0:
             raise ValueError("probes must be >= 0")
 
-        self.brute_threshold = int(brute_threshold)
+        self.brute_threshold = None if brute_threshold is None \
+            else int(brute_threshold)
         self.num_tables = num_tables
         self.resolution = resolution
         self.dims_per_table = dims_per_table
@@ -152,7 +161,7 @@ class ToroidalNN:
         self._n_static = S.shape[0]
         self._k_hint = int(k) if k is not None else 2 * self._d
 
-        self._use_lsh = self.n_points > self.brute_threshold
+        self._use_lsh = self.n_points > self._threshold()
         if self._use_lsh:
             self._tune(radius)
             self._make_lsh()
@@ -189,7 +198,7 @@ class ToroidalNN:
         self._n_static = self.n_points  # old candidates are static now
         if C.size:
             self._arena = np.vstack([self._arena, C])
-        if not self._use_lsh and self.n_points > self.brute_threshold:
+        if not self._use_lsh and self.n_points > self._threshold():
             # Crossed the threshold: first (and only) full LSH build.
             self._use_lsh = True
             self._tune(None)
@@ -318,6 +327,13 @@ class ToroidalNN:
         self._pw = B ** np.arange(K, dtype=np.int64)
         logger.info("tuned: n=%d d=%d r_hat=%.3f -> B=%d K=%d L=%d",
                     n, d, r_hat, B, K, L)
+
+    def _threshold(self) -> int:
+        """Explicit brute_threshold, or the backend's measured crossover."""
+        if self.brute_threshold is not None:
+            return self.brute_threshold
+        name, _ = resolve_backend(self.backend)
+        return self._BRUTE_DEFAULTS.get(name, 4096)
 
     def _make_lsh(self) -> None:
         """Instantiate the backend and build both tiers from the arena."""

@@ -14,10 +14,10 @@ hash function, validated in low dimension before any implementation.
 | 3 | 2D experiments: concatenation law, bucket geometry, mini-ANN | `exploration/exp_2d.py`, figures | **concept approval** |
 | 4 | Implementation: single NN class (brute + LSH), batch queries, range post-filter | `src/` — **done 2026-07-14** | code review |
 | 5 | Benchmark & tuning at ESS scales (n, d, k = 2d) | `examples/benchmark.py` — first results in README | defaults locked |
-| 6.0 | Backend bake-off: facade/backend split, contract, conformance suite, harness | `src/backends/`, parametrised tests, `examples/bench_backends.py` | mechanical |
-| 6.1 | C backend: C kernels + thin Cython wrapper | branch `backend-c`, wheel `ann_backend_c` | passes conformance |
-| 6.2 | Rust backend: PyO3 + maturin | branch `backend-rust`, wheel `ann_backend_rust` | passes conformance |
-| 6.3 | Head-to-head analysis: speed grid, brute/LSH crossover, big-O, code quality, FAISS reference | `ANALYSIS.md` + artifact | **backend chosen, branch merged** |
+| 6.0 | Backend bake-off: facade/backend split, contract, conformance suite, harness | `src/backends/`, parametrised tests, `examples/bench_backends.py` — **done 2026-07-14** | mechanical |
+| 6.1 | C backend: C kernels + thin Cython wrapper | branch `backend-c`, wheel `ann_backend_c` — **done, conformant (byte-identical tables)** | passes conformance |
+| 6.2 | Rust backend: PyO3 + maturin | branch `backend-rust`, wheel `ann_backend_rust` — **done, conformant (byte-identical tables)** | passes conformance |
+| 6.3 | Head-to-head analysis: speed grid, brute/LSH crossover, big-O, code quality, FAISS reference | `ANALYSIS.md` — **done; recommendation: Rust; ESS epoch 80 ms (58×)** | **backend chosen, branch merged — awaiting decision** |
 
 Phase 4 implemented the gate outcomes as specified: L1-only `ToroidalNN` with
 the two-tier lifecycle (`fit(static, candidates)` / `query()` /

@@ -1,7 +1,10 @@
 # ann — toroidal L1 nearest-neighbour search for ESS
 
 Exact + approximate k-NN and range search on the unit torus `[0, 1)^d` under
-toroidal **L1** — the metric is the contract (see below). Pure Python + NumPy.
+toroidal **L1** — the metric is the contract (see below). The facade and the
+exact path are pure Python + NumPy; the LSH index runs on swappable backends
+(`python` reference, native `c` and `rust` — see `src/backends/CONTRACT.md`
+and `ANALYSIS.md` for the bake-off; ~80 ms per ESS epoch, 25–75× NumPy).
 
 Built for [ESS](https://github.com/mariolpantunes/ess): anchors that never
 move, candidate points that move a little every epoch, each candidate asking
@@ -84,7 +87,9 @@ nn.query(k=8, queries=Q)                # arbitrary external queries
 
 Knobs (all optional — tuning fills them in): `num_tables`, `resolution`,
 `dims_per_table`, `target_bucket_size` shape the recall/speed trade;
-`probes` (keep > 0 with a non-zero `staleness_budget`); `brute_threshold`.
+`probes`; `brute_threshold` (default: the backend's measured brute/LSH
+crossover — 4096 python, 512 native); `backend` (`"auto"` prefers the
+fastest installed of `c`, `rust`, `python`).
 
 ## Performance
 
@@ -131,9 +136,19 @@ the headroom target for a native backend (see PLAN.md phase 6).
 ## Development
 
 ```
-python -m unittest discover -s test    # lifecycle, recall, exactness, wrap
-python examples/benchmark.py           # ESS-workload strategies compared
+python -m unittest discover -s test    # conformance suite, per installed backend
+python examples/benchmark.py           # maintenance strategies (python backend)
+python examples/lifecycle_backends.py  # the ESS lifecycle, per backend
+python examples/bench_backends.py      # per-op grid over (n, d, backend)
+python examples/crossover.py           # brute vs LSH crossover n*(d, backend)
+python examples/compare_faiss_flat.py  # non-toroidal throughput vs FAISS
 python exploration/exp_1d.py           # regenerate the concept experiments
 python exploration/exp_2d.py
 python exploration/exp_update.py
 ```
+
+Native backends live on their branches (`backend-c`, `backend-rust`) until
+the phase-6 merge decision; built wheels install side by side
+(`pip install <wheel>`), and `backend="auto"` picks them up. Benchmarks,
+crossover measurements, complexity tables and the code-quality comparison
+are in `ANALYSIS.md`.
