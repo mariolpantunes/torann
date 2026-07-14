@@ -30,15 +30,21 @@ Contract (PLAN.md, gate outcomes 2026-07-13):
   closed-form bucket load, L from a recall target. Explicit constructor
   arguments always win over tuning.
 
-Below ``brute_threshold`` total points everything is answered by the exact
-blocked brute-force path.
+This class is a *facade*: it owns validation, tuning, hash-parameter drawing
+and the exact brute-force path (used below ``brute_threshold`` total
+points). The LSH index itself lives behind the backend contract in
+``src/backends/CONTRACT.md`` — pure NumPy (``python``, the reference), C
+(``c``) or Rust (``rust``); ``backend="auto"`` picks the fastest installed.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import numpy as np
+
+from .backends import resolve_backend
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +67,7 @@ class ToroidalNN:
         for epoch in range(E):
             idx, dist = nn.query()                # candidates vs everything
             new = move(nn.candidates, idx, dist)  # ESS force step
-            nn.update(new)                        # drift-budgeted refresh
+            nn.update(new)                        # selective refresh
         nn.promote(next_batch)                    # candidates -> static
 
     Args:
@@ -75,6 +81,8 @@ class ToroidalNN:
             ``max(32, k_hint)``.
         probes: Neighbour-cell probes per table per query.
         query_block_size: Queries per vectorised block.
+        backend: LSH backend — ``"auto"`` (first installed of c, rust,
+            python), or an explicit name.
     """
 
     def __init__(
@@ -87,6 +95,7 @@ class ToroidalNN:
         target_bucket_size: int | None = None,
         probes: int = 4,
         query_block_size: int = 1024,
+        backend: str = "auto",
     ):
         if resolution is not None and resolution < 2:
             raise ValueError("resolution must be >= 2")
@@ -104,6 +113,7 @@ class ToroidalNN:
         self.target_bucket_size = target_bucket_size
         self.probes = int(probes)
         self.query_block_size = int(query_block_size)
+        self.backend = backend
 
         self._rng = np.random.default_rng(seed)
         self._arena = np.empty((0, 0))
@@ -111,6 +121,7 @@ class ToroidalNN:
         self._d = 0
         self._use_lsh = False
         self._k_hint: int | None = None
+        self._lsh: Any = None  # backend instance; set when LSH mode engages
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -143,19 +154,16 @@ class ToroidalNN:
 
         self._use_lsh = self.n_points > self.brute_threshold
         if self._use_lsh:
-            self._pts32 = self._arena.astype(np.float32)
             self._tune(radius)
-            self._build_static()
-            self._build_candidates()
+            self._make_lsh()
         return self
 
     def update(self, coordinates: np.ndarray) -> None:
         """Move the candidate tier (one epoch step).
 
-        Coordinates are stored immediately (refinement always sees current
-        positions) and the refresh is *selective*: only points whose key
-        actually changed — i.e. that moved far enough to leave a cell — are
-        re-placed, by delete + merge. The index is exact after every update.
+        The refresh is *selective*: only points whose key actually changed —
+        i.e. that moved far enough to leave a cell — are re-placed, by
+        delete + merge. The index is exact after every update.
 
         Args:
             coordinates: (n_candidates, d) new positions, same order as the
@@ -167,43 +175,25 @@ class ToroidalNN:
             raise ValueError(
                 f"expected coordinates of shape {(self.n_candidates, self._d)}")
         self._arena[self._n_static:] = new
-        if not self._use_lsh:
-            return
-        self._pts32[self._n_static:] = new.astype(np.float32)
-        self._refresh_candidates()
+        if self._use_lsh:
+            self._lsh.update(np.ascontiguousarray(new))
 
     def promote(self, new_candidates: np.ndarray | None = None) -> None:
         """Freeze the candidate tier into the static tier and install a new
-        batch. The merge is linear (searchsorted + insert), never a re-sort;
-        candidate keys are rehashed exactly first, since they become static
-        for the rest of the run.
+        batch. The merge is linear (searchsorted + insert), never a re-sort.
         """
         self._check_fitted()
         C = self._as_batch(new_candidates)
-        if self._use_lsh and self.n_candidates:
-            # candidate keys are always fresh (update() is exact)
-            skeys = np.empty((self._L, self.n_points), dtype=np.int64)
-            sids = np.empty((self._L, self.n_points), dtype=np.int64)
-            for t in range(self._L):
-                p = np.searchsorted(self._skeys_s[t], self._skeys_c[t])
-                skeys[t] = np.insert(self._skeys_s[t], p, self._skeys_c[t])
-                sids[t] = np.insert(self._sids_s[t], p, self._sids_c[t])
-            self._skeys_s, self._sids_s = skeys, sids
-
+        if self._use_lsh:
+            self._lsh.promote(C)
         self._n_static = self.n_points  # old candidates are static now
         if C.size:
             self._arena = np.vstack([self._arena, C])
-        if self._use_lsh:
-            if C.size:
-                self._pts32 = np.vstack([self._pts32, C.astype(np.float32)])
-            self._build_candidates()
-        elif self.n_points > self.brute_threshold:
+        if not self._use_lsh and self.n_points > self.brute_threshold:
             # Crossed the threshold: first (and only) full LSH build.
             self._use_lsh = True
-            self._pts32 = self._arena.astype(np.float32)
             self._tune(None)
-            self._build_static()
-            self._build_candidates()
+            self._make_lsh()
 
     # ------------------------------------------------------------------ #
     # Queries
@@ -238,29 +228,9 @@ class ToroidalNN:
         if kq < 1:
             raise ValueError("k must be >= 1")
         Q, ex = self._resolve_queries(queries, exclude_ids)
-        m = Q.shape[0]
-
         if not self._use_lsh:
             return self._brute_query(Q, kq, ex)
-
-        idx = np.full((m, kq), -1, dtype=np.int64)
-        dst = np.full((m, kq), np.inf)
-        bs = self.query_block_size
-        for s in range(0, m, bs):
-            e = min(m, s + bs)
-            self._lsh_block(Q[s:e], kq, None if ex is None else ex[s:e],
-                            idx[s:e], dst[s:e])
-
-        reachable = self.n_points - (0 if ex is None else 1)
-        kk = min(kq, reachable)
-        if kk > 0:
-            short = np.flatnonzero(idx[:, kk - 1] == -1)
-            if short.size:  # prefix relaxation: k results, no brute force
-                bi, bd = self._relaxed_query(
-                    Q[short], kq, None if ex is None else ex[short])
-                idx[short] = bi
-                dst[short] = bd
-        return idx, dst
+        return self._lsh.query_knn(np.ascontiguousarray(Q), kq, ex)
 
     def query_radius(
         self,
@@ -281,9 +251,9 @@ class ToroidalNN:
         self._check_fitted()
         Q, ex = self._resolve_queries(queries, None)
         m = Q.shape[0]
-        out: list[tuple[np.ndarray, np.ndarray]] = []
 
         if not self._use_lsh or exact:
+            out: list[tuple[np.ndarray, np.ndarray]] = []
             block = max(1, _BRUTE_BUDGET // max(1, self.n_points * self._d))
             for s in range(0, m, block):
                 e = min(m, s + block)
@@ -296,25 +266,13 @@ class ToroidalNN:
                     out.append((ids[order], row[ids[order]]))
             return out
 
-        bs = self.query_block_size
-        for s in range(0, m, bs):
-            e = min(m, s + bs)
-            Qb = Q[s:e]
-            qids, cands = self._gather(Qb)
-            if ex is not None and qids.size:
-                keep = cands != ex[s:e][qids]
-                qids, cands = qids[keep], cands[keep]
-            dist = self._refine(Qb, qids, cands)
-            keep = dist <= radius
-            qids, cands, dist = qids[keep], cands[keep], dist[keep]
-            order = np.argsort(qids * np.float64(self._d + 1) + dist)
-            qids, cands, dist = qids[order], cands[order], dist[order]
-            bounds = np.cumsum(np.bincount(qids, minlength=Qb.shape[0]))[:-1]
-            out.extend(zip(np.split(cands, bounds), np.split(dist, bounds)))
-        return out
+        indptr, ids, dst = self._lsh.query_radius(
+            np.ascontiguousarray(Q), float(radius), ex)
+        return [(ids[indptr[i]:indptr[i + 1]], dst[indptr[i]:indptr[i + 1]])
+                for i in range(m)]
 
     # ------------------------------------------------------------------ #
-    # Tuning and table construction
+    # Tuning and backend construction
     # ------------------------------------------------------------------ #
 
     def _tune(self, radius: float | None) -> None:
@@ -361,198 +319,18 @@ class ToroidalNN:
         logger.info("tuned: n=%d d=%d r_hat=%.3f -> B=%d K=%d L=%d",
                     n, d, r_hat, B, K, L)
 
-    def _table_codes(self, X: np.ndarray, t: int) -> tuple[np.ndarray, np.ndarray]:
-        frac = np.mod(X[:, self._S[t]] + self._U[t], 1.0) * self._B
-        codes = frac.astype(np.int64)
-        np.minimum(codes, self._B - 1, out=codes)  # guard float round-up
-        return codes, np.clip(frac - codes, 0.0, 1.0)
-
-    def _tier_keys(self, ids: np.ndarray) -> np.ndarray:
-        keys = np.empty((self._L, ids.size), dtype=np.int64)
-        for t in range(self._L):
-            codes, _ = self._table_codes(self._arena[ids], t)
-            keys[t] = (codes * self._pw).sum(axis=1)
-        return keys
-
-    def _build_static(self) -> None:
-        ids = np.arange(self._n_static)
-        keys = self._tier_keys(ids)
-        order = np.argsort(keys, axis=1, kind="stable")
-        self._skeys_s = np.take_along_axis(keys, order, axis=1)
-        self._sids_s = order  # static ids start at 0
-
-    def _build_candidates(self) -> None:
-        ids = np.arange(self._n_static, self.n_points)
-        self._cand_sids = ids
-        self._keys_c = self._tier_keys(ids)  # unsorted, aligned to ids
-        order = np.argsort(self._keys_c, axis=1, kind="stable")
-        self._skeys_c = np.take_along_axis(self._keys_c, order, axis=1)
-        self._sids_c = ids[order]
-
-    def _refresh_candidates(self) -> None:
-        """Selective candidate refresh: re-place only the points whose key
-        actually changed — i.e. that moved far enough to leave a cell — via
-        delete + merge, never a full re-sort."""
-        ids = self._cand_sids
-        new_keys = self._tier_keys(ids)
-        off = self._n_static
-        for t in range(self._L):
-            moved = new_keys[t] != self._keys_c[t]
-            if not moved.any():
-                continue
-            keep = ~moved[self._sids_c[t] - off]
-            sk, si = self._skeys_c[t][keep], self._sids_c[t][keep]
-            order = np.argsort(new_keys[t][moved], kind="stable")
-            nk = new_keys[t][moved][order]
-            ni = ids[moved][order]
-            p = np.searchsorted(sk, nk)
-            self._skeys_c[t] = np.insert(sk, p, nk)
-            self._sids_c[t] = np.insert(si, p, ni)
-        self._keys_c = new_keys
+    def _make_lsh(self) -> None:
+        """Instantiate the backend and build both tiers from the arena."""
+        name, cls = resolve_backend(self.backend)
+        self.backend_name = name
+        self._lsh = cls(self._B, self._K, self._L, self.probes,
+                        self._S, self._U, self.query_block_size)
+        self._lsh.build(np.ascontiguousarray(self._arena), self._n_static)
+        logger.info("LSH backend: %s", name)
 
     # ------------------------------------------------------------------ #
-    # Query internals
+    # Exact path
     # ------------------------------------------------------------------ #
-
-    def _lsh_block(self, Qb, k, exb, idx_view, dst_view) -> None:
-        qids, cands = self._gather(Qb)
-        self._finish_topk(Qb, k, exb, qids, cands, idx_view, dst_view)
-
-    def _finish_topk(self, Qb, k, exb, qids, cands, idx_view, dst_view) -> None:
-        if exb is not None and qids.size:
-            keep = cands != exb[qids]
-            qids, cands = qids[keep], cands[keep]
-        if qids.size == 0:
-            return
-        dist = self._refine(Qb, qids, cands)
-        # Top-k per query: qids is ascending, so one composite float key
-        # replaces a two-pass lexsort (distances < d keep segments disjoint).
-        order = np.argsort(qids * np.float64(self._d + 1) + dist)
-        sq, sc, sd = qids[order], cands[order], dist[order]
-        counts = np.bincount(sq, minlength=Qb.shape[0])
-        starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
-        rank = np.arange(sq.size) - starts[sq]
-        keep = rank < k
-        idx_view[sq[keep], rank[keep]] = sc[keep]
-        dst_view[sq[keep], rank[keep]] = sd[keep]
-
-    def _relaxed_query(self, Q, k, ex) -> tuple[np.ndarray, np.ndarray]:
-        """k-NN for queries whose probed buckets under-filled, without brute
-        force: keys are digit-concatenations ``sum(code_j * B**j)``, so the
-        sorted key arrays are in lexicographic digit order and dropping the
-        low ``lev`` digits turns a bucket into a contiguous key range
-        ``[key//B**lev * B**lev, +B**lev)``. Each query widens level by level
-        until enough raw candidates exist; level K spans the whole table, so
-        k results are structurally guaranteed — two searchsorted calls per
-        table per level, never a distance scan of the dataset.
-        """
-        m, n = Q.shape[0], self.n_points
-        tiers = [(self._skeys_s, self._sids_s)]
-        if self.n_candidates:
-            tiers.append((self._skeys_c, self._sids_c))
-        base = np.empty((self._L, m), dtype=np.int64)
-        for t in range(self._L):
-            codes, _ = self._table_codes(Q, t)
-            base[t] = (codes * self._pw).sum(axis=1)
-
-        need = 4 * k
-        level = np.full(m, self._K, dtype=np.int64)
-        active = np.ones(m, dtype=bool)
-        for lev in range(1, self._K):
-            if not active.any():
-                break
-            width = self._B ** lev
-            aidx = np.flatnonzero(active)
-            counts = np.zeros(aidx.size, dtype=np.int64)
-            for t in range(self._L):
-                lo_key = base[t, aidx] // width * width
-                for skeys, _ in tiers:
-                    lo = np.searchsorted(skeys[t], lo_key, side="left")
-                    hi = np.searchsorted(skeys[t], lo_key + width, side="left")
-                    counts += hi - lo
-            done = counts >= need
-            level[aidx[done]] = lev
-            active[aidx[done]] = False
-
-        chunks = []
-        for lev in np.unique(level):
-            gidx = np.flatnonzero(level == lev)
-            width = self._B ** lev
-            # Level K covers every point: one pass per tier is exhaustive.
-            for t in range(self._L) if lev < self._K else (0,):
-                lo_key = base[t, gidx] // width * width
-                for skeys, sids in tiers:
-                    lo = np.searchsorted(skeys[t], lo_key, side="left")
-                    hi = np.searchsorted(skeys[t], lo_key + width, side="left")
-                    cnt = hi - lo
-                    total = int(cnt.sum())
-                    if total == 0:
-                        continue
-                    seg = np.cumsum(cnt) - cnt
-                    pos = np.arange(total) + np.repeat(lo - seg, cnt)
-                    chunks.append(np.repeat(gidx, cnt) * n + sids[t, pos])
-
-        idx = np.full((m, k), -1, dtype=np.int64)
-        dst = np.full((m, k), np.inf)
-        if chunks:
-            pairs = np.concatenate(chunks)
-            pairs.sort()
-            keep = np.empty(pairs.size, dtype=bool)
-            keep[0] = True
-            np.not_equal(pairs[1:], pairs[:-1], out=keep[1:])
-            pairs = pairs[keep]
-            self._finish_topk(Q, k, ex, pairs // n, pairs % n, idx, dst)
-        return idx, dst
-
-    def _gather(self, Qb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Deduplicated (query_row, point_id) pairs across tables and tiers."""
-        n = self.n_points
-        tiers = [(self._skeys_s, self._sids_s)]
-        if self.n_candidates:
-            tiers.append((self._skeys_c, self._sids_c))
-        chunks = []
-        for t in range(self._L):
-            codes, f = self._table_codes(Qb, t)
-            keys = (codes * self._pw).sum(axis=1)
-            nprobe = min(self.probes, self._K)
-            if nprobe > 0:
-                dirs = np.where(f >= 0.5, 1, -1)
-                alt = (codes + dirs) % self._B
-                key_delta = (alt - codes) * self._pw
-                closeness = np.minimum(f, 1.0 - f)
-                top = np.argpartition(closeness, nprobe - 1, axis=1)[:, :nprobe]
-                probe_keys = keys[:, None] + np.take_along_axis(key_delta, top, axis=1)
-                all_keys = np.concatenate([keys[:, None], probe_keys], axis=1)
-            else:
-                all_keys = keys[:, None]
-            flat = all_keys.ravel()
-            key_qrow = np.arange(flat.size) // all_keys.shape[1]
-            for skeys, sids in tiers:
-                lo = np.searchsorted(skeys[t], flat, side="left")
-                hi = np.searchsorted(skeys[t], flat, side="right")
-                counts = hi - lo
-                total = int(counts.sum())
-                if total == 0:
-                    continue
-                seg = np.cumsum(counts) - counts
-                pos = np.arange(total) + np.repeat(lo - seg, counts)
-                chunks.append(np.repeat(key_qrow, counts) * n + sids[t, pos])
-        if not chunks:
-            empty = np.empty(0, dtype=np.int64)
-            return empty, empty
-        pairs = np.concatenate(chunks)
-        pairs.sort()  # sort + neighbour-diff dedupe, grouped by query row
-        keep = np.empty(pairs.size, dtype=bool)
-        keep[0] = True
-        np.not_equal(pairs[1:], pairs[:-1], out=keep[1:])
-        pairs = pairs[keep]
-        return pairs // n, pairs % n
-
-    def _refine(self, Qb, qids, cands) -> np.ndarray:
-        q32 = Qb.astype(np.float32)
-        delta = np.abs(q32[qids] - self._pts32[cands])
-        np.minimum(delta, np.float32(1.0) - delta, out=delta)
-        return delta.sum(axis=1)
 
     def _pairwise(self, Qb: np.ndarray) -> np.ndarray:
         diff = np.abs(Qb[:, None, :] - self._arena[None, :, :])

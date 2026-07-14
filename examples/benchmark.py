@@ -52,7 +52,7 @@ def run(strategy):
     static = rng.random((N_STATIC, D))
     batch = rng.random((BATCH, D))
 
-    nn = ToroidalNN(seed=1)
+    nn = ToroidalNN(seed=1, backend="python")  # strategy probes are py-only
     t0 = time.perf_counter()
     nn.fit(static, batch, k=K)
     t_maint = time.perf_counter() - t0
@@ -66,19 +66,24 @@ def run(strategy):
 
             step = rng.normal(0, SIGMA, (nn.n_candidates, D))
             new = np.mod(nn.candidates + step, 1.0)
-            keys_before = nn._keys_c.copy() if strategy == "selective" else None
+            keys_before = (nn._lsh.tables()["cand_keys"]
+                           if strategy == "selective" else None)
             t0 = time.perf_counter()
             if strategy == "refit":
                 pts = nn._arena[:nn.n_static].copy()
-                nn = ToroidalNN(seed=1)
+                nn = ToroidalNN(seed=1, backend="python")
                 nn.fit(pts, new, k=K)
             elif strategy == "tier-sort":
+                # full candidate-tier rebuild (python backend internals)
                 nn._arena[nn.n_static:] = new
-                nn._pts32[nn.n_static:] = new.astype(np.float32)
-                nn._build_candidates()
+                lsh = nn._lsh
+                lsh._pts[lsh.n_static:] = new
+                lsh._pts32[lsh.n_static:] = new.astype(np.float32)
+                lsh._build_candidates()
             else:
                 nn.update(new)
-                moved.append(float((nn._keys_c != keys_before).mean()))
+                moved.append(
+                    float((nn._lsh.tables()["cand_keys"] != keys_before).mean()))
             t_maint += time.perf_counter() - t0
         recalls.append(sample_recall(nn, rng))
 

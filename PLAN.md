@@ -14,6 +14,10 @@ hash function, validated in low dimension before any implementation.
 | 3 | 2D experiments: concatenation law, bucket geometry, mini-ANN | `exploration/exp_2d.py`, figures | **concept approval** |
 | 4 | Implementation: single NN class (brute + LSH), batch queries, range post-filter | `src/` — **done 2026-07-14** | code review |
 | 5 | Benchmark & tuning at ESS scales (n, d, k = 2d) | `examples/benchmark.py` — first results in README | defaults locked |
+| 6.0 | Backend bake-off: facade/backend split, contract, conformance suite, harness | `src/backends/`, parametrised tests, `examples/bench_backends.py` | mechanical |
+| 6.1 | C backend: C kernels + thin Cython wrapper | branch `backend-c`, wheel `ann_backend_c` | passes conformance |
+| 6.2 | Rust backend: PyO3 + maturin | branch `backend-rust`, wheel `ann_backend_rust` | passes conformance |
+| 6.3 | Head-to-head analysis: speed grid, brute/LSH crossover, big-O, code quality, FAISS reference | `ANALYSIS.md` + artifact | **backend chosen, branch merged** |
 
 Phase 4 implemented the gate outcomes as specified: L1-only `ToroidalNN` with
 the two-tier lifecycle (`fit(static, candidates)` / `query()` /
@@ -141,28 +145,48 @@ metric changes.
    `promote(new_batch)` merges the candidate tier into the static tier
    (linear merge of sorted arrays, no re-sort) and installs the new batch.
 
-## Phase 6 — native backend (agreed direction)
+## Phase 6 — backend bake-off (plan approved 2026-07-14)
 
 The NumPy pipeline is memory-bound: refinement materialises (pairs × d)
 temporaries and every stage round-trips RAM. FAISS on the same data
 (`examples/compare_faiss.py`) shows SIMD C++ is ~40–150× faster, which puts
-millisecond epochs in reach. Chosen backend: **C++ via pybind11** (or plain
-C + cffi) — one extension module exposing three batch kernels:
+millisecond epochs in reach. Rather than picking a backend on paper, **two
+are implemented and compared**: C kernels + a thin Cython wrapper
+(`backend-c`) and Rust + PyO3/maturin (`backend-rust`), one branch each.
 
-1. fused gather+refine: bucket ranges → toroidal L1 distances without
-   materialising candidate matrices (AVX-friendly: `|a−b|`, `min(x, 1−x)`,
-   horizontal add);
-2. per-query top-k (heap per query, OpenMP over queries);
-3. key computation + selective merge for updates.
+**Division of labour.** Pure Python (3.10+, NumPy) keeps the brute-force
+path, the tuner, and the drawing of hash parameters; the *entire* LSH index
+(keys, sorted tables, multi-probe gather, fused gather+refine, top-k,
+prefix relaxation, selective update, promote-merge) moves behind the
+backend contract (`src/backends/CONTRACT.md`). Hash parameters are drawn in
+Python and passed in, so all backends produce **byte-identical tables** for
+the same seed — conformance is exact equality, not "recall looks similar".
+Native backends ship as separate wheels (`ann_backend_c.CLshIndex`,
+`ann_backend_rust.RustLshIndex`) so both can be installed side by side and
+benchmarked in one process.
 
-Rationale: matches the NumPy buffer protocol zero-copy, OpenMP for the
-embarrassingly parallel query batches, and the same stack FAISS itself uses.
-Rust/PyO3 was considered and set aside (owner's preference; binding overhead
-is irrelevant for batched calls, but there is no upside here either). Numba
-is the cheap intermediate step (~10–20× on the refine kernel with `prange`)
-if a pure-pip install must be preserved. The Python class stays as the
-orchestrator and reference implementation; kernels are swapped per
-availability.
+**Analysis deliverables** (`ANALYSIS.md`, phase 6.3):
+
+1. Speed grid — fit / query (µs/q) / update / promote per backend, over
+   n ∈ {20k, 100k, 500k}, d ∈ {8, 16, 32}, k = 2d, 1 and 16 threads, plus
+   the ESS lifecycle benchmark per backend.
+2. **Brute-vs-LSH crossover, made explicit.** With tuned
+   K = log_B(n/T) the candidate pool is ~L·(1+probes)·T, constant in n, so
+   LSH queries are O(log n) vs brute's O(n·d) — LSH wins roughly when
+   n > L·(1+probes)·T, *at a stated recall* (≥ 0.95), *after* the build is
+   amortised (break-even query count q\*). Measured n\*(d, backend) plots;
+   each backend's `brute_threshold` default is set from its measured n\*.
+3. Big-O table (brute vs LSH ops; identical asymptotics across backends —
+   the C/Rust comparison is constant factors, measured).
+4. Code-quality comparison: LOC, build/packaging, dependencies, safety
+   incidents during development, FFI and parallelism ergonomics,
+   maintenance outlook.
+5. FAISS reference on *non-toroidal* ground truth: data drawn in
+   [0.25, 0.75]^d so no true neighbour wraps and toroidal L1 = plain L1;
+   recall-vs-throughput vs IndexFlat(L1) / HNSW at n up to 1M.
+
+Numba remains the noted stopgap if a pure-pip install must be preserved.
+The Python backend stays permanently as the reference implementation.
 
 ## Remaining open question
 
