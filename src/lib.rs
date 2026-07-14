@@ -23,21 +23,48 @@ fn lower_bound(a: &[i64], v: i64) -> usize {
     a.partition_point(|&x| x < v)
 }
 
-/// Upper bound: first index whose value is > v.
-#[inline]
-fn upper_bound(a: &[i64], v: i64) -> usize {
-    a.partition_point(|&x| x <= v)
-}
-
+/// Toroidal L1 in f32. Eight parallel accumulators break the serial
+/// float-add dependency so LLVM vectorizes the loop (one AVX lane set);
+/// f32 addition is not associative, so the plain `s +=` form cannot be
+/// auto-vectorized and runs scalar. Summation order differs from NumPy's
+/// pairwise sum either way — the contract allows 1e-5.
 #[inline]
 fn dist_l1_32(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    for (ca, cb) in a.chunks_exact(8).zip(b.chunks_exact(8)) {
+        for j in 0..8 {
+            let t = (ca[j] - cb[j]).abs();
+            let w = 1.0f32 - t;
+            acc[j] += if t < w { t } else { w };
+        }
+    }
     let mut s = 0.0f32;
-    for j in 0..a.len() {
-        let t = (a[j] - b[j]).abs();
+    for (x, y) in a.chunks_exact(8).remainder().iter()
+        .zip(b.chunks_exact(8).remainder()) {
+        let t = (x - y).abs();
         let w = 1.0f32 - t;
         s += if t < w { t } else { w };
     }
-    s
+    s + acc.iter().sum::<f32>()
+}
+
+/// Hint the cache that an address is about to be read (gather and refine
+/// walk effectively random locations, so the hardware prefetcher cannot
+/// help). No-op off x86_64. Safety: prefetch never faults, and every call
+/// site passes an in-bounds reference anyway.
+#[inline(always)]
+fn prefetch<T>(r: &T) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::x86_64::_mm_prefetch(
+            r as *const T as *const i8,
+            core::arch::x86_64::_MM_HINT_T0,
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = r;
+    }
 }
 
 /// Bounded max-heap of (distance bits, id); f32 bit patterns of
@@ -106,13 +133,15 @@ impl TopK {
 
 /// Per-worker query workspace (rayon `map_init`).
 struct Ws {
-    stamp: Vec<i64>,
-    stamp_now: i64,
+    stamp: Vec<u32>,
+    stamp_now: u32,
     cand: Vec<i64>,
     q32: Vec<f32>,
     codes: Vec<i64>,
     frac: Vec<f64>,
     clos: Vec<f64>,
+    kbuf: Vec<(u32, i64)>, // (table, key) of every probe of one query
+    base: Vec<usize>,      // batched lower_bound state, aligned to kbuf
 }
 
 impl Ws {
@@ -125,6 +154,8 @@ impl Ws {
             codes: vec![0; k_dims],
             frac: vec![0.0; k_dims],
             clos: vec![0.0; k_dims],
+            kbuf: Vec::new(),
+            base: Vec::new(),
         }
     }
 }
@@ -148,6 +179,19 @@ struct RustLshIndex {
     keys_c: Vec<i64>,
     skeys_c: Vec<i64>,
     sids_c: Vec<i64>,
+    stats: QueryStats,
+}
+
+/// Cumulative per-phase query timing (CPU-ns summed across rayon workers)
+/// — the built-in profiler behind `stats()` / `reset_stats()`.
+#[derive(Default)]
+struct QueryStats {
+    gather_ns: std::sync::atomic::AtomicU64,
+    refine_ns: std::sync::atomic::AtomicU64,
+    relax_ns: std::sync::atomic::AtomicU64,
+    queries: std::sync::atomic::AtomicU64,
+    cands: std::sync::atomic::AtomicU64,
+    relaxed: std::sync::atomic::AtomicU64,
 }
 
 impl RustLshIndex {
@@ -244,27 +288,6 @@ impl RustLshIndex {
         )
     }
 
-    fn gather_bucket(&self, ws: &mut Ws, t: usize, key: i64) {
-        let (sk, si) = self.stat(t);
-        let (lo, hi) = (lower_bound(sk, key), upper_bound(sk, key));
-        for &id in &si[lo..hi] {
-            if ws.stamp[id as usize] != ws.stamp_now {
-                ws.stamp[id as usize] = ws.stamp_now;
-                ws.cand.push(id);
-            }
-        }
-        if self.n_cand() > 0 {
-            let (sk, si) = self.cand_tier(t);
-            let (lo, hi) = (lower_bound(sk, key), upper_bound(sk, key));
-            for &id in &si[lo..hi] {
-                if ws.stamp[id as usize] != ws.stamp_now {
-                    ws.stamp[id as usize] = ws.stamp_now;
-                    ws.cand.push(id);
-                }
-            }
-        }
-    }
-
     /// Codes + in-cell fractions of one query for one table.
     fn query_codes(&self, x: &[f64], t: usize, ws: &mut Ws) -> i64 {
         let st = &self.s[t * self.kdim..(t + 1) * self.kdim];
@@ -284,13 +307,20 @@ impl RustLshIndex {
     }
 
     /// Multi-probe gather across all tables into ws.cand (deduplicated).
+    ///
+    /// The L(1+probes) bucket lookups of one query are independent chains
+    /// of random cache misses, so the static-tier binary searches run
+    /// *batched*: one level-synchronous branchless lower_bound over all
+    /// keys at once, keeping every miss chain in flight simultaneously
+    /// (memory-level parallelism — the FAISS lesson applied to lookups).
     fn gather_query(&self, ws: &mut Ws, x: &[f64]) {
         ws.stamp_now += 1;
         ws.cand.clear();
+        ws.kbuf.clear();
         let nprobe = self.probes.min(self.kdim);
         for t in 0..self.l {
             let key = self.query_codes(x, t, ws);
-            self.gather_bucket(ws, t, key);
+            ws.kbuf.push((t as u32, key));
             for j in 0..self.kdim {
                 let f = ws.frac[j];
                 ws.clos[j] = f.min(1.0 - f);
@@ -309,13 +339,68 @@ impl RustLshIndex {
                 let dir: i64 = if f >= 0.5 { 1 } else { -1 };
                 let alt = (ws.codes[best] + dir).rem_euclid(self.b);
                 let pkey = key + (alt - ws.codes[best]) * self.pw[best];
-                self.gather_bucket(ws, t, pkey);
+                ws.kbuf.push((t as u32, pkey));
+            }
+        }
+
+        // Static tier: batched branchless lower_bound, then bucket scans.
+        let m = ws.kbuf.len();
+        let ns = self.n_static;
+        if ns > 0 {
+            ws.base.clear();
+            ws.base.resize(m, 0);
+            // No prefetch here: 120 independent chains already saturate
+            // the load buffers; explicit hints measured slower.
+            let mut len = ns;
+            while len > 1 {
+                let half = len / 2;
+                for i in 0..m {
+                    let (t, key) = ws.kbuf[i];
+                    let sk = &self.skeys_s[t as usize * ns..(t as usize + 1) * ns];
+                    let b = ws.base[i];
+                    ws.base[i] = b + usize::from(sk[b + half - 1] < key) * half;
+                }
+                len -= half;
+            }
+            for i in 0..m {
+                let (t, key) = ws.kbuf[i];
+                let sk = &self.skeys_s[t as usize * ns..(t as usize + 1) * ns];
+                let si = &self.sids_s[t as usize * ns..(t as usize + 1) * ns];
+                let mut lo = ws.base[i] + usize::from(sk[ws.base[i]] < key);
+                while lo < ns && sk[lo] == key {
+                    let id = si[lo] as usize;
+                    if ws.stamp[id] != ws.stamp_now {
+                        ws.stamp[id] = ws.stamp_now;
+                        ws.cand.push(si[lo]);
+                    }
+                    lo += 1;
+                }
+            }
+        }
+        // Candidate tier: small (one batch), plain per-key search.
+        if self.n_cand() > 0 {
+            for i in 0..m {
+                let (t, key) = ws.kbuf[i];
+                let (sk, si) = self.cand_tier(t as usize);
+                let mut lo = lower_bound(sk, key);
+                while lo < sk.len() && sk[lo] == key {
+                    let id = si[lo] as usize;
+                    if ws.stamp[id] != ws.stamp_now {
+                        ws.stamp[id] = ws.stamp_now;
+                        ws.cand.push(si[lo]);
+                    }
+                    lo += 1;
+                }
             }
         }
     }
 
     fn refine_topk(&self, ws: &Ws, top: &mut TopK, ex: i64) {
-        for &id in &ws.cand {
+        const PF: usize = 8; // prefetch distance, rows ahead
+        for (i, &id) in ws.cand.iter().enumerate() {
+            if let Some(&nid) = ws.cand.get(i + PF) {
+                prefetch(&self.pts32[nid as usize * self.d]);
+            }
             if id == ex {
                 continue;
             }
@@ -432,6 +517,7 @@ impl RustLshIndex {
             keys_c: Vec::new(),
             skeys_c: Vec::new(),
             sids_c: Vec::new(),
+            stats: QueryStats::default(),
         })
     }
 
@@ -587,18 +673,32 @@ impl RustLshIndex {
                 .for_each_init(
                     || (Ws::new(self.n_points, d, self.kdim), TopK::new(k)),
                     |(ws, top), (qi, (row_idx, row_dst))| {
+                        use std::sync::atomic::Ordering::Relaxed;
                         let x = &q[qi * d..(qi + 1) * d];
                         for j in 0..d {
                             ws.q32[j] = x[j] as f32;
                         }
                         let exq = ex.as_ref().map_or(-1, |e| e[qi]);
+                        let t0 = std::time::Instant::now();
                         self.gather_query(ws, x);
+                        let t1 = std::time::Instant::now();
                         top.clear();
                         self.refine_topk(ws, top, exq);
+                        let t2 = std::time::Instant::now();
+                        let st = &self.stats;
+                        st.cands.fetch_add(ws.cand.len() as u64, Relaxed);
                         if top.heap.len() < kk {
                             self.relax_query(ws, top, x, k, exq);
+                            st.relax_ns.fetch_add(
+                                t2.elapsed().as_nanos() as u64, Relaxed);
+                            st.relaxed.fetch_add(1, Relaxed);
                         }
                         top.emit(row_idx, row_dst);
+                        st.gather_ns
+                            .fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
+                        st.refine_ns
+                            .fetch_add((t2 - t1).as_nanos() as u64, Relaxed);
+                        st.queries.fetch_add(1, Relaxed);
                     },
                 );
         });
@@ -706,6 +806,30 @@ impl RustLshIndex {
             self.sids_c.clone().into_pyarray(py).reshape([self.l, nc])?,
         )?;
         Ok(d)
+    }
+
+    /// Cumulative query-phase profile: CPU-ns summed across workers, plus
+    /// gathered-candidate and relaxation counters. Reset with reset_stats().
+    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let d = PyDict::new(py);
+        d.set_item("gather_ns", self.stats.gather_ns.load(Relaxed))?;
+        d.set_item("refine_ns", self.stats.refine_ns.load(Relaxed))?;
+        d.set_item("relax_ns", self.stats.relax_ns.load(Relaxed))?;
+        d.set_item("queries", self.stats.queries.load(Relaxed))?;
+        d.set_item("cands", self.stats.cands.load(Relaxed))?;
+        d.set_item("relaxed", self.stats.relaxed.load(Relaxed))?;
+        Ok(d)
+    }
+
+    fn reset_stats(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.stats.gather_ns.store(0, Relaxed);
+        self.stats.refine_ns.store(0, Relaxed);
+        self.stats.relax_ns.store(0, Relaxed);
+        self.stats.queries.store(0, Relaxed);
+        self.stats.cands.store(0, Relaxed);
+        self.stats.relaxed.store(0, Relaxed);
     }
 
     #[getter]
