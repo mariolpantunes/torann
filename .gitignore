@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+*.so
+target/
+examples/out/
+exploration/out/
+.claude/
