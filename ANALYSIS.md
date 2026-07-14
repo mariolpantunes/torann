@@ -270,8 +270,12 @@ asymmetries that remain:
   real bug of this bake-off was a silent C one), inline bindings (no
   second wrapper language).
 
-**Recommendation: merge `backend-rust`**, keep `backend-c` as a branch (it
+**Recommendation: merge `backend-rust`**, keep `backend-c` archived (it
 is conformant and interchangeable — the contract makes swapping trivial),
 and keep the python backend as the permanent reference implementation.
 If day-to-day C fluency matters more than the packaging/safety margin,
 merging `backend-c` instead loses nothing measurable at ESS scale.
+
+*Decision (2026-07-14): Rust merged — Mário's call, citing Rust's
+robustness as the base for a better implementation. The C backend is
+preserved in full at tag `archive/backend-c`.*

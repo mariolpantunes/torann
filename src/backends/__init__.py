@@ -5,20 +5,20 @@ update, promote-merge, multi-probe k-NN with prefix relaxation, and range
 queries. The facade (``src.ann.ToroidalNN``) owns validation, tuning,
 parameter drawing and the exact brute-force path, and is backend-agnostic.
 
-Backends implement the contract in ``CONTRACT.md``. Native backends are
-separate installable wheels; they register here by module name:
+Backends implement the contract in ``CONTRACT.md``:
 
 * ``python`` — ``src.backends.python.PythonLshIndex`` (always available,
   the reference implementation)
-* ``c``      — ``ann_backend_c.CLshIndex`` (C kernels + Cython wrapper)
-* ``rust``   — ``ann_backend_rust.RustLshIndex`` (PyO3 + maturin)
+* ``rust``   — ``ann_backend_rust.RustLshIndex`` (PyO3 + maturin; the
+  chosen native backend — the C contender lives at tag
+  ``archive/backend-c``, see ANALYSIS.md)
 """
 
 from __future__ import annotations
 
 __all__ = ["get_backend", "resolve_backend", "available_backends"]
 
-_AUTO_ORDER = ("c", "rust", "python")
+_AUTO_ORDER = ("rust", "python")
 
 
 def get_backend(name: str):
@@ -26,9 +26,6 @@ def get_backend(name: str):
     if name == "python":
         from .python import PythonLshIndex
         return PythonLshIndex
-    if name == "c":
-        from ann_backend_c import CLshIndex
-        return CLshIndex
     if name == "rust":
         from ann_backend_rust import RustLshIndex
         return RustLshIndex

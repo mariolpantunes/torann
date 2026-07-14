@@ -147,8 +147,8 @@ python exploration/exp_2d.py
 python exploration/exp_update.py
 ```
 
-Native backends live on their branches (`backend-c`, `backend-rust`) until
-the phase-6 merge decision; built wheels install side by side
-(`pip install <wheel>`), and `backend="auto"` picks them up. Benchmarks,
-crossover measurements, complexity tables and the code-quality comparison
-are in `ANALYSIS.md`.
+The Rust backend was chosen in the phase-6 bake-off and lives in
+`native/rust` (built with `maturin build --release`; `backend="auto"`
+picks the wheel up once installed). The C contender is preserved at tag
+`archive/backend-c`. Benchmarks, crossover measurements, complexity tables
+and the code-quality comparison are in `ANALYSIS.md`.

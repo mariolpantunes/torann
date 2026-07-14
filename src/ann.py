@@ -91,7 +91,7 @@ class ToroidalNN:
     # Measured brute/LSH crossover per backend (ANALYSIS.md): the NumPy
     # brute path stays competitive to ~4-8k points against the python
     # backend, while the native backends win from the smallest sizes tested.
-    _BRUTE_DEFAULTS = {"python": 4096, "c": 512, "rust": 512}
+    _BRUTE_DEFAULTS = {"python": 4096, "rust": 512}
 
     def __init__(
         self,

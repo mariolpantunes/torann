@@ -90,8 +90,8 @@ own copy of the points (float64 for keys, float32 for distance refinement).
 
 ## Packaging
 
-Native backends are separate wheels so several can coexist in one
-environment: module `ann_backend_c` exports `CLshIndex`, module
-`ann_backend_rust` exports `RustLshIndex`. `src/backends/__init__.py`
-resolves names; `backend="auto"` picks the first installed of
-`c, rust, python`.
+The native backend is a separate wheel: module `ann_backend_rust` exports
+`RustLshIndex`. `src/backends/__init__.py` resolves names;
+`backend="auto"` picks the first installed of `rust, python`. (The C
+contender from the phase-6 bake-off is preserved at tag
+`archive/backend-c`; it implements this same contract.)
