@@ -7,7 +7,7 @@ q* = fit_time / (brute - lsh per-query saving). The crossover n*(d, backend)
 is the smallest n where LSH answers faster than brute *and* recall >= 0.95.
 
 Run from the repository root:
-  python examples/crossover.py [--dims 8,16,32] [--backends python,c,rust]
+  python examples/crossover.py [--dims 8,16,32] [--backends python,rust]
 """
 
 import argparse

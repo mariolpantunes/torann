@@ -7,7 +7,7 @@ both systems answer the same ground truth (computed by exact FAISS Flat).
 
 Run from the repository root:
   python examples/compare_faiss_flat.py [--sizes 100000,500000,1000000]
-                                        [--dims 16,32] [--backends c,rust]
+                                        [--dims 16,32] [--backends rust]
 """
 
 import argparse

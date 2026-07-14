@@ -6,7 +6,7 @@ per batch, sigma=0.01 drift. Reports wall time of fit / query / maintenance
 feels), and recall on a sample at the last epoch of each batch.
 
 Run from the repository root:
-  python examples/lifecycle_backends.py [--backends python,c,rust]
+  python examples/lifecycle_backends.py [--backends python,rust]
 """
 
 import argparse

@@ -89,43 +89,41 @@ nn.query(k=8, queries=Q)                # arbitrary external queries
 Knobs (all optional — tuning fills them in): `num_tables`, `resolution`,
 `dims_per_table`, `target_bucket_size` shape the recall/speed trade;
 `probes`; `brute_threshold` (default: the backend's measured brute/LSH
-crossover — 4096 python, 512 native); `backend` (`"auto"` prefers the
-fastest installed of `c`, `rust`, `python`).
+crossover — 4096 python, 512 rust); `backend` (`"auto"` prefers the
+fastest installed of `rust`, `python`).
 
 ## Performance
 
-ESS-workload benchmark (`examples/benchmark.py`): 15 000 anchors + 3 batches
-of 3 000 candidates, d=16, k=32, 5 epochs per batch, σ=0.01 drift per epoch,
-single core. Three maintenance strategies over the identical workload:
+Full analysis (grids, crossover, complexity, FAISS) in `ANALYSIS.md`.
+Headlines from the v2 measurements (AMD Ryzen AI 7 PRO 350, 16 threads):
 
-| strategy | query | maintenance | keys re-placed | recall/batch |
-|:--|--:|--:|--:|:--|
-| selective (default) | 66.7 s | **0.9 s** | 13 % / epoch | 0.985 · 0.988 · 0.987 |
-| full tier re-sort each epoch | 66.1 s | 0.9 s | 100 % | 0.985 · 0.988 · 0.987 |
-| full refit each epoch | 59.9 s | 9.2 s | 100 % | 0.985 · 0.988 · 0.969 |
+ESS lifecycle (`examples/lifecycle_backends.py`; 15 000 anchors + 3 batches
+of 3 000 candidates, d=16, k=32, 5 epochs/batch, σ=0.01):
 
-Two-tier maintenance is ~10× cheaper than refitting at identical recall. At
-σ=0.01 only ~13 % of keys change per epoch, so the selective path does 7×
-less re-placement work than a tier re-sort (the wall-clock gap is hidden by
-NumPy overhead at this tier size; it materialises at larger tiers and in the
-native backend). Query time dominates and is the recall/speed knob
-(`num_tables`, `target_bucket_size`).
+| backend | fit | query total | maintenance | epoch | recall/batch |
+|:--|--:|--:|--:|--:|:--|
+| rust | 0.47 s | 0.61 s | 0.04 s | **43 ms** | 0.985 · 0.988 · 0.987 |
+| python | 0.56 s | 66.68 s | 0.36 s | 4 463 ms | 0.985 · 0.988 · 0.987 |
 
-The prefix-relaxation fallback costs nothing when the index is tuned (0 of
-3 000 queries under-fill) and replaces the old brute-force fallback's worst
-case: on a deliberately starved index it answers ~90× faster (0.14 s vs
-12.4 s per epoch) by degrading recall instead of speed.
+Queries run 40–126× faster than NumPy across n ∈ [20k, 500k], d ∈ [8, 32]
+(13–171 µs/query at 16 threads), updates 7–12× — identical recall by
+construction (byte-identical tables, `torann/CONTRACT.md`). The Rust LSH
+beats exact brute force from n = 500 up at recall 1.00; the pure-Python LSH
+crosses at n ≈ 4–8k, which is what the `brute_threshold` defaults encode.
+At σ=0.01 only ~13 % of keys change per epoch, so the selective update
+re-places a fraction of the tier (1–3 ms); prefix relaxation costs nothing
+when the index is tuned (0 of 3 000 queries under-fill).
 
-### vs FAISS (`examples/compare_faiss.py`)
+### vs FAISS
 
-n=24 000, d=16, 3 000 queries, k=32; recall measured against the **true
-toroidal** L1 k-NN; FAISS on 16 threads, ToroidalNN mostly single-threaded:
-
-| index | query | toroidal recall |
-|:--|--:|--:|
-| ToroidalNN (toroidal L1, tuned B=2 K=10 L=24) | 1142 µs/q | **0.968** |
-| FAISS Flat L1 — exact but seam-blind | 27 µs/q | 0.259 |
-| FAISS HNSW L1 — seam-blind | 7 µs/q | 0.255 |
+FAISS cannot answer the toroidal query — exact seam-blind L1 misses ~74 %
+of true toroidal neighbours at d=16 (`examples/compare_faiss.py`), so it is
+a throughput reference only. On wrap-free common-ground data
+(`examples/compare_faiss_flat.py`), torann sits within **1.5–2.4×** of
+FAISS's exact SIMD Flat scan at equal ≈ 1.0 recall (parity at ESS scales,
+n ≲ 50k), builds 1M-point indexes in 1–2 s (HNSW: 24–32 s), and updates
+incrementally in milliseconds — while HNSW's L1 recall collapses in high d
+(0.27 at d=32, n=1M).
 
 Two conclusions. *Correctness*: even exact seam-blind search misses ~74 % of
 the true toroidal neighbours at d=16 — with concentrated distances almost

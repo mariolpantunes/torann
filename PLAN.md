@@ -188,6 +188,15 @@ benchmarked in one process.
 Numba remains the noted stopgap if a pure-pip install must be preserved.
 The Python backend stays permanently as the reference implementation.
 
+## Phase 7 — torann (Mário's six goals, approved 2026-07-14)
+
+| Stage | Goals | Outcome |
+|---|---|---|
+| A | 1 | Rust merged as the native backend; C preserved at tag `archive/backend-c` and removed from the tree |
+| B/C | 2, 4, 5 | The library is **torann** (TORoidal Approximate Nearest Neighbours): one maturin mixed Rust/Python project (root `pyproject.toml` + `Cargo.toml`, `src/lib.rs` → `torann._native`); proper class structure — `base.py` ABC (the contract as code), `brute.py` first-class exact impl, `lsh.py` pure-Python reference, `rust.py` adapter, `wrapper.py` public `ToroidalNN` selecting + tuning at fit |
+| D | 3 | Built-in phase profiler (`stats()`); FAISS-inspired kernels: SIMD multi-accumulator refine, candidate-row prefetch, batched branchless lower_bound over all 120 lookups/query, u32 stamps. Single-thread queries 1.2–2.8× faster; ESS epoch 80 → 46 ms |
+| E | 6 | Full re-comparison python vs rust vs FAISS — ANALYSIS.md v2 |
+
 ## Remaining open question
 
 - Phase 5: at scale, is the acceptance metric set-recall or the distance

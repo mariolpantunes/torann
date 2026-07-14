@@ -1,4 +1,4 @@
-"""Head-to-head backend benchmark: python vs c vs rust.
+"""Head-to-head backend benchmark: python vs rust.
 
 For every installed backend (or ``--backends``), over an (n, d) grid, times
 each lifecycle operation of the ESS workload and measures recall on a query
@@ -15,7 +15,7 @@ RAYON_NUM_THREADS before running.
 
 Run from the repository root:
   python examples/bench_backends.py [--sizes 20000,100000] [--dims 8,16,32]
-                                    [--backends python,c,rust] [--epochs 3]
+                                    [--backends python,rust] [--epochs 3]
 """
 
 import argparse
