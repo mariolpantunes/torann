@@ -7,7 +7,18 @@
 //!   - selective update merges new-before-kept  [np.searchsorted side=left]
 //!   - promote merges candidate-before-static   [np.searchsorted side=left]
 //! and keys are computed in f64 exactly as the reference:
-//!   code = min((frac(x + u) * B) as i64, B - 1).
+//!   code = min((frac(x + u) * B) as i64, B - 1),
+//! with frac evaluated as `s - s.floor()` — bit-identical to np.mod for the
+//! non-negative inputs the facade guarantees (see `wrap_unit`).
+//!
+//! Internal acceleration (non-normative — tables and results are unchanged):
+//! a per-table direct-address offset array over the key space `[0, B^K)`
+//! answers every bucket lookup and relaxation range in O(1) (`offs_s`,
+//! falling back to a batched branchless binary search when the key space
+//! outgrows `OFFS_BUDGET`), key computation streams through per-chunk
+//! buffers with no per-point allocation, and refinement runs on eight
+//! parallel f32 accumulators (one AVX lane set). Rejected-by-measurement
+//! variants are recorded in ANALYSIS.md so they are not re-tried.
 
 use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
@@ -21,6 +32,19 @@ use rayon::prelude::*;
 #[inline]
 fn lower_bound(a: &[i64], v: i64) -> usize {
     a.partition_point(|&x| x < v)
+}
+
+/// `s mod 1` for non-negative s: bit-identical to fmod/np.mod on the whole
+/// domain (fmod(s, 1) = s - floor(s) as reals, and the subtraction is
+/// exact — floor(s) cancels exactly the leading significand bits, so the
+/// fractional part is always representable). Unlike fmod this is two
+/// branchless instructions (floor lowers to vroundsd), inlineable and
+/// vectorizable. Negativity is the one precondition, and the facade's
+/// mod-1 reduction (CONTRACT.md) guarantees it with room to spare.
+#[inline(always)]
+fn wrap_unit(s: f64) -> f64 {
+    debug_assert!(s >= 0.0, "point + offset must be non-negative");
+    s - s.floor()
 }
 
 /// Toroidal L1 in f32. Eight parallel accumulators break the serial
@@ -176,6 +200,12 @@ struct RustLshIndex {
     pts32: Vec<f32>,
     skeys_s: Vec<i64>,
     sids_s: Vec<i64>,
+    /// Direct-address bucket bounds for the static tier: per table,
+    /// `B^K + 1` cumulative counts with `offs[t][v] = lower_bound(skeys_s[t], v)`
+    /// — keys live in `[0, B^K)`, so one L2-resident load replaces every
+    /// binary search. Empty when the key space is too large (see
+    /// `OFFS_BUDGET`); all lookups then fall back to the batched search.
+    offs_s: Vec<u32>,
     keys_c: Vec<i64>,
     skeys_c: Vec<i64>,
     sids_c: Vec<i64>,
@@ -194,10 +224,51 @@ struct QueryStats {
     relaxed: std::sync::atomic::AtomicU64,
 }
 
+/// Memory budget for the direct-address offset tables, in bytes. The tuner
+/// keeps `B^K ~ n/64`, so real indexes use a few MB; the budget only trips
+/// on hand-forced parameters, where gather falls back to binary search.
+const OFFS_BUDGET: usize = 64 << 20;
+
 impl RustLshIndex {
     #[inline]
     fn n_cand(&self) -> usize {
         self.n_points - self.n_static
+    }
+
+    /// Key-space size `B^K` when direct addressing is enabled, else 0.
+    #[inline]
+    fn key_space(&self) -> usize {
+        let bk = self.pw[self.kdim - 1].saturating_mul(self.b);
+        let entries = (bk as usize).saturating_add(1);
+        if entries.saturating_mul(self.l * 4) <= OFFS_BUDGET {
+            bk as usize
+        } else {
+            0
+        }
+    }
+
+    /// (Re)build `offs_s` from the sorted static keys — O(n + B^K) per
+    /// table. Called at build() and promote(); update() never moves the
+    /// static tier.
+    fn build_static_offsets(&mut self) {
+        let bk = self.key_space();
+        if bk == 0 {
+            self.offs_s = Vec::new();
+            return;
+        }
+        let ns = self.n_static;
+        let mut offs = vec![0u32; self.l * (bk + 1)];
+        offs.par_chunks_mut(bk + 1).enumerate().for_each(|(t, ot)| {
+            let sk = &self.skeys_s[t * ns..(t + 1) * ns];
+            let mut i = 0usize;
+            for v in 0..=bk {
+                while i < ns && sk[i] < v as i64 {
+                    i += 1;
+                }
+                ot[v] = i as u32;
+            }
+        });
+        self.offs_s = offs;
     }
 
     /// The normative hash of one point for one table.
@@ -207,8 +278,8 @@ impl RustLshIndex {
         let ut = &self.u[t * self.kdim..(t + 1) * self.kdim];
         let mut key = 0i64;
         for j in 0..self.kdim {
-            // x, u >= 0 so `%` (fmod) matches np.mod; `as` truncates.
-            let frac = ((x[st[j] as usize] + ut[j]) % 1.0) * self.b as f64;
+            // wrap_unit matches np.mod on [0, 2); `as` truncates.
+            let frac = wrap_unit(x[st[j] as usize] + ut[j]) * self.b as f64;
             let mut code = frac as i64;
             if code > self.b - 1 {
                 code = self.b - 1;
@@ -221,19 +292,39 @@ impl RustLshIndex {
     /// keys\[t * n + i\] for point rows [row0, row0 + n).
     fn compute_keys(&self, row0: usize, n: usize) -> Vec<i64> {
         let mut keys = vec![0i64; self.l * n];
-        // parallel over points, transposed writes gathered per table
-        let rows: Vec<Vec<i64>> = (0..n)
-            .into_par_iter()
-            .map(|i| {
-                let x = &self.pts[(row0 + i) * self.d..(row0 + i + 1) * self.d];
-                (0..self.l).map(|t| self.point_key(x, t)).collect()
-            })
-            .collect();
-        for (i, row) in rows.iter().enumerate() {
-            for t in 0..self.l {
-                keys[t * n + i] = row[t];
+        // Parallel over point chunks; each chunk fills a small t-major
+        // buffer (point row stays in L1 across all tables), then lands in
+        // the shared array with one contiguous copy per table. Chunk
+        // writes are disjoint by construction. Chunk size shrinks with n
+        // so small tiers (the per-epoch update) still fan out over all
+        // workers.
+        let chunk = (n.div_ceil(4 * rayon::current_num_threads()))
+            .clamp(16, 1024);
+        struct SendPtr(*mut i64);
+        unsafe impl Sync for SendPtr {}
+        let out = SendPtr(keys.as_mut_ptr());
+        (0..n.div_ceil(chunk)).into_par_iter().for_each(|c| {
+            let base = c * chunk;
+            let len = chunk.min(n - base);
+            let mut buf = vec![0i64; self.l * len];
+            for i in 0..len {
+                let row = row0 + base + i;
+                let x = &self.pts[row * self.d..(row + 1) * self.d];
+                for t in 0..self.l {
+                    buf[t * len + i] = self.point_key(x, t);
+                }
             }
-        }
+            let p = &out;
+            for t in 0..self.l {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        buf.as_ptr().add(t * len),
+                        p.0.add(t * n + base),
+                        len,
+                    );
+                }
+            }
+        });
         keys
     }
 
@@ -294,7 +385,7 @@ impl RustLshIndex {
         let ut = &self.u[t * self.kdim..(t + 1) * self.kdim];
         let mut key = 0i64;
         for j in 0..self.kdim {
-            let f = ((x[st[j] as usize] + ut[j]) % 1.0) * self.b as f64;
+            let f = wrap_unit(x[st[j] as usize] + ut[j]) * self.b as f64;
             let mut code = f as i64;
             if code > self.b - 1 {
                 code = self.b - 1;
@@ -343,14 +434,32 @@ impl RustLshIndex {
             }
         }
 
-        // Static tier: batched branchless lower_bound, then bucket scans.
+        // Static tier. With direct addressing, each probe is one pair of
+        // L2-resident offset loads instead of a log(n) miss chain.
         let m = ws.kbuf.len();
         let ns = self.n_static;
-        if ns > 0 {
+        if ns > 0 && !self.offs_s.is_empty() {
+            let row = self.offs_s.len() / self.l;
+            for i in 0..m {
+                let (t, key) = ws.kbuf[i];
+                let ot = &self.offs_s[t as usize * row..(t as usize + 1) * row];
+                let lo = ot[key as usize] as usize;
+                let hi = ot[key as usize + 1] as usize;
+                let si = &self.sids_s[t as usize * ns..(t as usize + 1) * ns];
+                for &id in &si[lo..hi] {
+                    if ws.stamp[id as usize] != ws.stamp_now {
+                        ws.stamp[id as usize] = ws.stamp_now;
+                        ws.cand.push(id);
+                    }
+                }
+            }
+        } else if ns > 0 {
+            // Fallback (key space over budget): batched branchless
+            // lower_bound — one level-synchronous pass keeps every miss
+            // chain in flight. No prefetch here: 120 independent chains
+            // already saturate the load buffers; hints measured slower.
             ws.base.clear();
             ws.base.resize(m, 0);
-            // No prefetch here: 120 independent chains already saturate
-            // the load buffers; explicit hints measured slower.
             let mut len = ns;
             while len > 1 {
                 let half = len / 2;
@@ -409,9 +518,23 @@ impl RustLshIndex {
         }
     }
 
+    /// [lo, hi) of `[lo_key, lo_key + width)` in the sorted static keys;
+    /// `lo_key + width <= B^K`, so the offset table answers it directly.
+    #[inline]
+    fn static_range(&self, t: usize, lo_key: i64, width: i64) -> (usize, usize) {
+        if !self.offs_s.is_empty() {
+            let row = self.offs_s.len() / self.l;
+            let ot = &self.offs_s[t * row..(t + 1) * row];
+            (ot[lo_key as usize] as usize, ot[(lo_key + width) as usize] as usize)
+        } else {
+            let (sk, _) = self.stat(t);
+            (lower_bound(sk, lo_key), lower_bound(sk, lo_key + width))
+        }
+    }
+
     fn range_count(&self, t: usize, lo_key: i64, width: i64) -> usize {
-        let (sk, _) = self.stat(t);
-        let mut cnt = lower_bound(sk, lo_key + width) - lower_bound(sk, lo_key);
+        let (lo, hi) = self.static_range(t, lo_key, width);
+        let mut cnt = hi - lo;
         if self.n_cand() > 0 {
             let (sk, _) = self.cand_tier(t);
             cnt += lower_bound(sk, lo_key + width) - lower_bound(sk, lo_key);
@@ -420,8 +543,8 @@ impl RustLshIndex {
     }
 
     fn gather_range(&self, ws: &mut Ws, t: usize, lo_key: i64, width: i64) {
-        let (sk, si) = self.stat(t);
-        let (lo, hi) = (lower_bound(sk, lo_key), lower_bound(sk, lo_key + width));
+        let (_, si) = self.stat(t);
+        let (lo, hi) = self.static_range(t, lo_key, width);
         for &id in &si[lo..hi] {
             if ws.stamp[id as usize] != ws.stamp_now {
                 ws.stamp[id as usize] = ws.stamp_now;
@@ -514,6 +637,7 @@ impl RustLshIndex {
             pts32: Vec::new(),
             skeys_s: Vec::new(),
             sids_s: Vec::new(),
+            offs_s: Vec::new(),
             keys_c: Vec::new(),
             skeys_c: Vec::new(),
             sids_c: Vec::new(),
@@ -535,6 +659,7 @@ impl RustLshIndex {
             let (sk, si) = self.sort_tier(&keys, n_static, 0);
             self.skeys_s = sk;
             self.sids_s = si;
+            self.build_static_offsets();
             self.build_candidate_tier();
         });
         Ok(())
@@ -635,6 +760,7 @@ impl RustLshIndex {
                 self.sids_s = sids;
             }
             self.n_static = self.n_points;
+            self.build_static_offsets();
             if m > 0 {
                 self.pts.extend_from_slice(&c);
                 self.pts32.extend(c.iter().map(|&v| v as f32));
