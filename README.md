@@ -5,7 +5,9 @@ toroidal **L1** — the metric is the contract (see below). One Python package,
 three interchangeable implementations of one interface (`torann/base.py`):
 exact brute force (`brute.py`), the pure-Python LSH reference (`lsh.py`), and
 the Rust core (`torann._native`, built with maturin) — see `torann/CONTRACT.md`
-and `ANALYSIS.md` for the bake-off; ~80 ms per ESS epoch, 25–75× NumPy.
+and `ANALYSIS.md`; ~60 ms per simulated ESS epoch at recall ≈ 0.99, 60× the
+NumPy pipeline, within 1.06–1.56× of FAISS's exact SIMD Flat scan on data
+FAISS can actually answer.
 
 Built for [ESS](https://github.com/mariolpantunes/ess): anchors that never
 move, candidate points that move a little every epoch, each candidate asking
@@ -94,36 +96,43 @@ fastest installed of `rust`, `python`).
 
 ## Performance
 
-Full analysis (grids, crossover, complexity, FAISS) in `ANALYSIS.md`.
-Headlines from the v2 measurements (AMD Ryzen AI 7 PRO 350, 16 threads):
+Full analysis (kernel pass, grids, crossover, complexity, FAISS) in
+`ANALYSIS.md`. Headlines from the v3 measurements (AMD Ryzen AI 7 PRO 350,
+16 threads):
 
-ESS lifecycle (`examples/lifecycle_backends.py`; 15 000 anchors + 3 batches
-of 3 000 candidates, d=16, k=32, 5 epochs/batch, σ=0.01):
+ESS main loop, simulated end to end (`examples/ess_sim.py`; 15 000 anchors
++ 10 batches of 3 000 candidates × 32 epochs → 45 000 points, d=16, k=32,
+σ=0.01, exact toroidal truth spot-checked per batch):
 
-| backend | fit | query total | maintenance | epoch | recall/batch |
-|:--|--:|--:|--:|--:|:--|
-| rust | 0.47 s | 0.61 s | 0.04 s | **43 ms** | 0.985 · 0.988 · 0.987 |
-| python | 0.56 s | 66.68 s | 0.36 s | 4 463 ms | 0.985 · 0.988 · 0.987 |
+| system | epoch | total | recall per batch |
+|:--|--:|--:|:--|
+| **torann [rust]** | **61.5 ms** | **27.4 s** | **0.983–0.995** |
+| faiss Flat L1, rebuilt each epoch | 106.2 ms | 41.3 s | 0.25–0.28 |
+| torann [python] | 3 729 ms | — | 0.983 |
 
-Queries run 40–126× faster than NumPy across n ∈ [20k, 500k], d ∈ [8, 32]
-(13–171 µs/query at 16 threads), updates 7–12× — identical recall by
-construction (byte-identical tables, `torann/CONTRACT.md`). The Rust LSH
-beats exact brute force from n = 500 up at recall 1.00; the pure-Python LSH
-crosses at n ≈ 4–8k, which is what the `brute_threshold` defaults encode.
-At σ=0.01 only ~13 % of keys change per epoch, so the selective update
-re-places a fraction of the tier (1–3 ms); prefix relaxation costs nothing
-when the index is tuned (0 of 3 000 queries under-fill).
+FAISS Flat is exact — for the wrong metric: seam-blind L1 misses ~73 % of
+the true toroidal neighbours here, and the misses are structural. On the
+workload this library exists for, torann is 1.7× faster *and* correct.
+
+Queries run 11–148 µs at 16 threads across n ∈ [20k, 1M] (d=16, torus
+data) — 60–120× the NumPy pipeline — with updates at 0.9–2.1 ms; identical
+recall by construction (byte-identical tables, `torann/CONTRACT.md`). The
+Rust LSH beats exact brute force from n = 500 up at recall 1.00; the
+pure-Python LSH crosses at n ≈ 4–8k, which is what the `brute_threshold`
+defaults encode. At σ=0.01 only ~13 % of keys change per epoch, so the
+selective update re-places a fraction of the tier; prefix relaxation costs
+nothing when the index is tuned (0 of 3 000 queries under-fill).
 
 ### vs FAISS
 
 FAISS cannot answer the toroidal query — exact seam-blind L1 misses ~74 %
 of true toroidal neighbours at d=16 (`examples/compare_faiss.py`), so it is
 a throughput reference only. On wrap-free common-ground data
-(`examples/compare_faiss_flat.py`), torann sits within **1.5–2.4×** of
-FAISS's exact SIMD Flat scan at equal ≈ 1.0 recall (parity at ESS scales,
-n ≲ 50k), builds 1M-point indexes in 1–2 s (HNSW: 24–32 s), and updates
-incrementally in milliseconds — while HNSW's L1 recall collapses in high d
-(0.27 at d=32, n=1M).
+(`examples/compare_faiss_flat.py` conditions), torann sits within
+**1.06–1.56×** of FAISS's exact SIMD Flat scan at equal ≈ 1.0 recall
+(1.06× at n=100k — parity at ESS scales), builds 1M-point indexes in ~1 s
+(HNSW: 24–32 s), and updates incrementally in milliseconds — while HNSW's
+L1 recall collapses in high d (0.27 at d=32, n=1M).
 
 Two conclusions. *Correctness*: even exact seam-blind search misses ~74 % of
 the true toroidal neighbours at d=16 — with concentrated distances almost
@@ -136,6 +145,7 @@ the headroom target for a native backend (see PLAN.md phase 6).
 
 ```
 python -m unittest discover -s test    # conformance suite, per installed backend
+python examples/ess_sim.py             # the ESS main loop end to end, vs FAISS
 python examples/benchmark.py           # maintenance strategies (python backend)
 python examples/lifecycle_backends.py  # the ESS lifecycle, per backend
 python examples/bench_backends.py      # per-op grid over (n, d, backend)

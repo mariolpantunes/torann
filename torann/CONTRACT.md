@@ -44,8 +44,12 @@ byte-equality with the reference.
 ## Lifecycle methods
 
 All point arrays are C-contiguous float64 `(n, d)` with values in `[0, 1)`;
-the facade validates and reduces mod 1 before calling. The backend keeps its
-own copy of the points (float64 for keys, float32 for distance refinement).
+the facade validates and reduces mod 1 before calling. Backends may rely on
+this precondition (the Rust core evaluates the hash's `mod 1` as
+`s - floor(s)`, which is bit-identical to `np.mod` for non-negative input;
+supporting any other domain is an affine map in the facade, never a backend
+concern). The backend keeps its own copy of the points (float64 for keys,
+float32 for distance refinement).
 
 - `build(points, n_static)` — build both tiers from zero: rows
   `[0, n_static)` are the static tier, the rest the candidate tier. Per

@@ -1,32 +1,130 @@
-# torann analysis — v2 (phase 7: python vs rust vs FAISS)
+# torann analysis — v3 (phase 8: recall-preserving kernel pass + the ESS main loop)
 
-Second edition, after the phase-7 changes: the C backend retired (preserved
-in full at tag `archive/backend-c`; the original three-way bake-off report
-is `git show 64672f2:ANALYSIS.md`), the library renamed **torann** and
-restructured as one maturin mixed Rust/Python package, and the Rust core
-optimized under a built-in phase profiler. Everything below is measured on
-the current code.
+Third edition. The phase-8 addendum below documents a staged,
+conformance-gated optimization pass over the Rust core and the first
+end-to-end ESS main-loop simulation; the numbered sections that follow it
+are the phase-7 (v2) measurements, kept because their conclusions stand
+(the v2 file is `git show 1fadefd:ANALYSIS.md`, the phase-6 bake-off
+`git show 64672f2:ANALYSIS.md`; the C backend lives at tag
+`archive/backend-c`).
 
 Machine: AMD Ryzen AI 7 PRO 350, 16 threads. Python 3.12, NumPy 2.5,
 Rust 1.97 (`-C target-cpu=native`, LTO), FAISS 1.14. Workload shape:
-`k = 2d`, 3 000-query batches (the ESS inner loop). Both implementations
+`k = 2d`, 3 000-query batches (the ESS inner loop). All implementations
 produce **byte-identical hash tables** (CONTRACT.md), so recall columns are
 shared and the comparison is pure speed.
 
-## TL;DR
+## TL;DR (after phase 8)
 
-* **ESS epoch: 43 ms** (query 3 000 candidates + selective update) — pure
-  Python takes 4 463 ms. That is **104× per epoch**, and ~2× faster again
-  than the phase-6 backend that won the bake-off.
-* Queries run **40–126× faster than NumPy** across the grid (16 threads);
-  a single Rust thread is already 8–19× the NumPy pipeline.
+* **ESS main loop, simulated end to end** (15k anchors + 10 batches × 3k
+  candidates × 32 epochs → 45k points, d=16): **61.5 ms/epoch at recall
+  0.983–0.995** on the torus. FAISS Flat, rebuilt every epoch, takes
+  106 ms/epoch and returns **0.25–0.28 recall** — exact for the wrong
+  metric. The pure-Python reference: 3 729 ms/epoch.
+* The phase-8 kernel pass bought a further **1.10–1.44×** on torus queries
+  and **1.23–1.64×** on box queries over the phase-7 code, with recall
+  provably unchanged (byte-identical tables at every stage).
 * Against **FAISS on common ground**, the gap to the exact SIMD Flat scan
-  narrowed from 3–4× to **1.5–2.4×** — at matching (≈ 1.0) recall, on a
-  metric FAISS cannot actually serve (the torus), with 20× faster builds
-  at n = 1M and millisecond incremental updates.
-* Brute force now loses to the Rust LSH **from n = 500 up** (its smallest
-  measured size) at recall 1.00; against the python LSH it keeps winning to
-  n ≈ 4–8k — both `brute_threshold` defaults (512 / 4096) are confirmed.
+  narrowed again: 1.5–2.4× (phase 7) → **1.06–1.56×**, at equal ≈ 1.0
+  recall, with 20× faster builds at n = 1M and millisecond updates.
+* Brute force loses to the Rust LSH **from n = 500 up** at recall 1.00;
+  against the python LSH it keeps winning to n ≈ 4–8k — both
+  `brute_threshold` defaults (512 / 4096) stand.
+
+## Phase 8 addendum — the recall-preserving kernel pass (v3)
+
+Ground rule: recall is the product, so only changes that provably keep the
+candidate set and results identical qualify — every stage had to pass the
+conformance suite (byte-identical tables vs the NumPy reference) before
+being benchmarked. Each idea was measured in isolation, on two workloads:
+**box** data `[0.25, 0.75]^d` (the FAISS common ground of §6 — its best
+case and torann's worst: half-range data over-fills buckets ~7× and makes
+refine dominate) and **torus** data `[0, 1)^d` (the native regime).
+
+### Kept (the current code)
+
+1. **`mod 1` without the fmod libcall.** The hash's `(x + u) mod 1`
+   compiled to a scalar `fmod` call per (table, dim). For non-negative s,
+   `s - s.floor()` is *bit-identical* to `np.mod(s, 1)` (floor cancels the
+   leading significand bits exactly; the fractional part is always
+   representable) and `floor` lowers to one `vroundsd` instruction. The
+   facade's mod-1 reduction guarantees the precondition (now stated in
+   CONTRACT.md; `debug_assert`ed in the kernel). Worth ~1.2× at d=32.
+2. **Allocation-free key computation.** `compute_keys` collected one heap
+   `Vec` per point (1M allocations at a 1M build) plus a serial transpose;
+   it now streams through per-chunk flat buffers with one contiguous copy
+   per table. Chunk size adapts (`n / 4·threads`, clamped [16, 1024]) so
+   the 3k-candidate per-epoch update still fans out over all workers — a
+   fixed chunk regressed updates 2–3× before the fix caught it.
+3. **Direct-address bucket offsets** — the big one. Keys live in
+   `[0, B^K)` and the tuner keeps `B^K ≈ n/64`, so a per-table cumulative
+   u32 array `offs[v] = lower_bound(sorted_keys, v)` (~a few MB total,
+   L2-resident) answers every bucket lookup and every relaxation range in
+   O(1), replacing the ~120 × log₂(n) dependent-load binary-search chains
+   per query. Rebuilt in O(n + B^K) per table at `build`/`promote`; the
+   candidate tier keeps its (cache-resident) binary search so `update` is
+   untouched; a 64 MB budget falls back to the batched search if
+   hand-forced parameters blow up `B^K`. Cut gather 12–19 % CPU even where
+   scans dominate, and most of the query-time wins below.
+
+Per-query timings (µs/q, best of 3, 3 000 queries, k = 2d):
+
+| n · d | torus before | torus after | × | box before | box after | × | gap to Flat before → after |
+|:--|--:|--:|:--|--:|--:|:--|:--|
+| 20k·16 | 12.3 | **11.1** | 1.11 | 34.9 | **28.4** | 1.23 | 1.35 → **1.10** |
+| 100k·16 | 20.8 | **16.0** | 1.30 | 201.3 | **139.4** | 1.44 | 1.53 → **1.06** |
+| 100k·32 | 36.5 | **29.3** | 1.25 | 322.3 | **196.1** | 1.64 | 2.28 → **1.39** |
+| 500k·16 | 102.8 | **93.3** | 1.10 | 1 174.8 | **899.0** | 1.31 | 1.82 → **1.39** |
+| 1M·16 | 162.9 | **148.0** | 1.10 | 2 823.1 | **2 297.4** | 1.23 | 1.92 → **1.56** |
+
+Recall identical to the reference at every row by construction. Builds
+dropped ~15–20 % (1M box: 1.35 → 1.07 s); updates are at or below the old
+numbers everywhere (0.9–2.1 ms).
+
+### Rejected by measurement (recorded so nobody re-tries them)
+
+* **Gather-time candidate-row prefetch** — issue the refine row fetch as
+  each id passes dedupe. Slower on *both* workloads (box 500k:
+  885 → 1055 µs/q): with 10⁴–10⁵ candidate rows per query the prefetches
+  evict each other long before refine arrives. Same lesson as the v2
+  prefetch rejection, now confirmed from the other side.
+* **Exact early-abandonment in refine** — stop a distance once its partial
+  sum reaches the current k-th (provably identical results). No gain: an
+  L1 half-way lower bound only rejects candidates ≥ 2× the k-th distance,
+  and distance concentration means essentially none are. The checkpoint
+  overhead showed up instead (d=32: +7 %).
+* **16-wide f32 accumulators** — AVX-512 width in the distance kernel.
+  Slower everywhere measured (100k·16 box: 139 → 160 µs/q): this Zen 5
+  variant double-pumps 512-bit ops, so the wider reduction only adds
+  latency.
+
+### The ESS main loop, simulated (`examples/ess_sim.py`)
+
+The full lifecycle: 15k anchors, then batches of 3k candidates that query
+`k = 2d` every epoch for 32 epochs (moving σ = 0.01 between epochs) and
+freeze into anchors, until 45k points — 320 epochs, 960k queries, d=16.
+Recall spot-checked per batch against exact toroidal truth. FAISS Flat is
+rebuilt every epoch (`add()` is a memcpy — the cheapest way FAISS can
+track a moving tier).
+
+| system | data | epoch ms | wall s | recall per batch |
+|:--|:--|--:|--:|:--|
+| **torann rust (phase 8)** | torus | **61.5** | **27.4** | **0.983–0.995** |
+| torann rust (phase 7) | torus | 63.3 | 28.0 | same (byte-identical) |
+| faiss Flat, rebuilt/epoch | torus | 106.2 | 41.3 | **0.25–0.28** |
+| torann python | torus | 3 729 | — | 0.983 |
+| faiss Flat, rebuilt/epoch | box | 94.3 | 30.7 | 1.000 |
+| torann rust (phase 8) | box | 145.1 | 47.4 | 1.000 |
+
+Read it straight: on the metric ESS actually needs, torann is **1.7×
+faster than FAISS Flat and returns 3.7× more of the true neighbours** —
+Flat's misses are structural (seam-blind L1) and do not decay as points
+accumulate. The box rows show the flip side honestly: where nothing wraps
+and buckets over-fill, Flat's contiguous scan wins the epoch at this small
+scale — that regime is FAISS's best case and not the workload. The
+phase-8 epoch gain over phase 7 is modest (63.3 → 61.5 ms) because at
+18–45k points the epoch is refine-bound; the offset table's value grows
+with n (see the query table above).
 
 ## 1. What the optimization pass bought (phase 7 D)
 
