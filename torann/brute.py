@@ -19,7 +19,22 @@ _BUDGET = 1 << 24
 
 
 def pairwise_l1(Q: np.ndarray, pts: np.ndarray) -> np.ndarray:
-    """Dense toroidal-L1 distances, (m, n) — call through a block loop."""
+    r"""Dense toroidal-L1 distance matrix.
+
+    The metric is
+
+    $$d(a, b) = \sum_{i=1}^{d} \min(|a_i - b_i|,\; 1 - |a_i - b_i|)$$
+
+    Allocates the full ``(m, n, d)`` difference block — call through a
+    block loop (``exact_knn`` / ``exact_radius`` do).
+
+    Args:
+        Q: ``(m, d)`` float64 queries in ``[0, 1)``.
+        pts: ``(n, d)`` float64 points in ``[0, 1)``.
+
+    Returns:
+        ``(m, n)`` float64 distance matrix.
+    """
     diff = np.abs(Q[:, None, :] - pts[None, :, :])
     np.minimum(diff, 1.0 - diff, out=diff)
     return diff.sum(-1)
@@ -32,7 +47,20 @@ def _blocks(m: int, n: int, d: int):
 
 
 def exact_knn(pts, Q, k, exclude_ids=None):
-    """Exact k-NN of Q against pts → (idx, dist), padded past n."""
+    """Exact toroidal-L1 k-NN of ``Q`` against ``pts``.
+
+    Args:
+        pts: ``(n, d)`` float64 points in ``[0, 1)``.
+        Q: ``(m, d)`` float64 queries in ``[0, 1)``.
+        k: Neighbours per query.
+        exclude_ids: Optional int64 ``(m,)`` — one point id excluded per
+            query (the self-join).
+
+    Returns:
+        ``(idx, dist)`` of shape ``(m, k)``: int64 ids and float64
+        distances, rows sorted ascending, padded with ``-1`` / ``inf``
+        where fewer than ``k`` points exist.
+    """
     m, (n, d) = Q.shape[0], pts.shape
     idx = np.full((m, k), -1, dtype=np.int64)
     dst = np.full((m, k), np.inf)
@@ -53,7 +81,19 @@ def exact_knn(pts, Q, k, exclude_ids=None):
 
 
 def exact_radius(pts, Q, radius, exclude_ids=None):
-    """Exact range query → CSR (indptr, ids, dists), rows distance-sorted."""
+    """Exact toroidal-L1 range query.
+
+    Args:
+        pts: ``(n, d)`` float64 points in ``[0, 1)``.
+        Q: ``(m, d)`` float64 queries in ``[0, 1)``.
+        radius: Inclusive distance threshold.
+        exclude_ids: Optional int64 ``(m,)`` — one point id excluded per
+            query.
+
+    Returns:
+        CSR triple ``(indptr, ids, dists)``: row ``i`` is
+        ``ids[indptr[i]:indptr[i+1]]``, sorted by distance.
+    """
     m, (n, d) = Q.shape[0], pts.shape
     counts, all_ids, all_dst = [], [], []
     for s, e in _blocks(m, n, d):
@@ -82,21 +122,26 @@ class BruteIndex(BaseIndex):
         self.n_static = 0
 
     def build(self, points, n_static):
+        """Copy the points; both tiers share one array here."""
         self._pts = np.ascontiguousarray(points, dtype=np.float64).copy()
         self.n_points = self._pts.shape[0]
         self.n_static = int(n_static)
 
     def update(self, coords):
+        """Overwrite the candidate rows (no structure to maintain)."""
         self._pts[self.n_static:] = coords
 
     def promote(self, new_candidates):
+        """Freeze candidates into the static tier; append the new batch."""
         self.n_static = self.n_points
         if new_candidates.size:
             self._pts = np.vstack([self._pts, new_candidates])
             self.n_points = self._pts.shape[0]
 
     def query_knn(self, queries, k, exclude_ids=None):
+        """Exact k-NN — see :func:`exact_knn`."""
         return exact_knn(self._pts, queries, k, exclude_ids)
 
     def query_radius(self, queries, radius, exclude_ids=None):
+        """Exact range query — see :func:`exact_radius`."""
         return exact_radius(self._pts, queries, radius, exclude_ids)

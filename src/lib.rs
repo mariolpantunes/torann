@@ -3,13 +3,15 @@
 //! Implements `torann/CONTRACT.md` exactly: given the same parameters
 //! the tables are byte-identical to the pure-NumPy reference. The tie rules
 //! that guarantee it:
-//!   - tier builds sort by (key, id)            [stable argsort of asc. ids]
-//!   - selective update merges new-before-kept  [np.searchsorted side=left]
-//!   - promote merges candidate-before-static   [np.searchsorted side=left]
-//! and keys are computed in f64 exactly as the reference:
-//!   code = min((frac(x + u) * B) as i64, B - 1),
-//! with frac evaluated as `s - s.floor()` — bit-identical to np.mod for the
-//! non-negative inputs the facade guarantees (see `wrap_unit`).
+//!
+//! - tier builds sort by (key, id)            [stable argsort of asc. ids]
+//! - selective update merges new-before-kept  [np.searchsorted side=left]
+//! - promote merges candidate-before-static   [np.searchsorted side=left]
+//!
+//! Keys are computed in f64 exactly as the reference:
+//! `code = min((frac(x + u) * B) as i64, B - 1)`, with frac evaluated as
+//! `s - s.floor()` — bit-identical to np.mod for the non-negative inputs
+//! the facade guarantees (see `wrap_unit`).
 //!
 //! Internal acceleration (non-normative — tables and results are unchanged):
 //! a per-table direct-address offset array over the key space `[0, B^K)`
@@ -19,6 +21,11 @@
 //! buffers with no per-point allocation, and refinement runs on eight
 //! parallel f32 accumulators (one AVX lane set). Rejected-by-measurement
 //! variants are recorded in ANALYSIS.md so they are not re-tried.
+
+// The kernels index with `for i in 0..n` on purpose: most loops write to
+// several arrays at once and were profile-tuned in this exact shape. The
+// introspection API also returns a few unavoidably wide tuple types.
+#![allow(clippy::needless_range_loop, clippy::type_complexity)]
 
 use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
@@ -63,8 +70,12 @@ fn dist_l1_32(a: &[f32], b: &[f32]) -> f32 {
         }
     }
     let mut s = 0.0f32;
-    for (x, y) in a.chunks_exact(8).remainder().iter()
-        .zip(b.chunks_exact(8).remainder()) {
+    for (x, y) in a
+        .chunks_exact(8)
+        .remainder()
+        .iter()
+        .zip(b.chunks_exact(8).remainder())
+    {
         let t = (x - y).abs();
         let w = 1.0f32 - t;
         s += if t < w { t } else { w };
@@ -100,7 +111,10 @@ struct TopK {
 
 impl TopK {
     fn new(k: usize) -> Self {
-        TopK { heap: Vec::with_capacity(k), k }
+        TopK {
+            heap: Vec::with_capacity(k),
+            k,
+        }
     }
 
     fn clear(&mut self) {
@@ -298,8 +312,7 @@ impl RustLshIndex {
         // writes are disjoint by construction. Chunk size shrinks with n
         // so small tiers (the per-epoch update) still fan out over all
         // workers.
-        let chunk = (n.div_ceil(4 * rayon::current_num_threads()))
-            .clamp(16, 1024);
+        let chunk = (n.div_ceil(4 * rayon::current_num_threads())).clamp(16, 1024);
         struct SendPtr(*mut i64);
         unsafe impl Sync for SendPtr {}
         let out = SendPtr(keys.as_mut_ptr());
@@ -525,7 +538,10 @@ impl RustLshIndex {
         if !self.offs_s.is_empty() {
             let row = self.offs_s.len() / self.l;
             let ot = &self.offs_s[t * row..(t + 1) * row];
-            (ot[lo_key as usize] as usize, ot[(lo_key + width) as usize] as usize)
+            (
+                ot[lo_key as usize] as usize,
+                ot[(lo_key + width) as usize] as usize,
+            )
         } else {
             let (sk, _) = self.stat(t);
             (lower_bound(sk, lo_key), lower_bound(sk, lo_key + width))
@@ -645,7 +661,12 @@ impl RustLshIndex {
         })
     }
 
-    fn build(&mut self, py: Python<'_>, points: PyReadonlyArray2<f64>, n_static: usize) -> PyResult<()> {
+    fn build(
+        &mut self,
+        py: Python<'_>,
+        points: PyReadonlyArray2<f64>,
+        n_static: usize,
+    ) -> PyResult<()> {
         let shape = points.shape();
         let (n, d) = (shape[0], shape[1]);
         let pts = points.as_slice()?.to_vec();
@@ -815,15 +836,13 @@ impl RustLshIndex {
                         st.cands.fetch_add(ws.cand.len() as u64, Relaxed);
                         if top.heap.len() < kk {
                             self.relax_query(ws, top, x, k, exq);
-                            st.relax_ns.fetch_add(
-                                t2.elapsed().as_nanos() as u64, Relaxed);
+                            st.relax_ns
+                                .fetch_add(t2.elapsed().as_nanos() as u64, Relaxed);
                             st.relaxed.fetch_add(1, Relaxed);
                         }
                         top.emit(row_idx, row_dst);
-                        st.gather_ns
-                            .fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
-                        st.refine_ns
-                            .fetch_add((t2 - t1).as_nanos() as u64, Relaxed);
+                        st.gather_ns.fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
+                        st.refine_ns.fetch_add((t2 - t1).as_nanos() as u64, Relaxed);
                         st.queries.fetch_add(1, Relaxed);
                     },
                 );
@@ -872,8 +891,7 @@ impl RustLshIndex {
                             if id == exq {
                                 continue;
                             }
-                            let p = &self.pts32
-                                [id as usize * self.d..(id as usize + 1) * self.d];
+                            let p = &self.pts32[id as usize * self.d..(id as usize + 1) * self.d];
                             let dd = dist_l1_32(&ws.q32, p);
                             if dd <= r32 {
                                 hits.push((dd.to_bits(), id));
@@ -913,7 +931,10 @@ impl RustLshIndex {
         let d = PyDict::new(py);
         d.set_item(
             "static_keys",
-            self.skeys_s.clone().into_pyarray(py).reshape([self.l, ns])?,
+            self.skeys_s
+                .clone()
+                .into_pyarray(py)
+                .reshape([self.l, ns])?,
         )?;
         d.set_item(
             "static_ids",
@@ -925,7 +946,10 @@ impl RustLshIndex {
         )?;
         d.set_item(
             "cand_sorted_keys",
-            self.skeys_c.clone().into_pyarray(py).reshape([self.l, nc])?,
+            self.skeys_c
+                .clone()
+                .into_pyarray(py)
+                .reshape([self.l, nc])?,
         )?;
         d.set_item(
             "cand_sorted_ids",

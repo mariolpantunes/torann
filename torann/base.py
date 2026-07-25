@@ -64,4 +64,5 @@ class BaseIndex(ABC):
 
     @property
     def n_candidates(self) -> int:
+        """Points in the candidate tier."""
         return self.n_points - self.n_static

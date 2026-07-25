@@ -1,17 +1,22 @@
-"""torann — TORoidal Approximate Nearest Neighbours (public wrapper).
+r"""torann — TORoidal Approximate Nearest Neighbours (public wrapper).
 
 Contract (PLAN.md, gate outcomes 2026-07-13):
 
-* **Metric**: toroidal L1 on the unit torus [0,1)^d, and nothing else. The
-  hash family's guarantee is an L1 guarantee, so L1 is the public contract.
+* **Metric**: toroidal L1 on the unit torus $[0,1)^d$, and nothing else.
+  The hash family's guarantee is an L1 guarantee, so L1 is the public
+  contract.
 * **Hash** (validated in exploration/): per sampled dimension, an integer
-  resolution ``B`` and offset ``u ~ U[0,1)`` give the cell
-  ``c(x) = floor(B((x+u) mod 1))`` with collision probability **exactly**
-  ``max(0, 1 - B*delta)`` — seamless on the torus. A table concatenates K
-  sampled dimensions: collisions decay as ``prod(1-B*delta_i) ~ exp(-B*L1)``,
-  a uniformly random pair collides per dimension with probability exactly
-  ``1/B`` (bucket load ``n/B**K``), and a point that moves by ``s`` changes a
-  cell with probability ``B*s`` (churn is proportional to movement).
+  resolution $B$ and offset $u \sim U[0,1)$ give the cell
+
+  $$c(x) = \lfloor B\,((x+u) \bmod 1) \rfloor$$
+
+  with collision probability **exactly**
+  $P[c(x){=}c(y)] = \max(0,\, 1 - B\delta)$ — seamless on the torus. A
+  table concatenates $K$ sampled dimensions: collisions decay as
+  $\prod_j \max(0, 1-B\delta_j) \approx e^{-B \cdot L1}$, a uniformly
+  random pair collides per dimension with probability exactly $1/B$
+  (bucket load $n/B^K$), and a point that moves by $s$ changes a cell
+  with probability $B s$ (churn is proportional to movement).
 * **Two tiers**: a *static tier*, hashed and key-sorted once, that grows only
   by promotion (a linear merge, never a re-sort), and a small *candidate
   tier* refreshed per epoch. Queries default to "each candidate against
@@ -24,9 +29,10 @@ Contract (PLAN.md, gate outcomes 2026-07-13):
   low-order digits turns a bucket into a contiguous sorted-key range), so k
   results are structurally guaranteed without a distance scan.
 * **Tuning**: ``fit(..., k=...)`` or ``radius=...`` feeds ESS's own query
-  heuristic into the index — B from the neighbour scale, K from the
-  closed-form bucket load, L from a recall target. Explicit constructor
-  arguments always win over tuning.
+  heuristic into the index — $B$ from the neighbour scale, $K$ from the
+  closed-form bucket load $K = \operatorname{round}(\log_B(n/\text{target}))$,
+  $L$ from a recall target. Explicit constructor arguments always win
+  over tuning.
 
 This class owns validation, tuning, hash-parameter drawing and *selection*;
 the search itself lives in interchangeable implementations of
@@ -96,7 +102,7 @@ def available_backends() -> list[str]:
 
 
 class ToroidalNN:
-    """Exact + approximate toroidal L1 k-NN with an ESS-shaped lifecycle.
+    r"""Exact + approximate toroidal L1 k-NN with an ESS-shaped lifecycle.
 
     Lifecycle::
 
@@ -113,11 +119,12 @@ class ToroidalNN:
         brute_threshold: Exact search while total points <= this. ``None``
             (default) picks the measured brute/LSH crossover of the backend:
             4096 for python, 512 for rust (ANALYSIS.md, crossover section).
-        num_tables: Tables L. ``None`` = tuned (default 16 without hints).
-        resolution: Cells per dimension B >= 2. ``None`` = tuned (default 3).
-        dims_per_table: Sampled dimensions K. ``None`` = closed-form bucket
-            load ``K = round(log_B(n / target_bucket_size))``.
-        target_bucket_size: Bucket-load target for the K rule. ``None`` =
+        num_tables: Tables $L$. ``None`` = tuned (default 16 without hints).
+        resolution: Cells per dimension $B \ge 2$. ``None`` = tuned
+            (default 3).
+        dims_per_table: Sampled dimensions $K$. ``None`` = closed-form
+            bucket load $K = \operatorname{round}(\log_B(n/\text{target}))$.
+        target_bucket_size: Bucket-load target for the $K$ rule. ``None`` =
             ``max(32, k_hint)``.
         probes: Neighbour-cell probes per table per query.
         query_block_size: Queries per vectorised block (advisory).
@@ -404,14 +411,17 @@ class ToroidalNN:
 
     @property
     def n_points(self) -> int:
+        """Total indexed points (both tiers)."""
         return self._arena.shape[0]
 
     @property
     def n_static(self) -> int:
+        """Points in the static tier (anchors; never move)."""
         return self._n_static
 
     @property
     def n_candidates(self) -> int:
+        """Points in the candidate tier (moved by ``update``)."""
         return self._arena.shape[0] - self._n_static
 
     @property
@@ -421,12 +431,15 @@ class ToroidalNN:
 
     @property
     def dimensions(self) -> int:
+        """Dimensionality ``d`` of the indexed space."""
         return self._d
 
     @property
     def is_approximate(self) -> bool:
+        """True in LSH mode, False while the exact brute path serves."""
         return self._use_lsh
 
     @property
     def n_tables(self) -> int:
+        """Hash tables in use (0 in exact mode)."""
         return self._L if self._use_lsh else 0

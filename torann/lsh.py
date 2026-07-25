@@ -16,7 +16,17 @@ __all__ = ["PythonLshIndex"]
 
 
 class PythonLshIndex(BaseIndex):
-    """Two-tier toroidal-L1 LSH index (pure NumPy)."""
+    """Two-tier toroidal-L1 LSH index (pure NumPy).
+
+    Args:
+        B: Cells per dimension (integer resolution >= 2).
+        K: Sampled dimensions per table; ``B**K`` must fit in int64.
+        L: Number of tables.
+        probes: Neighbour-cell probes per table per query.
+        S: int64 ``(L, K)`` sampled dimension indices (drawn by the facade).
+        U: float64 ``(L, K)`` per-dimension offsets in ``[0, 1)``.
+        block: Advisory query batch size for the vectorised blocks.
+    """
 
     def __init__(self, B, K, L, probes, S, U, block=1024):
         self.B = int(B)
@@ -36,6 +46,8 @@ class PythonLshIndex(BaseIndex):
     # ------------------------------------------------------------------ #
 
     def build(self, points: np.ndarray, n_static: int) -> None:
+        """Hash and key-sort both tiers from zero (stable sort: ties keep
+        ascending id order — the normative table layout)."""
         self._pts = np.ascontiguousarray(points, dtype=np.float64).copy()
         self._pts32 = self._pts.astype(np.float32)
         self.n_points = self._pts.shape[0]
@@ -90,6 +102,15 @@ class PythonLshIndex(BaseIndex):
     # ------------------------------------------------------------------ #
 
     def query_knn(self, queries, k, exclude_ids=None):
+        """Batch k-NN: multi-probe gather → dedupe → float32 refine →
+        per-query top-k; under-filled rows are completed by prefix
+        relaxation (see :meth:`_relaxed_query`), never by a brute scan.
+
+        Returns:
+            ``(idx, dist)`` of shape ``(m, k)``, rows sorted by distance,
+            padded with ``-1`` / ``inf`` only when fewer than ``k``
+            reachable points exist.
+        """
         m = queries.shape[0]
         idx = np.full((m, k), -1, dtype=np.int64)
         dst = np.full((m, k), np.inf)
@@ -111,6 +132,13 @@ class PythonLshIndex(BaseIndex):
         return idx, dst
 
     def query_radius(self, queries, radius, exclude_ids=None):
+        """Batch range query as a post-filter on the gathered candidate
+        set (no relaxation — recall falls off beyond the probe reach).
+
+        Returns:
+            CSR triple ``(indptr, ids, dists)``; row ``i`` is
+            ``ids[indptr[i]:indptr[i+1]]``, sorted by distance.
+        """
         m = queries.shape[0]
         counts = []
         all_ids = []
@@ -139,6 +167,14 @@ class PythonLshIndex(BaseIndex):
     # ------------------------------------------------------------------ #
 
     def tables(self) -> dict:
+        """The hash tables, for conformance tests and benchmarks.
+
+        Returns:
+            Dict of copies: ``static_keys`` / ``static_ids`` (int64
+            ``(L, n_static)``, key-sorted), ``cand_keys`` (unsorted,
+            aligned to candidate row order) and ``cand_sorted_keys`` /
+            ``cand_sorted_ids``.
+        """
         return {
             "static_keys": self._skeys_s.copy(),
             "static_ids": self._sids_s.copy(),
@@ -152,6 +188,9 @@ class PythonLshIndex(BaseIndex):
     # ------------------------------------------------------------------ #
 
     def _table_codes(self, X, t):
+        """The normative hash: per sampled dimension of table ``t``,
+        ``code = min(int64(((x+u) mod 1) * B), B-1)``; also returns the
+        in-cell fractional part (drives multi-probe direction)."""
         frac = np.mod(X[:, self.S[t]] + self.U[t], 1.0) * self.B
         codes = frac.astype(np.int64)
         np.minimum(codes, self.B - 1, out=codes)  # guard float round-up
@@ -318,6 +357,8 @@ class PythonLshIndex(BaseIndex):
         return pairs // n, pairs % n
 
     def _refine(self, Qb, qids, cands):
+        """Toroidal L1 in float32 for every gathered (query, candidate)
+        pair — the distance the contract mandates for refinement."""
         q32 = Qb.astype(np.float32)
         delta = np.abs(q32[qids] - self._pts32[cands])
         np.minimum(delta, np.float32(1.0) - delta, out=delta)

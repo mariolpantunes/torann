@@ -96,6 +96,39 @@ class TestBruteMode(unittest.TestCase):
         self.assertTrue((idx[:, 6:] == -1).all())
         self.assertTrue(np.isinf(dst[:, 6:]).all())
 
+    def test_out_of_range_inputs_reduced_mod_1(self):
+        """The facade owns the [0,1) domain: any input is reduced mod 1."""
+        nn = ToroidalNN(seed=0).fit(self.static + 3.0, self.cands - 2.0)
+        ref = ToroidalNN(seed=0).fit(self.static, self.cands)
+        a = nn.query(k=5)
+        b = ref.query(k=5)
+        np.testing.assert_array_equal(a[0], b[0])
+        np.testing.assert_allclose(a[1], b[1], atol=1e-12)
+
+    def test_explicit_exclude_ids(self):
+        nn = ToroidalNN(seed=0).fit(self.static, self.cands)
+        Q = self.all_pts[:20]          # query the indexed points themselves
+        ex = np.arange(20, dtype=np.int64)
+        idx, dst = nn.query(k=3, queries=Q, exclude_ids=ex)
+        self.assertFalse((idx == ex[:, None]).any())  # self never returned
+        self.assertTrue((dst[:, 0] > 0).all())
+
+    def test_promote_empty_batch(self):
+        nn = ToroidalNN(seed=0).fit(self.static, self.cands)
+        nn.promote()                   # no new batch
+        self.assertEqual((nn.n_static, nn.n_candidates), (500, 0))
+        with self.assertRaises(ValueError):
+            nn.query(k=2)              # no candidate tier to self-join
+        idx, _ = nn.query(k=2, queries=self.cands[:4])
+        self.assertEqual(idx.shape, (4, 2))
+
+    def test_candidates_property_tracks_updates(self):
+        nn = ToroidalNN(seed=0).fit(self.static, self.cands)
+        moved = np.mod(self.cands + 0.25, 1.0)
+        nn.update(moved)
+        np.testing.assert_allclose(nn.candidates, moved, atol=1e-12)
+        self.assertEqual(nn.dimensions, 4)
+
 
 class TestLSHMode(unittest.TestCase):
     """Above brute_threshold: approximate filter, exact distances."""
@@ -168,6 +201,25 @@ class TestLSHMode(unittest.TestCase):
                 np.sort(fresh_s[t]), tab["static_keys"][t])
             np.testing.assert_array_equal(
                 fresh_s[t][tab["static_ids"][t]], tab["static_keys"][t])
+
+    def test_radius_hint_tuning(self):
+        """fit(radius=...) is the alternative tuning hint; the index must
+        come up approximate, deterministic and usable."""
+        nn = self.make().fit(self.static, self.cands, radius=0.25)
+        self.assertTrue(nn.is_approximate)
+        idx, dst = nn.query(k=8)
+        self.assertTrue((idx >= 0).all())
+        self.assertTrue((np.diff(dst, axis=1) >= -1e-6).all())
+
+    def test_query_radius_explicit_queries(self):
+        nn = self.make().fit(self.static, self.cands)
+        Q = np.random.default_rng(2).random((16, self.D))
+        res = nn.query_radius(0.4, queries=Q)
+        self.assertEqual(len(res), 16)
+        D = torus_l1(Q, self.all_pts)
+        for i, (ids, dst) in enumerate(res):
+            self.assertTrue((D[i, ids] <= 0.4 + 1e-6).all())  # true hits only
+            np.testing.assert_allclose(dst, D[i, ids], atol=1e-5)
 
     def test_starved_index_fills_rows_via_relaxation(self):
         """One table, no probes, oversized keys: buckets are near-empty, so
@@ -376,6 +428,23 @@ class TestValidation(unittest.TestCase):
         nn = ToroidalNN(seed=0).fit(np.random.default_rng(0).random((10, 4)))
         with self.assertRaises(ValueError):
             nn.query(k=1, queries=np.zeros((1, 3)))
+
+    def test_bad_k(self):
+        nn = ToroidalNN(seed=0).fit(np.random.default_rng(0).random((10, 3)),
+                                    np.random.default_rng(1).random((4, 3)))
+        with self.assertRaises(ValueError):
+            nn.query(k=0)
+
+    def test_exclude_ids_shape_checked(self):
+        nn = ToroidalNN(seed=0).fit(np.random.default_rng(0).random((10, 3)))
+        with self.assertRaises(ValueError):
+            nn.query(k=1, queries=np.zeros((2, 3)),
+                     exclude_ids=np.array([0], dtype=np.int64))
+
+    def test_available_backends(self):
+        names = available_backends()
+        self.assertIn("python", names)  # the reference is always present
+        self.assertTrue(set(names) <= {"rust", "python"})
 
 
 @unittest.skipIf(len(BACKENDS) < 2, "only one backend installed")
