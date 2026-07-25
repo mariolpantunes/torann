@@ -122,6 +122,24 @@ class TestBruteMode(unittest.TestCase):
         idx, _ = nn.query(k=2, queries=self.cands[:4])
         self.assertEqual(idx.shape, (4, 2))
 
+    def test_fit_from_scratch_empty_static(self):
+        """The from-scratch case: no anchors, first batch repels itself."""
+        rng = np.random.default_rng(3)
+        cands = rng.random((40, 4))
+        nn = ToroidalNN(seed=0, brute_threshold=64).fit(
+            np.empty((0, 4)), cands, k=5)
+        self.assertEqual((nn.n_static, nn.n_candidates), (0, 40))
+        idx, dst = nn.query(k=5)
+        self.assertEqual(idx.shape, (40, 5))
+        self.assertFalse((idx == np.arange(40)[:, None]).any())  # self excluded
+        nn.promote(rng.random((40, 4)))    # crosses threshold -> LSH build
+        self.assertEqual((nn.n_static, nn.n_candidates), (40, 40))
+        self.assertTrue(nn.is_approximate)
+        idx2, _ = nn.query(k=5)
+        self.assertEqual(idx2.shape, (40, 5))
+        with self.assertRaises(ValueError):
+            ToroidalNN(seed=0).fit(np.empty((0, 4)))  # no points at all
+
     def test_candidates_property_tracks_updates(self):
         nn = ToroidalNN(seed=0).fit(self.static, self.cands)
         moved = np.mod(self.cands + 0.25, 1.0)

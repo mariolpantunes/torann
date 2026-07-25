@@ -193,14 +193,24 @@ class ToroidalNN:
         here and kept stable for the whole run.
 
         Args:
-            static_points: (n, d) anchors; never move.
+            static_points: (n, d) anchors; never move. May be empty
+                (shape ``(0, d)``) when ``candidate_points`` is given —
+                the from-scratch case, where the first batch has nothing
+                to anchor against but itself.
             candidate_points: (c, d) points that move each epoch. Optional.
             k: The k the workload will query (ESS: 2*d). Drives tuning.
             radius: Alternative tuning hint: the range-query radius.
         """
         S = np.atleast_2d(np.asarray(static_points, dtype=np.float64))
-        if S.ndim != 2 or S.shape[0] == 0:
-            raise ValueError("static_points must be a non-empty (n, d) array")
+        if S.ndim != 2:
+            raise ValueError("static_points must be an (n, d) array")
+        if S.shape[0] == 0:
+            C0 = np.atleast_2d(np.asarray(candidate_points, dtype=np.float64)) \
+                if candidate_points is not None else None
+            if C0 is None or C0.shape[0] == 0:
+                raise ValueError(
+                    "fit needs at least one point (static or candidate)")
+            S = np.empty((0, C0.shape[1]))
         self._d = S.shape[1]
         C = self._as_batch(candidate_points)
         self._arena = np.mod(np.vstack([S, C]), 1.0)
