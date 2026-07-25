@@ -1,21 +1,65 @@
-[project]
-name = "torann"
-version = "0.2.0"
-description = "torann — TORoidal Approximate Nearest Neighbours: L1 LSH on the unit torus"
-authors = [
-    {name = "Mário Antunes", email = "mario.antunes@av.it.pt"}
-]
-readme = "README.md"
-dependencies = ["numpy"]
-requires-python = ">=3.10"
-
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
+[project]
+name = "torann"
+version = "0.2.0"
+authors = [
+    { name = "Mário Antunes", email = "mario.antunes@ua.pt" }
+]
+description = "TORoidal Approximate Nearest Neighbours — exact + LSH k-NN under toroidal L1 on the unit torus"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = [
+    "nearest-neighbours", "ann", "lsh", "torus", "toroidal",
+    "l1", "manhattan", "similarity-search", "high-dimensional",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.26.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/mariolpantunes/torann"
+Documentation = "https://mariolpantunes.github.io/torann/"
+Repository = "https://github.com/mariolpantunes/torann"
+Issues = "https://github.com/mariolpantunes/torann/issues"
+
 [tool.maturin]
 # Mixed Rust/Python project: the `torann/` package plus a compiled
 # extension exposed as `torann._native`. `maturin build --release`
-# produces the complete wheel.
+# produces the complete wheel; without the compiled module the package
+# still runs on the pure-Python reference implementation.
 module-name = "torann._native"
 features = ["pyo3/extension-module"]
+include = [
+    { path = "torann/CONTRACT.md", format = ["sdist", "wheel"] },
+    { path = "LICENSE", format = "sdist" },
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.basedpyright]
+typeCheckingMode = "standard"
+include = ["torann"]
+reportMissingModuleSource = false  # torann._native is compiled
+
+[tool.vulture]
+paths = ["torann"]
+min_confidence = 80

@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+title: torann
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Mário
+    family-names: Antunes
+    email: mario.antunes@ua.pt
+    affiliation: University of Aveiro
+    orcid: 'https://orcid.org/0000-0002-6504-9441'
+abstract: >-
+  TORoidal Approximate Nearest Neighbours — exact and
+  LSH-based k-NN and range search under toroidal L1 on the
+  unit torus, built for Empty-Space-Search (ESS) epoch
+  workloads.
+keywords:
+  - nearest-neighbours
+  - locality-sensitive-hashing
+  - torus
+  - L1
+  - high-dimensional
+license: MIT
+repository-code: 'https://github.com/mariolpantunes/torann'

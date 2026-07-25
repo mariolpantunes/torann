@@ -1,0 +1,67 @@
+name: Generate and Deploy Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pdoc numpy
+          pip install .
+
+      - name: Generate Docs
+        run: |
+          pdoc --math -d google -o docs_build \
+            torann torann.wrapper torann.base torann.brute torann.lsh torann.rust \
+            --logo "assets/logo.svg" \
+            --favicon "assets/logo.svg"
+          # The logo is resolved relative to each page: copy the assets both
+          # to the root (torann.html) and beside the submodule pages
+          # (torann/*.html) so it appears correctly everywhere.
+          cp -r assets docs_build/assets
+          cp -r assets docs_build/torann/assets
+          touch docs_build/.nojekyll
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'docs_build'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
