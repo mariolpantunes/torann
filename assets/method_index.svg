@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400" width="1000" height="400"
+     font-family="Helvetica, Arial, sans-serif">
+  <!-- torann index representation: point -> digits -> key -> sorted table.
+       Transparent background; box fills carry their own contrast. -->
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6"
+            markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <style>
+    .t  { fill: #64748b; font-size: 14px; }
+    .th { fill: #64748b; font-size: 17px; font-weight: bold; }
+    .m  { fill: #1e293b; font-size: 15px; font-family: "Courier New", monospace; }
+    .mb { fill: #1e293b; font-size: 17px; font-family: "Courier New", monospace; font-weight: bold; }
+    .box  { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 2; }
+    .cell { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.5; }
+    .hot  { fill: #dbeafe; stroke: #3b82f6; stroke-width: 2; }
+    .ln { stroke: #64748b; stroke-width: 2; fill: none; marker-end: url(#a); }
+  </style>
+
+  <!-- 1. the point -->
+  <text x="30" y="40" class="th">1 &#183; point</text>
+  <circle cx="60" cy="110" r="9" fill="#3b82f6" stroke="#ffffff" stroke-width="2.5"/>
+  <text x="28" y="150" class="m">x &#8712; [0,1)&#7496;</text>
+
+  <!-- 2. one table: K sampled dimensions -> digits -->
+  <text x="210" y="40" class="th">2 &#183; hash (table t)</text>
+  <text x="210" y="76" class="m" font-size="13">c&#11388; = &#8970;B((x[S&#11388;]+u&#11388;) mod 1)&#8971;</text>
+  <g>
+    <rect x="210" y="92" width="44" height="44" class="cell"/>
+    <rect x="254" y="92" width="44" height="44" class="cell"/>
+    <rect x="298" y="92" width="44" height="44" class="cell"/>
+    <text x="226" y="121" class="mb">2</text>
+    <text x="270" y="121" class="mb">0</text>
+    <text x="314" y="121" class="mb">1</text>
+  </g>
+  <text x="210" y="168" class="t">K digits, B cells per dimension;</text>
+  <text x="210" y="188" class="t">exact collision law  P = max(0, 1 &#8722; B&#948;)</text>
+
+  <!-- 3. the key -->
+  <text x="440" y="40" class="th">3 &#183; key (base-B)</text>
+  <text x="440" y="76" class="m">key = &#931;&#11388; c&#11388;&#183;B&#690;</text>
+  <rect x="440" y="92" width="200" height="44" class="cell"/>
+  <text x="452" y="121" class="mb">2 + 0&#183;3 + 1&#183;9 = 11</text>
+
+  <!-- arrows -->
+  <line x1="105" y1="110" x2="195" y2="110" class="ln"/>
+  <line x1="355" y1="114" x2="425" y2="114" class="ln"/>
+  <line x1="652" y1="114" x2="700" y2="114" class="ln"/>
+
+  <!-- 4. the sorted tier -->
+  <text x="715" y="40" class="th">4 &#183; sorted key array</text>
+  <g>
+    <rect x="715" y="92" width="38" height="38" class="cell"/>
+    <rect x="753" y="92" width="38" height="38" class="cell"/>
+    <rect x="791" y="92" width="38" height="38" class="hot"/>
+    <rect x="829" y="92" width="38" height="38" class="hot"/>
+    <rect x="867" y="92" width="38" height="38" class="cell"/>
+    <rect x="905" y="92" width="38" height="38" class="cell"/>
+    <text x="725" y="117" class="m">4</text>
+    <text x="763" y="117" class="m">9</text>
+    <text x="797" y="117" class="m">11</text>
+    <text x="835" y="117" class="m">11</text>
+    <text x="875" y="117" class="m">15</text>
+    <text x="913" y="117" class="m">22</text>
+  </g>
+  <g>
+    <rect x="715" y="130" width="38" height="38" class="cell"/>
+    <rect x="753" y="130" width="38" height="38" class="cell"/>
+    <rect x="791" y="130" width="38" height="38" class="hot"/>
+    <rect x="829" y="130" width="38" height="38" class="hot"/>
+    <rect x="867" y="130" width="38" height="38" class="cell"/>
+    <rect x="905" y="130" width="38" height="38" class="cell"/>
+    <text x="725" y="155" class="m">7</text>
+    <text x="759" y="155" class="m">12</text>
+    <text x="801" y="155" class="m">3</text>
+    <text x="835" y="155" class="m">31</text>
+    <text x="877" y="155" class="m">8</text>
+    <text x="911" y="155" class="m">25</text>
+  </g>
+  <text x="715" y="196" class="t">keys + aligned ids: a bucket is a</text>
+  <text x="715" y="216" class="t">contiguous range (O(1) offset table)</text>
+
+  <!-- lifecycle strip -->
+  <g>
+    <rect x="30" y="256" width="940" height="118" rx="12" class="box"/>
+    <text x="52" y="288" class="th">the index = L independent tables &#215; two tiers</text>
+    <text x="52" y="316" class="t">static tier: hashed + key-sorted once; grows only by promote() — a linear merge, never a re-sort</text>
+    <text x="52" y="336" class="t">candidate tier: refreshed each epoch; update() re-places only points whose key changed (P = B&#183;step per dimension)</text>
+    <text x="52" y="356" class="t">query: gather buckets from every table &#8594; dedupe &#8594; exact L1 refine &#8594; top-k; under-filled rows widen by prefix relaxation</text>
+  </g>
+</svg>
