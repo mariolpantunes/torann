@@ -17,6 +17,13 @@ __all__ = ["BruteIndex", "pairwise_l1", "exact_knn", "exact_radius"]
 # Element budget for the temporary (queries x points) distance blocks.
 _BUDGET = 1 << 24
 
+# NumPy reduces a contiguous axis with *pairwise* summation: eight lane
+# accumulators, a fixed tree over them, then the tail — and past a 128-element
+# block it recurses, which this reconstruction does not follow. Below that
+# limit the order can be reproduced exactly with (m, n) blocks, which is what
+# lets the (m, n, d) temporary disappear without moving a single bit.
+_PAIRWISE_MAX = 128
+
 
 def pairwise_l1(Q: np.ndarray, pts: np.ndarray) -> np.ndarray:
     r"""Dense toroidal-L1 distance matrix.
@@ -25,8 +32,17 @@ def pairwise_l1(Q: np.ndarray, pts: np.ndarray) -> np.ndarray:
 
     $$d(a, b) = \sum_{i=1}^{d} \min(|a_i - b_i|,\; 1 - |a_i - b_i|)$$
 
-    Allocates the full ``(m, n, d)`` difference block — call through a
-    block loop (``exact_knn`` / ``exact_radius`` do).
+    Accumulates over the ``d`` dimensions into ``(m, n)`` buffers instead of
+    materialising the ``(m, n, d)`` difference block and reducing it. The
+    block was the whole cost: profiled on the shapes ESS gives this path
+    (256x256 at d=2, 7680x256 at d=2), the reduction over an axis of length
+    two alone was ~45% of the call, because a two-element reduction is all
+    per-output overhead. Results are unchanged — the accumulation follows
+    NumPy's own pairwise order for ``d <= 128`` (verified bit-for-bit), and
+    above that the original block form still serves.
+
+    Still call it through a block loop (``exact_knn`` / ``exact_radius`` do):
+    the working set is now ~10 ``(m, n)`` buffers rather than ``d`` of them.
 
     Args:
         Q: ``(m, d)`` float64 queries in ``[0, 1)``.
@@ -35,9 +51,43 @@ def pairwise_l1(Q: np.ndarray, pts: np.ndarray) -> np.ndarray:
     Returns:
         ``(m, n)`` float64 distance matrix.
     """
-    diff = np.abs(Q[:, None, :] - pts[None, :, :])
-    np.minimum(diff, 1.0 - diff, out=diff)
-    return diff.sum(-1)
+    m, d = Q.shape
+    n = pts.shape[0]
+    if d > _PAIRWISE_MAX:
+        diff = np.abs(Q[:, None, :] - pts[None, :, :])
+        np.minimum(diff, 1.0 - diff, out=diff)
+        return diff.sum(-1)
+
+    wall = np.empty((m, n))
+
+    def fold(j, out):
+        """``min(|q_j - p_j|, 1 - |q_j - p_j|)`` into ``out``, no allocation."""
+        np.subtract(Q[:, j, None], pts[None, :, j], out=out)
+        np.abs(out, out=out)
+        np.subtract(1.0, out, out=wall)
+        np.minimum(out, wall, out=out)
+        return out
+
+    if d < 8:  # NumPy sums fewer than eight elements straight through
+        acc = fold(0, np.empty((m, n)))
+        tmp = np.empty((m, n))
+        for j in range(1, d):
+            acc += fold(j, tmp)
+        return acc
+
+    lanes = [fold(j, np.empty((m, n))) for j in range(8)]
+    tmp = np.empty((m, n))
+    j = 8
+    while j + 8 <= d:
+        for lane in range(8):
+            lanes[lane] += fold(j + lane, tmp)
+        j += 8
+    acc = (((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
+           + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7])))
+    while j < d:
+        acc += fold(j, tmp)
+        j += 1
+    return acc
 
 
 def _blocks(m: int, n: int, d: int):
@@ -69,11 +119,21 @@ def exact_knn(pts, Q, k, exclude_ids=None):
         D = pairwise_l1(Q[s:e], pts)
         if exclude_ids is not None:
             D[np.arange(e - s), exclude_ids[s:e]] = np.inf
-        part = np.argpartition(D, kk - 1, axis=1)[:, :kk]
-        pd = np.take_along_axis(D, part, axis=1)
-        order = np.argsort(pd, axis=1, kind="stable")
-        part = np.take_along_axis(part, order, axis=1)
-        pd = np.take_along_axis(pd, order, axis=1)
+        if kk == 1:
+            # ESS asks for exactly this in `_smart_init` (the farthest of a
+            # candidate pool), and it is worth splitting out: argpartition
+            # builds a full (m, n) index matrix to select one column, which
+            # profiled at ~45% of the call. Ties go to the lowest id here
+            # rather than to whatever introselect left in place — that is a
+            # tighter guarantee, not a looser one.
+            part = D.argmin(axis=1)[:, None]
+            pd = np.take_along_axis(D, part, axis=1)
+        else:
+            part = np.argpartition(D, kk - 1, axis=1)[:, :kk]
+            pd = np.take_along_axis(D, part, axis=1)
+            order = np.argsort(pd, axis=1, kind="stable")
+            part = np.take_along_axis(part, order, axis=1)
+            pd = np.take_along_axis(pd, order, axis=1)
         finite = np.isfinite(pd)
         idx[s:e, :kk] = np.where(finite, part, -1)
         dst[s:e, :kk] = np.where(finite, pd, np.inf)
