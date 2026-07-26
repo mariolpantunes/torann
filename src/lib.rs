@@ -14,13 +14,16 @@
 //! the facade guarantees (see `wrap_unit`).
 //!
 //! Internal acceleration (non-normative — tables and results are unchanged):
-//! a per-table direct-address offset array over the key space `[0, B^K)`
-//! answers every bucket lookup and relaxation range in O(1) (`offs_s`,
-//! falling back to a batched branchless binary search when the key space
-//! outgrows `OFFS_BUDGET`), key computation streams through per-chunk
-//! buffers with no per-point allocation, and refinement runs on eight
-//! parallel f32 accumulators (one AVX lane set). Rejected-by-measurement
-//! variants are recorded in ANALYSIS.md so they are not re-tried.
+//! per-table direct-address offset arrays over the key space `[0, B^K)`
+//! answer every bucket lookup and relaxation range in O(1) for both tiers
+//! (`offs_s`, `offs_c`, falling back to a batched branchless binary search
+//! when the key space outgrows `OFFS_BUDGET`), key computation streams
+//! through per-chunk buffers with no per-point allocation, and a batch of
+//! queries is answered by a **bucket-centric join** (`query_block`) that
+//! loads each bucket once per block instead of once per query. Refinement
+//! runs on eight f32 accumulators, four tile rows at a time. Rejected-by-
+//! measurement variants are recorded in ANALYSIS.md and OPTIMIZE.md so they
+//! are not re-tried.
 
 // The kernels index with `for i in 0..n` on purpose: most loops write to
 // several arrays at once and were profile-tuned in this exact shape. The
@@ -34,6 +37,7 @@ use numpy::{
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
+use wide::f32x8;
 
 /// Lower bound: first index whose value is >= v.
 #[inline]
@@ -54,33 +58,82 @@ fn wrap_unit(s: f64) -> f64 {
     s - s.floor()
 }
 
-/// Toroidal L1 in f32. Eight parallel accumulators break the serial
-/// float-add dependency so LLVM vectorizes the loop (one AVX lane set);
-/// f32 addition is not associative, so the plain `s +=` form cannot be
-/// auto-vectorized and runs scalar. Summation order differs from NumPy's
-/// pairwise sum either way — the contract allows 1e-5.
+/// Toroidal L1 in f32, on eight parallel accumulators.
+///
+/// f32 addition is not associative, so the eight independent lanes are what
+/// makes the loop vectorizable at all — a plain `s +=` chain cannot be. The
+/// lanes are also what pins the summation order, and therefore the results:
+/// eight is not a tuning knob, it is the contract (`chunks_exact(8)` into
+/// `acc[j]`, tail into `s`, then `s + acc.sum()`).
+///
+/// The eight lanes are one `wide::f32x8` because **LLVM does not vectorize
+/// the scalar form**: written with slices, or with the chunks re-typed to
+/// `&[f32; 8]`, the query loop disassembles to `vsubss`/`vminss` with not a
+/// single packed op, and the query runs 1.55× slower (measured, §OPTIMIZE.md
+/// §3). `wide` is a safe, stable-Rust SIMD wrapper — no `unsafe` here, no
+/// nightly `std::simd` — that lowers to AVX2 where the target has it and to
+/// SSE where it does not, keeping the lane mapping either way.
 #[inline]
 fn dist_l1_32(a: &[f32], b: &[f32]) -> f32 {
-    let mut acc = [0.0f32; 8];
-    for (ca, cb) in a.chunks_exact(8).zip(b.chunks_exact(8)) {
-        for j in 0..8 {
-            let t = (ca[j] - cb[j]).abs();
-            let w = 1.0f32 - t;
-            acc[j] += if t < w { t } else { w };
-        }
+    let n = a.len().min(b.len());
+    let nc = n / 8;
+    let ones = f32x8::splat(1.0);
+    let mut acc = f32x8::ZERO;
+    for c in 0..nc {
+        let o = c * 8;
+        let va = f32x8::new(a[o..o + 8].try_into().unwrap());
+        let vb = f32x8::new(b[o..o + 8].try_into().unwrap());
+        let t = (va - vb).abs();
+        acc += t.fast_min(ones - t);
     }
     let mut s = 0.0f32;
-    for (x, y) in a
-        .chunks_exact(8)
-        .remainder()
-        .iter()
-        .zip(b.chunks_exact(8).remainder())
-    {
-        let t = (x - y).abs();
+    for j in nc * 8..n {
+        let t = (a[j] - b[j]).abs();
         let w = 1.0f32 - t;
         s += if t < w { t } else { w };
     }
-    s + acc.iter().sum::<f32>()
+    s + acc.to_array().iter().sum::<f32>()
+}
+
+/// Tile rows scored per call of [`dist_l1_rows`].
+const ROWS: usize = 4;
+
+/// Toroidal L1 of one query against `ROWS` consecutive tile rows.
+///
+/// Bit-identical to calling [`dist_l1_32`] on each row — same lanes, same
+/// order — but it exists because the single-row kernel is **latency** bound,
+/// not throughput bound. Per pair, that one has a serial `vaddps` chain over
+/// the chunks and then a serial 8-lane horizontal reduction (the
+/// shuffle/`vaddss` ladder), ~30 cycles of dependent work with nothing to
+/// overlap it with; measured 90 cycles/pair single-threaded on d=32 for ~66
+/// instructions. `ROWS` rows give `ROWS` independent accumulator chains and
+/// `ROWS` independent reductions, which interleave, and the query chunk is
+/// loaded once for all of them.
+#[inline]
+fn dist_l1_rows(q: &[f32], tile: &[f32], d: usize) -> [f32; ROWS] {
+    let nc = d / 8;
+    let ones = f32x8::splat(1.0);
+    let mut acc = [f32x8::ZERO; ROWS];
+    for c in 0..nc {
+        let o = c * 8;
+        let vq = f32x8::new(q[o..o + 8].try_into().unwrap());
+        for r in 0..ROWS {
+            let b = r * d + o;
+            let t = (vq - f32x8::new(tile[b..b + 8].try_into().unwrap())).abs();
+            acc[r] += t.fast_min(ones - t);
+        }
+    }
+    let mut out = [0.0f32; ROWS];
+    for r in 0..ROWS {
+        let mut s = 0.0f32;
+        for j in nc * 8..d {
+            let t = (q[j] - tile[r * d + j]).abs();
+            let w = 1.0f32 - t;
+            s += if t < w { t } else { w };
+        }
+        out[r] = s + acc[r].to_array().iter().sum::<f32>();
+    }
+    out
 }
 
 /// Hint the cache that an address is about to be read (gather and refine
@@ -102,70 +155,112 @@ fn prefetch<T>(r: &T) {
     }
 }
 
-/// Bounded max-heap of (distance bits, id); f32 bit patterns of
-/// non-negative floats order like the floats themselves.
+/// The canonical k-NN order: distance first, id as the tie-break. f32 bit
+/// patterns of non-negative floats order like the floats themselves, so the
+/// pair compares as the tuple it is. Ranking by (dist, id) rather than by
+/// arrival makes the k-th slot independent of the order candidates are
+/// scored in — which is what lets the batched join (which visits a query's
+/// candidates bucket-major rather than table-major) return the same rows.
+#[inline(always)]
+fn hless(a: (u32, i64), b: (u32, i64)) -> bool {
+    a.0 < b.0 || (a.0 == b.0 && a.1 < b.1)
+}
+
+/// Sentinel worst-so-far for an under-full heap: everything beats it.
+const WORST: (u32, i64) = (u32::MAX, i64::MAX);
+
+/// Offer (bits, id) to the bounded max-heap in `h[..*len]` (capacity
+/// `h.len()`), keeping the k smallest by [`hless`].
+///
+/// Ids already present are dropped: the batched join sees a point once per
+/// table it shares with the query, and a heap must hold distinct ids. The
+/// scan is O(k) but only runs on the few offers that actually beat the
+/// k-th best, so it costs nothing per candidate.
+#[inline]
+fn heap_offer(h: &mut [(u32, i64)], len: &mut usize, bits: u32, id: i64) {
+    let k = h.len();
+    if k == 0 {
+        return;
+    }
+    let e = (bits, id);
+    if *len < k {
+        if h[..*len].iter().any(|&(_, i)| i == id) {
+            return;
+        }
+        h[*len] = e;
+        let mut i = *len;
+        *len += 1;
+        while i > 0 {
+            let up = (i - 1) >> 1;
+            if !hless(h[up], h[i]) {
+                break;
+            }
+            h.swap(up, i);
+            i = up;
+        }
+    } else if hless(e, h[0]) {
+        if h.iter().any(|&(_, i)| i == id) {
+            return;
+        }
+        h[0] = e;
+        let mut i = 0;
+        loop {
+            let (l, r) = (2 * i + 1, 2 * i + 2);
+            let mut big = i;
+            if l < k && hless(h[big], h[l]) {
+                big = l;
+            }
+            if r < k && hless(h[big], h[r]) {
+                big = r;
+            }
+            if big == i {
+                break;
+            }
+            h.swap(i, big);
+            i = big;
+        }
+    }
+}
+
+/// Ascending (dist, id) into one output row; pads to k with (-1, inf).
+fn heap_emit(h: &mut [(u32, i64)], len: usize, out_idx: &mut [i64], out_dst: &mut [f64]) {
+    h[..len].sort_unstable();
+    for (i, &(bits, id)) in h[..len].iter().enumerate() {
+        out_idx[i] = id;
+        out_dst[i] = f32::from_bits(bits) as f64;
+    }
+    for i in len..h.len() {
+        out_idx[i] = -1;
+        out_dst[i] = f64::INFINITY;
+    }
+}
+
+/// One query's bounded top-k (the per-query path and relaxation; the
+/// batched join keeps its heaps in a block-wide slab instead).
 struct TopK {
-    heap: Vec<(u32, i64)>, // binary max-heap by bits
-    k: usize,
+    buf: Vec<(u32, i64)>,
+    len: usize,
 }
 
 impl TopK {
     fn new(k: usize) -> Self {
         TopK {
-            heap: Vec::with_capacity(k),
-            k,
+            buf: vec![(0, 0); k],
+            len: 0,
         }
     }
 
     fn clear(&mut self) {
-        self.heap.clear();
+        self.len = 0;
     }
 
+    #[inline]
     fn push(&mut self, dist: f32, id: i64) {
-        let bits = dist.to_bits();
-        if self.heap.len() < self.k {
-            self.heap.push((bits, id));
-            let mut i = self.heap.len() - 1;
-            while i > 0 {
-                let up = (i - 1) >> 1;
-                if self.heap[up].0 >= self.heap[i].0 {
-                    break;
-                }
-                self.heap.swap(up, i);
-                i = up;
-            }
-        } else if bits < self.heap[0].0 {
-            self.heap[0] = (bits, id);
-            let mut i = 0;
-            loop {
-                let (l, r) = (2 * i + 1, 2 * i + 2);
-                let mut big = i;
-                if l < self.k && self.heap[l].0 > self.heap[big].0 {
-                    big = l;
-                }
-                if r < self.k && self.heap[r].0 > self.heap[big].0 {
-                    big = r;
-                }
-                if big == i {
-                    break;
-                }
-                self.heap.swap(i, big);
-                i = big;
-            }
-        }
+        heap_offer(&mut self.buf, &mut self.len, dist.to_bits(), id);
     }
 
-    /// Ascending (dist, id); pads the row to k with (-1, inf).
     fn emit(&mut self, out_idx: &mut [i64], out_dst: &mut [f64]) {
-        self.heap.sort_unstable();
-        for (i, &(bits, id)) in self.heap.iter().enumerate() {
-            out_idx[i] = id;
-            out_dst[i] = f32::from_bits(bits) as f64;
-        }
-        for i in self.heap.len()..self.k {
-            out_idx[i] = -1;
-            out_dst[i] = f64::INFINITY;
-        }
+        heap_emit(&mut self.buf, self.len, out_idx, out_dst);
     }
 }
 
@@ -198,12 +293,58 @@ impl Ws {
     }
 }
 
+/// Per-worker workspace of the batched join: one query block's f32 tile,
+/// top-k slab and grouping buffers. Grows to the block size on first use
+/// and is then reused for every block that worker takes.
+#[derive(Default)]
+struct BWs {
+    q32: Vec<f32>,          // nq * d, f32 copy of the block's queries
+    exq: Vec<i64>,          // nq, excluded id per query (-1 = none)
+    heaps: Vec<(u32, i64)>, // nq * k bounded max-heaps
+    hlen: Vec<u32>,         // nq heap lengths
+    codes: Vec<i64>,
+    frac: Vec<f64>,
+    clos: Vec<f64>,
+    probe: Vec<(i64, u32)>, // (bucket key, query slot) of one table, key-sorted
+    gids: Vec<i64>,         // ids of the bucket being scored
+    tile: Vec<f32>,         // TILE * d gathered point coordinates
+    tids: Vec<i64>,         // TILE ids, aligned to tile rows
+}
+
+impl BWs {
+    /// Size the buffers for a block of `nq` queries in `d` dimensions with
+    /// `k` neighbours, and reset the heaps.
+    fn reset(&mut self, nq: usize, d: usize, k: usize, kdim: usize) {
+        self.q32.resize(nq * d, 0.0);
+        self.exq.resize(nq, -1);
+        self.heaps.resize(nq * k, (0, 0));
+        self.hlen.clear();
+        self.hlen.resize(nq, 0);
+        self.codes.resize(kdim, 0);
+        self.frac.resize(kdim, 0.0);
+        self.clos.resize(kdim, 0.0);
+        self.tile.resize(TILE * d, 0.0);
+        self.tids.resize(TILE, 0);
+    }
+}
+
+/// Points per distance tile: one slice of a bucket, small enough that it
+/// stays in L1 while every query of the group scans it (128 * 32 f32 = 16 KiB).
+const TILE: usize = 128;
+
+/// Fewer queries than this and the batched join has nothing to amortise
+/// (its bucket loads are shared across the block), so the per-query path —
+/// which pays for a dedup stamp but scores each candidate once — wins.
+const BATCH_MIN: usize = 64;
+
 #[pyclass]
 struct RustLshIndex {
     b: i64,
     kdim: usize,
     l: usize,
     probes: usize,
+    /// Queries per batched block; 0 = auto (see `block_size`).
+    block: usize,
     s: Vec<i64>,
     u: Vec<f64>,
     pw: Vec<i64>,
@@ -223,6 +364,8 @@ struct RustLshIndex {
     keys_c: Vec<i64>,
     skeys_c: Vec<i64>,
     sids_c: Vec<i64>,
+    /// The candidate tier's direct-address offsets (see `build_offsets`).
+    offs_c: Vec<u32>,
     stats: QueryStats,
 }
 
@@ -235,12 +378,14 @@ struct QueryStats {
     relax_ns: std::sync::atomic::AtomicU64,
     queries: std::sync::atomic::AtomicU64,
     cands: std::sync::atomic::AtomicU64,
+    pairs: std::sync::atomic::AtomicU64,
     relaxed: std::sync::atomic::AtomicU64,
 }
 
-/// Memory budget for the direct-address offset tables, in bytes. The tuner
-/// keeps `B^K ~ n/64`, so real indexes use a few MB; the budget only trips
-/// on hand-forced parameters, where gather falls back to binary search.
+/// Memory budget for the direct-address offset tables, in bytes, counted
+/// over **both** tiers. The tuner keeps `B^K ~ n/64`, so real indexes use a
+/// few MB; the budget only trips on hand-forced parameters, where every
+/// lookup falls back to binary search.
 const OFFS_BUDGET: usize = 64 << 20;
 
 impl RustLshIndex {
@@ -254,35 +399,50 @@ impl RustLshIndex {
     fn key_space(&self) -> usize {
         let bk = self.pw[self.kdim - 1].saturating_mul(self.b);
         let entries = (bk as usize).saturating_add(1);
-        if entries.saturating_mul(self.l * 4) <= OFFS_BUDGET {
+        // Two tiers now carry offsets, so each may claim half the budget.
+        if entries.saturating_mul(self.l * 4 * 2) <= OFFS_BUDGET {
             bk as usize
         } else {
             0
         }
     }
 
-    /// (Re)build `offs_s` from the sorted static keys — O(n + B^K) per
-    /// table. Called at build() and promote(); update() never moves the
-    /// static tier.
-    fn build_static_offsets(&mut self) {
+    /// Direct-address offsets over `[0, B^K]` for one tier's sorted keys —
+    /// `offs[t][v] = lower_bound(keys[t], v)`, so any bucket or prefix range
+    /// is two loads instead of a binary search. O(n + B^K) per table; empty
+    /// when the key space is over `OFFS_BUDGET`, which puts every lookup
+    /// back on the search path.
+    fn build_offsets(&self, keys: &[i64], n: usize) -> Vec<u32> {
         let bk = self.key_space();
-        if bk == 0 {
-            self.offs_s = Vec::new();
-            return;
+        if bk == 0 || n == 0 {
+            return Vec::new();
         }
-        let ns = self.n_static;
         let mut offs = vec![0u32; self.l * (bk + 1)];
         offs.par_chunks_mut(bk + 1).enumerate().for_each(|(t, ot)| {
-            let sk = &self.skeys_s[t * ns..(t + 1) * ns];
+            let sk = &keys[t * n..(t + 1) * n];
             let mut i = 0usize;
             for v in 0..=bk {
-                while i < ns && sk[i] < v as i64 {
+                while i < n && sk[i] < v as i64 {
                     i += 1;
                 }
                 ot[v] = i as u32;
             }
         });
-        self.offs_s = offs;
+        offs
+    }
+
+    /// Called at build() and promote(); update() never moves the static tier.
+    fn build_static_offsets(&mut self) {
+        self.offs_s = self.build_offsets(&self.skeys_s, self.n_static);
+    }
+
+    /// Called wherever the candidate tier is rebuilt or re-placed — build(),
+    /// update(), promote(). The candidate tier is the half of the index the
+    /// ESS self-join hits every epoch, so it earns direct addressing as much
+    /// as the static tier: without it every bucket group in the batched join
+    /// paid two binary searches over `n_candidates` sorted keys.
+    fn build_cand_offsets(&mut self) {
+        self.offs_c = self.build_offsets(&self.skeys_c, self.n_cand());
     }
 
     /// The normative hash of one point for one table.
@@ -371,6 +531,7 @@ impl RustLshIndex {
         let (sk, si) = self.sort_tier(&self.keys_c, nc, self.n_static);
         self.skeys_c = sk;
         self.sids_c = si;
+        self.build_cand_offsets();
     }
 
     /// Static keys/ids of table t as slices.
@@ -393,7 +554,7 @@ impl RustLshIndex {
     }
 
     /// Codes + in-cell fractions of one query for one table.
-    fn query_codes(&self, x: &[f64], t: usize, ws: &mut Ws) -> i64 {
+    fn query_codes(&self, x: &[f64], t: usize, codes: &mut [i64], frac: &mut [f64]) -> i64 {
         let st = &self.s[t * self.kdim..(t + 1) * self.kdim];
         let ut = &self.u[t * self.kdim..(t + 1) * self.kdim];
         let mut key = 0i64;
@@ -403,11 +564,52 @@ impl RustLshIndex {
             if code > self.b - 1 {
                 code = self.b - 1;
             }
-            ws.codes[j] = code;
-            ws.frac[j] = (f - code as f64).clamp(0.0, 1.0);
+            codes[j] = code;
+            frac[j] = (f - code as f64).clamp(0.0, 1.0);
             key += code * self.pw[j];
         }
         key
+    }
+
+    /// The normative probe set of one query in one table: the query's own
+    /// bucket key, then `min(probes, K)` neighbour-cell keys, each obtained
+    /// by stepping the digit whose in-cell fraction sits closest to a cell
+    /// wall (nearest wall first). Emitted through a callback so both the
+    /// per-query gather and the batched join build their own layout.
+    #[inline]
+    fn probe_keys<F: FnMut(i64)>(
+        &self,
+        x: &[f64],
+        t: usize,
+        codes: &mut [i64],
+        frac: &mut [f64],
+        clos: &mut [f64],
+        mut emit: F,
+    ) {
+        let key = self.query_codes(x, t, codes, frac);
+        emit(key);
+        let nprobe = self.probes.min(self.kdim);
+        if nprobe == 0 {
+            return;
+        }
+        for j in 0..self.kdim {
+            let f = frac[j];
+            clos[j] = f.min(1.0 - f);
+        }
+        for _ in 0..nprobe {
+            let mut best = 0usize;
+            let mut best_c = 2.0f64;
+            for j in 0..self.kdim {
+                if clos[j] < best_c {
+                    best_c = clos[j];
+                    best = j;
+                }
+            }
+            clos[best] = 2.0; // consume
+            let dir: i64 = if frac[best] >= 0.5 { 1 } else { -1 };
+            let alt = (codes[best] + dir).rem_euclid(self.b);
+            emit(key + (alt - codes[best]) * self.pw[best]);
+        }
     }
 
     /// Multi-probe gather across all tables into ws.cand (deduplicated).
@@ -421,29 +623,16 @@ impl RustLshIndex {
         ws.stamp_now += 1;
         ws.cand.clear();
         ws.kbuf.clear();
-        let nprobe = self.probes.min(self.kdim);
-        for t in 0..self.l {
-            let key = self.query_codes(x, t, ws);
-            ws.kbuf.push((t as u32, key));
-            for j in 0..self.kdim {
-                let f = ws.frac[j];
-                ws.clos[j] = f.min(1.0 - f);
-            }
-            for _ in 0..nprobe {
-                let mut best = 0usize;
-                let mut best_c = 2.0f64;
-                for j in 0..self.kdim {
-                    if ws.clos[j] < best_c {
-                        best_c = ws.clos[j];
-                        best = j;
-                    }
-                }
-                ws.clos[best] = 2.0; // consume
-                let f = ws.frac[best];
-                let dir: i64 = if f >= 0.5 { 1 } else { -1 };
-                let alt = (ws.codes[best] + dir).rem_euclid(self.b);
-                let pkey = key + (alt - ws.codes[best]) * self.pw[best];
-                ws.kbuf.push((t as u32, pkey));
+        {
+            let Ws {
+                codes,
+                frac,
+                clos,
+                kbuf,
+                ..
+            } = &mut *ws;
+            for t in 0..self.l {
+                self.probe_keys(x, t, codes, frac, clos, |key| kbuf.push((t as u32, key)));
             }
         }
 
@@ -499,19 +688,17 @@ impl RustLshIndex {
                 }
             }
         }
-        // Candidate tier: small (one batch), plain per-key search.
+        // Candidate tier, direct-addressed the same way.
         if self.n_cand() > 0 {
             for i in 0..m {
                 let (t, key) = ws.kbuf[i];
-                let (sk, si) = self.cand_tier(t as usize);
-                let mut lo = lower_bound(sk, key);
-                while lo < sk.len() && sk[lo] == key {
-                    let id = si[lo] as usize;
-                    if ws.stamp[id] != ws.stamp_now {
-                        ws.stamp[id] = ws.stamp_now;
-                        ws.cand.push(si[lo]);
+                let (_, si) = self.cand_tier(t as usize);
+                let (lo, hi) = self.cand_range(t as usize, key, 1);
+                for &id in &si[lo..hi] {
+                    if ws.stamp[id as usize] != ws.stamp_now {
+                        ws.stamp[id as usize] = ws.stamp_now;
+                        ws.cand.push(id);
                     }
-                    lo += 1;
                 }
             }
         }
@@ -548,12 +735,28 @@ impl RustLshIndex {
         }
     }
 
+    /// [lo, hi) of `[lo_key, lo_key + width)` in the sorted candidate keys.
+    #[inline]
+    fn cand_range(&self, t: usize, lo_key: i64, width: i64) -> (usize, usize) {
+        if !self.offs_c.is_empty() {
+            let row = self.offs_c.len() / self.l;
+            let ot = &self.offs_c[t * row..(t + 1) * row];
+            (
+                ot[lo_key as usize] as usize,
+                ot[(lo_key + width) as usize] as usize,
+            )
+        } else {
+            let (sk, _) = self.cand_tier(t);
+            (lower_bound(sk, lo_key), lower_bound(sk, lo_key + width))
+        }
+    }
+
     fn range_count(&self, t: usize, lo_key: i64, width: i64) -> usize {
         let (lo, hi) = self.static_range(t, lo_key, width);
         let mut cnt = hi - lo;
         if self.n_cand() > 0 {
-            let (sk, _) = self.cand_tier(t);
-            cnt += lower_bound(sk, lo_key + width) - lower_bound(sk, lo_key);
+            let (clo, chi) = self.cand_range(t, lo_key, width);
+            cnt += chi - clo;
         }
         cnt
     }
@@ -568,8 +771,8 @@ impl RustLshIndex {
             }
         }
         if self.n_cand() > 0 {
-            let (sk, si) = self.cand_tier(t);
-            let (lo, hi) = (lower_bound(sk, lo_key), lower_bound(sk, lo_key + width));
+            let (_, si) = self.cand_tier(t);
+            let (lo, hi) = self.cand_range(t, lo_key, width);
             for &id in &si[lo..hi] {
                 if ws.stamp[id as usize] != ws.stamp_now {
                     ws.stamp[id as usize] = ws.stamp_now;
@@ -579,11 +782,201 @@ impl RustLshIndex {
         }
     }
 
+    /// Queries per block of the batched join: one block per worker.
+    ///
+    /// Reuse is everything here — a bucket is loaded once per block, so the
+    /// cost of finding and gathering it is divided by the number of queries
+    /// in the block that probe it. Measured on the ESS case (50k+50k, d=32,
+    /// 16 workers): 782 queries/block 531 ms, 1563 445 ms, 3125 (= m/workers)
+    /// **404 ms**. Keeping the block's query tile L2-resident loses to
+    /// reuse, so blocks are as large as the worker count allows and nothing
+    /// smaller. Explicit `query_block_size` still caps it, for A/B work.
+    fn block_size(&self, m: usize) -> usize {
+        let workers = rayon::current_num_threads().max(1);
+        let qb = m.div_ceil(workers).max(1);
+        if self.block > 0 {
+            qb.min(self.block)
+        } else {
+            qb
+        }
+    }
+
+    /// Score one tile of points against every query of a bucket group.
+    ///
+    /// The inner loop is the whole point of the batched shape: both
+    /// operands are contiguous and cache-resident, the id is only touched
+    /// when a candidate beats the query's k-th best, and the heap top is
+    /// held in a register across the tile.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn score_tile(
+        &self,
+        group: &[(i64, u32)],
+        tile: &[f32],
+        tids: &[i64],
+        q32: &[f32],
+        exq: &[i64],
+        heaps: &mut [(u32, i64)],
+        hlen: &mut [u32],
+        k: usize,
+    ) {
+        let d = self.d;
+        let nt = tids.len();
+        for &(_, slot) in group {
+            let si = slot as usize;
+            let qrow = &q32[si * d..(si + 1) * d];
+            let h = &mut heaps[si * k..(si + 1) * k];
+            let mut len = hlen[si] as usize;
+            let ex = exq[si];
+            let mut worst = if len == k { h[0] } else { WORST };
+            let mut i = 0;
+            while i + ROWS <= nt {
+                let ds = dist_l1_rows(qrow, &tile[i * d..(i + ROWS) * d], d);
+                for r in 0..ROWS {
+                    let (bits, id) = (ds[r].to_bits(), tids[i + r]);
+                    if hless((bits, id), worst) && id != ex {
+                        heap_offer(h, &mut len, bits, id);
+                        worst = if len == k { h[0] } else { WORST };
+                    }
+                }
+                i += ROWS;
+            }
+            while i < nt {
+                let bits = dist_l1_32(qrow, &tile[i * d..(i + 1) * d]).to_bits();
+                let id = tids[i];
+                if hless((bits, id), worst) && id != ex {
+                    heap_offer(h, &mut len, bits, id);
+                    worst = if len == k { h[0] } else { WORST };
+                }
+                i += 1;
+            }
+            hlen[si] = len as u32;
+        }
+    }
+
+    /// One block of the batched, bucket-centric join.
+    ///
+    /// Table by table, the block's probe keys are grouped by bucket (a sort
+    /// on `(key, slot)`), and each bucket the block touches is loaded
+    /// **once** and scored against every query that probes it — instead of
+    /// once per query, as a per-query gather does. That turns the query
+    /// into a sequence of dense `queries x points x d` tiles and removes
+    /// the random-access dedup stamp entirely: a point shared with the
+    /// query by several tables is simply offered to the heap several times,
+    /// and `heap_offer` keeps ids distinct.
+    ///
+    /// Heaps are left in `ws` for the caller to relax and emit.
+    fn query_block(&self, ws: &mut BWs, q: &[f64], nq: usize, k: usize, ex: Option<&[i64]>) -> u64 {
+        let (d, ns, nc) = (self.d, self.n_static, self.n_cand());
+        ws.reset(nq, d, k, self.kdim);
+        for i in 0..nq * d {
+            ws.q32[i] = q[i] as f32;
+        }
+        for i in 0..nq {
+            ws.exq[i] = ex.map_or(-1, |e| e[i]);
+        }
+
+        let mut pairs = 0u64;
+        let BWs {
+            q32,
+            exq,
+            heaps,
+            hlen,
+            codes,
+            frac,
+            clos,
+            probe,
+            gids,
+            tile,
+            tids,
+        } = ws;
+
+        for t in 0..self.l {
+            probe.clear();
+            for i in 0..nq {
+                let x = &q[i * d..(i + 1) * d];
+                self.probe_keys(x, t, codes, frac, clos, |key| probe.push((key, i as u32)));
+            }
+            // Group by bucket. The keys of one table live in [0, B^K), so
+            // this is a bucket-major reordering of the block's probes.
+            probe.sort_unstable();
+
+            let (sk_s, sid_s) = (
+                &self.skeys_s[t * ns..(t + 1) * ns],
+                &self.sids_s[t * ns..(t + 1) * ns],
+            );
+            let (sk_c, sid_c) = if nc > 0 {
+                self.cand_tier(t)
+            } else {
+                (&[][..], &[][..])
+            };
+
+            let mut gs = 0usize;
+            while gs < probe.len() {
+                let key = probe[gs].0;
+                let mut ge = gs + 1;
+                while ge < probe.len() && probe[ge].0 == key {
+                    ge += 1;
+                }
+                let group = &probe[gs..ge];
+                gs = ge;
+                gids.clear();
+                if ns > 0 {
+                    let (lo, hi) = if !self.offs_s.is_empty() {
+                        let row = self.offs_s.len() / self.l;
+                        let ot = &self.offs_s[t * row..(t + 1) * row];
+                        (ot[key as usize] as usize, ot[key as usize + 1] as usize)
+                    } else {
+                        (lower_bound(sk_s, key), lower_bound(sk_s, key + 1))
+                    };
+                    gids.extend_from_slice(&sid_s[lo..hi]);
+                }
+                if nc > 0 {
+                    let (lo, hi) = if !self.offs_c.is_empty() {
+                        let row = self.offs_c.len() / self.l;
+                        let ot = &self.offs_c[t * row..(t + 1) * row];
+                        (ot[key as usize] as usize, ot[key as usize + 1] as usize)
+                    } else {
+                        (lower_bound(sk_c, key), lower_bound(sk_c, key + 1))
+                    };
+                    gids.extend_from_slice(&sid_c[lo..hi]);
+                }
+                if gids.is_empty() {
+                    continue;
+                }
+                pairs += (gids.len() * group.len()) as u64;
+
+                for chunk in gids.chunks(TILE) {
+                    // Issue every row's misses before touching the data:
+                    // the ids are scattered, so this is the one place the
+                    // tile pays for random access — once per block, not
+                    // once per query.
+                    for &id in chunk {
+                        let base = id as usize * d;
+                        let mut o = 0;
+                        while o < d {
+                            prefetch(&self.pts32[base + o]);
+                            o += 16;
+                        }
+                    }
+                    for (j, &id) in chunk.iter().enumerate() {
+                        let base = id as usize * d;
+                        tile[j * d..(j + 1) * d].copy_from_slice(&self.pts32[base..base + d]);
+                        tids[j] = id;
+                    }
+                    let n = chunk.len();
+                    self.score_tile(group, &tile[..n * d], &tids[..n], q32, exq, heaps, hlen, k);
+                }
+            }
+        }
+        pairs
+    }
+
     /// Prefix relaxation for one under-filled query (see CONTRACT.md).
     fn relax_query(&self, ws: &mut Ws, top: &mut TopK, x: &[f64], k: usize, ex: i64) {
         let mut base = vec![0i64; self.l];
         for t in 0..self.l {
-            base[t] = self.query_codes(x, t, ws);
+            base[t] = self.query_codes(x, t, &mut ws.codes, &mut ws.frac);
         }
         let need = 4 * k;
         let mut level = self.kdim;
@@ -613,6 +1006,123 @@ impl RustLshIndex {
         top.clear();
         self.refine_topk(ws, top, ex);
     }
+
+    /// k-NN over blocks of queries: the batched, bucket-centric join.
+    ///
+    /// Parallel over blocks, so each worker owns its block's heaps
+    /// exclusively — no contention and no per-worker `n`-sized state unless
+    /// a query actually needs relaxation.
+    #[allow(clippy::too_many_arguments)]
+    fn knn_batched(
+        &self,
+        q: &[f64],
+        d: usize,
+        k: usize,
+        kk: usize,
+        ex: Option<&[i64]>,
+        out_idx: &mut [i64],
+        out_dst: &mut [f64],
+    ) {
+        let m = out_idx.len() / k;
+        let qb = self.block_size(m);
+        out_idx
+            .par_chunks_mut(qb * k)
+            .zip(out_dst.par_chunks_mut(qb * k))
+            .enumerate()
+            .for_each_init(
+                || (BWs::default(), None::<Ws>, TopK::new(k)),
+                |(bws, ws, top), (bi, (oi, od))| {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let q0 = bi * qb;
+                    let nq = oi.len() / k;
+                    let t0 = std::time::Instant::now();
+                    let pairs = self.query_block(
+                        bws,
+                        &q[q0 * d..(q0 + nq) * d],
+                        nq,
+                        k,
+                        ex.map(|e| &e[q0..q0 + nq]),
+                    );
+                    let t1 = std::time::Instant::now();
+                    let mut relaxed = 0u64;
+                    for i in 0..nq {
+                        let len = bws.hlen[i] as usize;
+                        let (row_idx, row_dst) =
+                            (&mut oi[i * k..(i + 1) * k], &mut od[i * k..(i + 1) * k]);
+                        if len < kk {
+                            let x = &q[(q0 + i) * d..(q0 + i + 1) * d];
+                            let w = ws.get_or_insert_with(|| Ws::new(self.n_points, d, self.kdim));
+                            for j in 0..d {
+                                w.q32[j] = x[j] as f32;
+                            }
+                            self.relax_query(w, top, x, k, bws.exq[i]);
+                            top.emit(row_idx, row_dst);
+                            relaxed += 1;
+                        } else {
+                            heap_emit(&mut bws.heaps[i * k..(i + 1) * k], len, row_idx, row_dst);
+                        }
+                    }
+                    let st = &self.stats;
+                    st.refine_ns.fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
+                    st.relax_ns
+                        .fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
+                    st.pairs.fetch_add(pairs, Relaxed);
+                    st.queries.fetch_add(nq as u64, Relaxed);
+                    st.relaxed.fetch_add(relaxed, Relaxed);
+                },
+            );
+    }
+
+    /// k-NN one query at a time: gather a deduplicated candidate list, then
+    /// refine it. Serves batches too small for the join to amortise its
+    /// bucket loads over, where scoring each candidate exactly once is
+    /// worth the random-access dedup stamp.
+    #[allow(clippy::too_many_arguments)]
+    fn knn_per_query(
+        &self,
+        q: &[f64],
+        d: usize,
+        k: usize,
+        kk: usize,
+        ex: Option<&[i64]>,
+        out_idx: &mut [i64],
+        out_dst: &mut [f64],
+    ) {
+        out_idx
+            .par_chunks_mut(k)
+            .zip(out_dst.par_chunks_mut(k))
+            .enumerate()
+            .for_each_init(
+                || (Ws::new(self.n_points, d, self.kdim), TopK::new(k)),
+                |(ws, top), (qi, (row_idx, row_dst))| {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let x = &q[qi * d..(qi + 1) * d];
+                    for j in 0..d {
+                        ws.q32[j] = x[j] as f32;
+                    }
+                    let exq = ex.map_or(-1, |e| e[qi]);
+                    let t0 = std::time::Instant::now();
+                    self.gather_query(ws, x);
+                    let t1 = std::time::Instant::now();
+                    top.clear();
+                    self.refine_topk(ws, top, exq);
+                    let t2 = std::time::Instant::now();
+                    let st = &self.stats;
+                    st.cands.fetch_add(ws.cand.len() as u64, Relaxed);
+                    st.pairs.fetch_add(ws.cand.len() as u64, Relaxed);
+                    if top.len < kk {
+                        self.relax_query(ws, top, x, k, exq);
+                        st.relax_ns
+                            .fetch_add(t2.elapsed().as_nanos() as u64, Relaxed);
+                        st.relaxed.fetch_add(1, Relaxed);
+                    }
+                    top.emit(row_idx, row_dst);
+                    st.gather_ns.fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
+                    st.refine_ns.fetch_add((t2 - t1).as_nanos() as u64, Relaxed);
+                    st.queries.fetch_add(1, Relaxed);
+                },
+            );
+    }
 }
 
 #[pymethods]
@@ -628,7 +1138,6 @@ impl RustLshIndex {
         u: PyReadonlyArray2<f64>,
         block: usize,
     ) -> PyResult<Self> {
-        let _ = block; // advisory; rayon schedules per query
         if s.shape() != [l, k] || u.shape() != [l, k] {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "S and U must have shape (L, K)",
@@ -643,6 +1152,7 @@ impl RustLshIndex {
             kdim: k,
             l,
             probes,
+            block,
             s: s.as_slice()?.to_vec(),
             u: u.as_slice()?.to_vec(),
             pw,
@@ -657,6 +1167,7 @@ impl RustLshIndex {
             keys_c: Vec::new(),
             skeys_c: Vec::new(),
             sids_c: Vec::new(),
+            offs_c: Vec::new(),
             stats: QueryStats::default(),
         })
     }
@@ -739,6 +1250,7 @@ impl RustLshIndex {
             self.skeys_c = skeys_c;
             self.sids_c = sids_c;
             self.keys_c = new_keys;
+            self.build_cand_offsets();
         });
         Ok(())
     }
@@ -811,41 +1323,18 @@ impl RustLshIndex {
         let mut out_dst = vec![f64::INFINITY; m * k];
 
         py.detach(|| {
+            if k == 0 || m == 0 {
+                return;
+            }
             let reachable = self.n_points - usize::from(ex.is_some());
             let kk = k.min(reachable);
-            out_idx
-                .par_chunks_mut(k)
-                .zip(out_dst.par_chunks_mut(k))
-                .enumerate()
-                .for_each_init(
-                    || (Ws::new(self.n_points, d, self.kdim), TopK::new(k)),
-                    |(ws, top), (qi, (row_idx, row_dst))| {
-                        use std::sync::atomic::Ordering::Relaxed;
-                        let x = &q[qi * d..(qi + 1) * d];
-                        for j in 0..d {
-                            ws.q32[j] = x[j] as f32;
-                        }
-                        let exq = ex.as_ref().map_or(-1, |e| e[qi]);
-                        let t0 = std::time::Instant::now();
-                        self.gather_query(ws, x);
-                        let t1 = std::time::Instant::now();
-                        top.clear();
-                        self.refine_topk(ws, top, exq);
-                        let t2 = std::time::Instant::now();
-                        let st = &self.stats;
-                        st.cands.fetch_add(ws.cand.len() as u64, Relaxed);
-                        if top.heap.len() < kk {
-                            self.relax_query(ws, top, x, k, exq);
-                            st.relax_ns
-                                .fetch_add(t2.elapsed().as_nanos() as u64, Relaxed);
-                            st.relaxed.fetch_add(1, Relaxed);
-                        }
-                        top.emit(row_idx, row_dst);
-                        st.gather_ns.fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
-                        st.refine_ns.fetch_add((t2 - t1).as_nanos() as u64, Relaxed);
-                        st.queries.fetch_add(1, Relaxed);
-                    },
-                );
+            // block == 1 asks for one query per block, i.e. no batching:
+            // the per-query path is that, without the wasted machinery.
+            if m >= BATCH_MIN && self.block != 1 {
+                self.knn_batched(&q, d, k, kk, ex.as_deref(), &mut out_idx, &mut out_dst);
+            } else {
+                self.knn_per_query(&q, d, k, kk, ex.as_deref(), &mut out_idx, &mut out_dst);
+            }
         });
         Ok((
             PyArray1::from_vec(py, out_idx).reshape([m, k])?,
@@ -968,7 +1457,9 @@ impl RustLshIndex {
         d.set_item("relax_ns", self.stats.relax_ns.load(Relaxed))?;
         d.set_item("queries", self.stats.queries.load(Relaxed))?;
         d.set_item("cands", self.stats.cands.load(Relaxed))?;
+        d.set_item("pairs", self.stats.pairs.load(Relaxed))?;
         d.set_item("relaxed", self.stats.relaxed.load(Relaxed))?;
+        d.set_item("block", self.block)?;
         Ok(d)
     }
 
@@ -979,6 +1470,7 @@ impl RustLshIndex {
         self.stats.relax_ns.store(0, Relaxed);
         self.stats.queries.store(0, Relaxed);
         self.stats.cands.store(0, Relaxed);
+        self.stats.pairs.store(0, Relaxed);
         self.stats.relaxed.store(0, Relaxed);
     }
 

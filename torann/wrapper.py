@@ -127,7 +127,12 @@ class ToroidalNN:
         target_bucket_size: Bucket-load target for the $K$ rule. ``None`` =
             ``max(32, k_hint)``.
         probes: Neighbour-cell probes per table per query.
-        query_block_size: Queries per vectorised block (advisory).
+        query_block_size: Queries per block of the batched join. ``None``
+            (default) sizes blocks from the workload: as large as bucket
+            reuse wants, capped so a block's query tile stays cache-resident
+            and so the blocks divide evenly over the workers. ``1`` selects
+            the per-query path (one deduplicated candidate list per query),
+            which is what small batches want.
         backend: LSH implementation — ``"auto"`` (first installed of rust,
             python), or an explicit name.
     """
@@ -147,11 +152,13 @@ class ToroidalNN:
         dims_per_table: int | None = None,
         target_bucket_size: int | None = None,
         probes: int = 4,
-        query_block_size: int = 1024,
+        query_block_size: int | None = None,
         backend: str = "auto",
     ):
         if resolution is not None and resolution < 2:
             raise ValueError("resolution must be >= 2")
+        if query_block_size is not None and query_block_size < 1:
+            raise ValueError("query_block_size must be >= 1")
         if num_tables is not None and num_tables < 1:
             raise ValueError("num_tables must be >= 1")
         if dims_per_table is not None and dims_per_table < 1:
@@ -166,7 +173,8 @@ class ToroidalNN:
         self.dims_per_table = dims_per_table
         self.target_bucket_size = target_bucket_size
         self.probes = int(probes)
-        self.query_block_size = int(query_block_size)
+        self.query_block_size = None if query_block_size is None \
+            else int(query_block_size)
         self.backend = backend
         self.backend_name: str | None = None
 
@@ -382,7 +390,7 @@ class ToroidalNN:
         name, cls = _resolve(self.backend)
         self.backend_name = name
         self._impl = cls(self._B, self._K, self._L, self.probes,
-                         self._S, self._U, self.query_block_size)
+                         self._S, self._U, self.query_block_size or 0)
         self._impl.build(np.ascontiguousarray(self._arena), self._n_static)
         logger.info("LSH implementation: %s", name)
 

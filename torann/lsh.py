@@ -25,7 +25,7 @@ class PythonLshIndex(BaseIndex):
         probes: Neighbour-cell probes per table per query.
         S: int64 ``(L, K)`` sampled dimension indices (drawn by the facade).
         U: float64 ``(L, K)`` per-dimension offsets in ``[0, 1)``.
-        block: Advisory query batch size for the vectorised blocks.
+        block: Queries per vectorised block; 0 selects the default 1024.
     """
 
     def __init__(self, B, K, L, probes, S, U, block=1024):
@@ -35,7 +35,7 @@ class PythonLshIndex(BaseIndex):
         self.probes = int(probes)
         self.S = np.ascontiguousarray(S, dtype=np.int64)
         self.U = np.ascontiguousarray(U, dtype=np.float64)
-        self.block = int(block)
+        self.block = int(block) or 1024
         self._pw = self.B ** np.arange(self.K, dtype=np.int64)
         self.n_points = 0
         self.n_static = 0

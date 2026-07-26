@@ -23,7 +23,7 @@ Index(B, K, L, probes, S, U, block)
 | `probes` | int ≥ 0 | neighbour-cell probes per table per query |
 | `S` | int64 `(L, K)` | sampled dimension indices, drawn by the facade |
 | `U` | float64 `(L, K)` | per-dimension offsets in `[0, 1)`, drawn by the facade |
-| `block` | int | advisory query batch size (backends may ignore) |
+| `block` | int | queries per batched block; `0` = let the backend choose, `1` = one query at a time (see `query_knn`) |
 
 The facade draws `S` and `U` from its own RNG — backends contain **no
 randomness**. This is what makes cross-backend byte-equality testable.
@@ -74,6 +74,13 @@ float32 for distance refinement).
   relaxation** (level ℓ widens a bucket to the contiguous sorted-key range
   `[key // B**ℓ * B**ℓ, + B**ℓ)`; level `K` spans the whole table), never by
   a brute-force scan.
+  The *candidate set* is normative; the order it is visited in is not. A
+  backend may answer a batch bucket-major (loading each bucket once for all
+  the queries that probe it) rather than query-major, so the top-k is ranked
+  by **`(distance, id)`** — id breaking exact float32 ties — which makes a
+  row independent of visiting order, block size and thread count. Ids must
+  be distinct within a row: a point reachable through several tables is
+  still returned once.
   Multi-probe (normative): per table, probe the `min(probes, K)` digits
   whose fractional part is closest to a cell boundary, stepping each to its
   nearest neighbouring cell (`+1` if `frac ≥ 0.5` else `-1`, wrapping
