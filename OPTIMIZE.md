@@ -195,29 +195,56 @@ query.
 Query is still the largest single item (61% at 30k), so §5 remains worth
 doing.
 
-## 5. What is left, in measured order
+## 5. What is left — and how well each one is evidenced
 
-1. **Probe-key hashing — 11% of query.** Scalar f64 today. Needs a gather
-   per sampled dimension, so expect well under 11%; measure before keeping.
-2. **Full bucket reuse — ~21%.** Blocks are query slices, so at 50k each
-   bucket still serves only ~3.8 queries' worth of work. Making the work
-   item a *(table, key-range)* over all `m` queries, with a per-worker
-   `m × k` top-k slab reduced at the end, would raise that to ~61.
-   Single-threaded evidence at equal work: 61× reuse 3035 ms, 3.8× 3835 ms,
-   1.9× 4557 ms. Costs `threads × m × k × 12` bytes (48 MiB at m=50k, k=5 —
-   fine for ESS, needs a budget guard and a fallback for large k).
-3. **Bucket-key sort — part of 8%.** `sort_unstable` on `(key, slot)` could
-   be a counting sort over `B^K` bins.
-4. **`query_radius`** still gathers per query and allocates two `Vec`s per
-   query; ESS's `search_mode="radius"` goes through it.
-5. **The small-`n` path** (`requirements.md` §5). `ess._smart_init` is
-   38–74% of small runs, almost all in `brute.pairwise_l1` materialising an
-   `(m, n, d)` f64 block. Note the exactness subtlety: chunking over `m`
-   keeps results bit-identical (NumPy's pairwise sum over `d` is untouched),
-   whereas accumulating over `d` changes them by ~1e-16. Take the former.
+Not a uniform list. Every item below states what was actually measured, so
+none of them is mistaken for a promise. All ablations come from **one shape**
+(50k+50k, d=32, k=5, 16 threads) and run-to-run spread on this machine is
+~10% (the same config measured 319/335/364/372 ms across the session), so the
+percentages carry a few points of slack.
+
+**Measured gain — the payoff itself was observed**
+
+1. **Full bucket reuse — ~21%.** Blocks are query slices, so at 50k a bucket
+   serves only ~3.8 queries' worth of work. Making the work item a
+   *(table, key-range)* over all `m` queries, with a per-worker `m × k` top-k
+   slab reduced at the end, would raise that to ~61. Measured at equal work,
+   single-threaded, using block size as the reuse proxy: 61× reuse 3035 ms,
+   3.8× 3835 ms, 1.9× 4557 ms. **Unmeasured:** the scheduler's own cost —
+   slab reduction and 3 MiB/worker of L3 pressure — so 21% is an upper
+   bound. Costs `threads × m × k × 12` bytes (48 MiB at m=50k, k=5; needs a
+   budget guard and a fallback for large k).
+
+**Measured cost, unmeasured payoff**
+
+2. **Probe-key hashing — 11% of query** (ablation: 35.1 ms of 319.5 ms).
+   Scalar f64 today. Vectorizing needs a gather per sampled dimension
+   (`x[S[t][j]]`), and gathers are mediocre on this core, so the achievable
+   share of that 11% is unknown — could be most of it, could be a quarter.
+3. **Bucket-key sort — inside an 8% bucket.** The ablation measured *sort +
+   group walk together* (25.8 ms); they were never separated, so the sort
+   alone is ≤8% by an unknown margin. A counting sort over `B^K` bins is the
+   obvious replacement for `sort_unstable` on `(key, slot)`.
+
+**Not profiled — inferred from reading the code**
+
+4. **`query_radius`.** No measurements at all: ESS's
+   `search_mode="radius"` was never run. Structurally it still uses the
+   per-query gather and allocates two `Vec`s per query, so it received none
+   of this work — but that is an inference, not a number.
+5. **The small-`n` path** (`requirements.md` §5). The "38–74% of small runs"
+   figure is inherited from the previous session, measured at n=500 where the
+   whole run was 0.8 s; it has not been re-measured. In the runs here `setup`
+   was 7–9% of ESS wall time at 10k–30k, but **39% on the d=2, 256+512 shape
+   of the suite** (`examples/bench_ess_suite.py`), where the index is below
+   the 512-point crossover and `brute` serves both the epochs and
+   `_smart_init`. That is the shape to profile before touching anything.
+   Exactness subtlety: chunking over `m` keeps results bit-identical
+   (NumPy's pairwise sum over `d` is untouched), whereas accumulating over
+   `d` changes them by ~1e-16 — enough to move an ESS trajectory.
 6. **The tuner's own sample.** `_tune` builds a `(256, 8192, d)` difference
-   block — ~0.5 GB of traffic at n=50k — inside ESS's `setup` share. One
-   chunked loop fixes it.
+   block — ~0.5 GB of traffic at n=50k. Seen in the callgrind profile
+   (NumPy ufuncs, ~12% of that process), bounded by ESS's `setup` share.
 
 ## 6. Measured and rejected — do not re-try
 
