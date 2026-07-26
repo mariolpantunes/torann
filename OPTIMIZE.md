@@ -195,6 +195,55 @@ query.
 Query is still the largest single item (61% at 30k), so §5 remains worth
 doing.
 
+## 4b. Is the recall the index delivers good enough for ESS?
+
+`examples/bench_ess_suite.py` reports recall per shape, and at d=32 it is
+**0.69** (empty anchor tier) and **0.86** (with anchors) — not the ~1.0 the
+smaller shapes get. Recall is a property of the index, not of ESS, so
+`examples/bench_ess_quality.py` asks the question in ESS's own metrics
+instead: does the result still disperse, and does buying more recall buy
+any of it back? (`requirements.md` §7 records that re-exploration quality
+tracks recall monotonically, which is what made this worth checking.)
+
+**ESS beats the samplers at every shape** — toroidal Clark-Evans, where
+1.0 is Poisson:
+
+| shape | ESS | LHS | random | ESS min-dist | LHS min-dist |
+|---|---|---|---|---|---|
+| d=2, 0+256 | **2.083** | 1.033 | 1.018 | 0.0503 | 0.0048 |
+| d=2, 256+512 | **1.698** | 1.001 | 1.017 | 0.0025 | 0.0009 |
+| d=8, 0+1024 | **1.470** | 1.008 | 1.002 | 0.414 | 0.108 |
+| d=8, 1024+2048 | **1.332** | 1.000 | 1.004 | 0.098 | 0.098 |
+| d=32, 0+10k | **1.233** | 1.042 | 1.043 | 1.198 | 1.028 |
+| d=32, 10k+20k | **1.169** | 1.036 | 1.036 | 0.929 | 0.876 |
+
+The margin narrows with dimension (concentration of measure), but it is
+never in doubt — and it holds at the shapes where recall is 0.69. Note
+that with anchors the minimum pairwise distance saturates: the closest
+pair lives in the fixed anchor set, which ESS cannot move, so Clark-Evans
+is the metric that discriminates there, not min-dist.
+
+**Perfect recall is worth ~1% of Clark-Evans.** Same shape, same seed, one
+index forced to `num_tables=48, probes=8`; three seeds, paired:
+
+| seed | default recall | default CE | high-recall CE | paired Δ |
+|---|---|---|---|---|
+| 0 | 0.689 | 1.2326 | 1.2484 (recall 1.000) | +0.0158 |
+| 1 | 0.745 | 1.2290 | 1.2466 (recall 0.995) | +0.0176 |
+| 2 | 0.753 | 1.2382 | 1.2521 (recall 0.995) | +0.0139 |
+
+All three differences positive and tightly clustered — mean **+1.28%** — and
+the paired spread (0.0037) is narrower than the between-seed spread of
+either arm (0.0092), which is why the comparison has to be paired; an
+unpaired two-seed look would have been inconclusive. On the anchored shape
+the gain is +0.4% and min-dist does not move at all (anchor-limited).
+
+So the tuner's d=32 choice is **defensible, not broken**: it gives up ~1%
+of a ~18% margin over LHS, and full recall would cost `L*(1+probes)` rising
+from 120 probes per query to 432 — roughly 3.6x the candidate work (a
+structural count, not a timing). Raising recall at d=32 is a quality knob
+with a known, small payoff, not a bug to fix.
+
 ## 5. What is left — and how well each one is evidenced
 
 Not a uniform list. Every item below states what was actually measured, so
