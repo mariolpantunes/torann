@@ -195,6 +195,66 @@ query.
 Query is still the largest single item (61% at 30k), so §5 remains worth
 doing.
 
+## 4a. The whole gain, against the build this work started from
+
+Everything above is an A/B inside one build. This is the question a user of
+the library asks instead: what does ESS get, out of the box, from the
+optimized build versus `d8c9904`? Both builds compiled from their own
+worktree, driven by the same script (`headline.py`), defaults only, six
+representative shapes, one seed:
+
+| shape | base total | new total | | base query | new query | |
+|---|---|---|---|---|---|---|
+| d=2, 0+256 | 0.428 s | **0.179 s** | 2.40× | 0.396 s | 0.147 s | 2.71× |
+| d=2, 256+512 | 0.330 s | **0.241 s** | 1.37× | 0.063 s | 0.065 s | 0.98× |
+| d=8, 0+1024 | 0.457 s | **0.412 s** | 1.11× | 0.252 s | 0.189 s | 1.34× |
+| d=8, 1024+2048 | 1.164 s | **0.854 s** | 1.36× | 0.855 s | 0.551 s | 1.55× |
+| d=32, 0+10k | 20.449 s | **13.818 s** | 1.48× | 15.676 s | 8.256 s | 1.90× |
+| d=32, 10k+20k | 96.216 s | **58.730 s** | 1.64× | 81.948 s | 44.902 s | 1.83× |
+| **suite** | **119.04 s** | **74.23 s** | **1.60×** | 99.19 s | 54.11 s | **1.83×** |
+
+Query fell from 83% to 73% of ESS wall time. Per-shape geometric mean 1.51×.
+
+**Wall time alone overstates it at d=32.** Epoch count varies ±40% with the
+seed (145/97/122 on the baseline over three seeds), so single-seed wall time
+measures the trajectory as much as the code. Normalised per epoch, three
+seeds, d=32 0+10k: total **162 → 119 ms/epoch (1.36×)**, query **116 → 72
+ms/epoch (1.60×)**. Epoch-normalised geometric mean over the six shapes:
+1.47× total, 1.59× query. Those are the numbers to quote.
+
+### Why the d=32 trajectories are not reproducible against the old build
+
+The two d=32 shapes end at different point sets. That is not drift — both
+builds are deterministic (same build, two runs, bit-identical), and every
+direct comparison of the index agrees: `(ids, distances)` are bit-identical
+across builds at d ∈ {2,4,8,9,16,32}, on explicit queries and on the ESS
+self-join, before and after `update()`.
+
+Tracing every query of the loop found the first divergence: epoch 6 of the
+d=32 run, one row of 10 000, **identical distances, different id**. The two
+candidates are 5.471940390825072 and 5.47194052418801 away in f64 — the same
+number once scored in f32. It is an exact tie for the last of five slots.
+The old code returned whichever the heap happened to hold; this build applies
+the canonical `(distance bits, id)` rule from `CONTRACT.md`, so it returns
+the lower id. From one swapped neighbour the relaxation diverges within a
+few epochs.
+
+So the tie-break is a deliberate, documented improvement — results no longer
+depend on visiting order, block size or thread count — but it does mean
+**ESS trajectories at d ≥ 9 are not comparable against pre-`0bdbe50`
+builds.** Quality is unaffected; paired over three seeds at d=32, 0+10k:
+
+| seed | CE base | CE new | ΔCE | separation base | new |
+|---|---|---|---|---|---|
+| 0 | 1.2349 | 1.2326 | −0.0023 | 4.9046 | 5.0548 |
+| 1 | 1.2287 | 1.2290 | +0.0003 | 4.9135 | 5.0351 |
+| 2 | 1.2352 | 1.2382 | +0.0030 | 4.9988 | 5.1184 |
+
+Mean ΔCE **+0.0003** (sd 0.0026), against a between-seed sd of 0.0037–0.0046
+— unchanged, as intended. Toroidal-L1 separation is +0.13 on all three
+seeds; consistent, but a side effect of tie-breaking, not something this work
+set out to buy.
+
 ## 4b. Is the recall the index delivers good enough for ESS?
 
 `examples/bench_ess_suite.py` reports recall per shape, and at d=32 it is
@@ -281,16 +341,12 @@ percentages carry a few points of slack.
    `search_mode="radius"` was never run. Structurally it still uses the
    per-query gather and allocates two `Vec`s per query, so it received none
    of this work — but that is an inference, not a number.
-5. **The small-`n` path** (`requirements.md` §5). The "38–74% of small runs"
-   figure is inherited from the previous session, measured at n=500 where the
-   whole run was 0.8 s; it has not been re-measured. In the runs here `setup`
-   was 7–9% of ESS wall time at 10k–30k, but **39% on the d=2, 256+512 shape
-   of the suite** (`examples/bench_ess_suite.py`), where the index is below
-   the 512-point crossover and `brute` serves both the epochs and
-   `_smart_init`. That is the shape to profile before touching anything.
-   Exactness subtlety: chunking over `m` keeps results bit-identical
-   (NumPy's pairwise sum over `d` is untouched), whereas accumulating over
-   `d` changes them by ~1e-16 — enough to move an ESS trajectory.
+5. ~~**The small-`n` path**~~ — **done** (`1a41086`, see §4). Profiled on the
+   shapes the suite gives `brute`; the cost was `diff.sum(-1)`, not the
+   allocation `requirements.md` §5 blamed. Accumulating over `d` in NumPy's
+   own pairwise order keeps it bit-identical up to `d = 128`. `setup` on the
+   d=2, 256+512 shape fell from 39% to 17% of wall time. What remains there
+   is `_smart_init`'s query itself — see §9.
 6. **The tuner's own sample.** `_tune` builds a `(256, 8192, d)` difference
    block — ~0.5 GB of traffic at n=50k. Seen in the callgrind profile
    (NumPy ufuncs, ~12% of that process), bounded by ESS's `setup` share.
@@ -336,3 +392,108 @@ that older core. Rebuild and reinstall (`maturin build --release` + `pip
 install --force-reinstall --no-deps target/wheels/*.whl`) before any
 before/after claim about ESS, and assert the import path inside benchmark
 scripts.
+
+## 9. Where the remaining ESS-side time is — and what does *not* buy speed
+
+Four follow-up questions, each answered by measurement rather than by
+reading the code.
+
+### `_smart_init` is index-bound, and the index is near its floor for k=1
+
+Split into its three parts (`pool = 15`, so the query has `15n` rows):
+
+| shape | mode | total | sampler | index query | selection |
+|---|---|---|---|---|---|
+| d=2, 256→512 | brute | 26.0 ms | 0.4 ms | **25.6 ms (98%)** | 0.0 ms |
+| d=8, 1024→2048 | lsh | 40.2 ms | 5.6 ms | **34.2 ms (85%)** | 0.4 ms |
+| d=32, 10k→20k | lsh | 2696 ms | 363 ms | **2319 ms (86%)** | 13.6 ms |
+
+The NumPy around the query is already negligible, so the only lever is the
+query. On the index side there is little left: `k=1` costs 95% of `k=5`
+(2370 vs 2504 ms at d=32; 36.9 vs 44.5 ms at d=8), so the heap is not the
+cost — scanning the candidate set is, and that is the same work `k=5` does.
+A `k=1` specialisation is worth ≤5%. The batched join already moved this
+path 3366 → 2370 ms (1.42×).
+
+Amdahl says stop here anyway: `setup` is 4.5% of the d=32 10k+20k run and
+20% of the d=2 256+512 one. The remaining lever is ESS-side and algorithmic
+— `pool = 15` fixes the query at 15 rows per new point, and nothing requires
+those rows to be answered at full recall, since only their *rank within the
+pool of 15* is used. Untested.
+
+### The tuner is not over-provisioning tables — quality degrades immediately
+
+Tempting after §4b (recall 0.69 is enough): if more recall buys almost
+nothing, buy less of it. Measured at d=32, 0+10k, single batch:
+
+| tables | total | query | CE | separation (L1) |
+|---|---|---|---|---|
+| **24 (tuned)** | 14.08 s | 8.45 s | **1.2326** | 5.055 |
+| 16 | 10.47 s | 5.20 s | 1.2049 (−2.2%) | 4.576 |
+| 12 | 10.12 s | 4.28 s | 1.1797 (−4.3%) | 4.750 |
+| 8 | 5.27 s | 1.64 s | 1.1426 (−7.3%) | 4.266 |
+| 4 | 5.81 s | 1.20 s | 1.0806 (−12.3%) | 3.913 |
+
+The operating point sits on a knee: **+1.28% CE** for 3.6× more probes going
+up (§4b), **−4.3% for 2×** fewer going down. There is no free speed in the
+parameters — the speed has to come from the implementation.
+
+### Batching is a memory knob, not a speed knob — still true after the join
+
+ESS defaults to `batch_size=None` (all points relaxed together) because
+freezing batches is greedy. The join changed the query economics, so the
+trade was re-measured; the verdict did not move. d=32, 0+10k:
+
+| batch | total | peak RSS | CE | separation (L1) | fill |
+|---|---|---|---|---|---|
+| 10 000 (default) | **14.08 s** | 1583 MB | **1.2326** | 5.055 | 5.430 |
+| 5 000 | 15.28 s | 981 MB (−38%) | 1.2260 (−0.5%) | 5.160 | 5.431 |
+| 2 500 | 25.26 s | 509 MB (−68%) | 1.2252 | 5.304 | 5.428 |
+| 1 250 | 32.35 s | 273 MB (−83%) | 1.2205 (−1.0%) | 5.403 | 5.487 |
+
+Smaller batches are monotonically *slower* — the epoch count explodes
+(120 → 903) because each batch re-runs the plateau detector, and each still
+queries an index that keeps growing. d=8, 1024+2048 agrees: 0.91 s → 0.86 s
+(inside run-to-run spread) for CE 1.3324 → 1.2963 (−2.7%).
+
+So: **no, batching cannot be re-introduced for speed.** As a memory knob it
+is genuinely useful and cheap — `batch_size = n/2` gives 38% less peak RSS
+for 0.5% CE and 8% time. Worth noting the quality trade is not uniform:
+batching *improves* worst-pair separation (5.055 → 5.403) while lowering the
+mean-based CE, because each frozen batch is placed against a denser index.
+
+### CE and coverage are not the right panel above d = 2
+
+Scored point sets whose voids are known by construction (`metric_probe.py`):
+`uniform`, `void` (a ball emptied and its points redrawn outside),
+`clustered` (half the points in a quarter-width box), `lhs`, `ess`.
+
+* **Grid coverage fails first.** At d=2 it separates the variants weakly
+  (ess 0.844, uniform 0.645, clustered 0.422). At d=8 it saturates and
+  *inverts*: lhs 0.988 > ess 0.981 = uniform 0.981. At d ≥ 8 with 2 cells
+  per dimension the grid is 2^d cells, so past d≈20 it cannot be built at
+  all — it is `nan` at d=32. It should not be in the panel above d=2.
+* **CE works but is blind to voids.** It ranks correctly everywhere
+  (d=2 ess 2.081 vs uniform 0.982; d=32 ess 1.256 vs uniform 1.050, and
+  clustered 0.707 at both). But on the d=2 `void` set it moves −3%
+  (0.982 → 0.952) where the fill distance moves **+46%** (0.119 → 0.173):
+  as a mean over nearest-neighbour distances it cannot see a hole that few
+  points border. `toroidal_clark_evans`'s own docstring flags the d>32
+  limit; the void blindness is the sharper limitation, and it applies at
+  every d.
+* **Separation is the metric that survives to d=32.** ess 5.524 vs uniform
+  3.935 / lhs 3.918 — a 40% margin, while fill distance is flat
+  (5.708 vs 5.750, 0.7%). At d=32 with n=4000 no design can cover the
+  torus, so ESS is a *packing* method there, not a covering one, and only
+  the packing metric registers what it achieved. Report it — but not with
+  `calculate_min_pairwise_distance`, which is **Euclidean and ignores the
+  wrap**: on four points with a pair straddling the seam it reports 0.633
+  where the toroidal L1 separation is 0.020. It measures a different
+  geometry from the one ESS optimizes.
+
+Suggested panel: toroidal-L1 **separation** (needs the metric fixed) and
+**CE** at every d; **fill distance** (MC coverage radius) and its
+dimensionless companion **mesh ratio** = fill / (separation/2) at low d,
+where covering is achievable and where CE's void blindness bites; grid
+coverage only at d ≤ 2; `projection_discrepancy` above d=32, as the CE
+docstring already recommends.
