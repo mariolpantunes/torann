@@ -7,12 +7,12 @@ anchors) — well short of 1.0. Recall is a property of the index; it is not
 what ESS is for. This script asks the question that matters instead:
 
 1. **Does the result still disperse?** Every shape is scored with the
-   metrics ESS is benchmarked on — toroidal Clark-Evans (1.0 = Poisson,
-   higher = more regular), minimum pairwise distance, and grid coverage
-   where the dimension allows it — against two baselines on the same
-   points: Latin-hypercube and uniform random. If ESS at recall 0.69 does
-   not beat LHS, the index is not delivering exploration, whatever its
-   timings say.
+   metrics that hold at every dimension — toroidal Clark-Evans (1.0 =
+   uniform, higher = more regular) and separation, both in toroidal L1 —
+   against two baselines on the same points: Latin-hypercube and uniform
+   random. See `metrics` for why coverage and fill distance are not in
+   the panel. If ESS at recall 0.69 does not beat LHS, the index is not
+   delivering exploration, whatever its timings say.
 2. **Is recall the thing holding quality back?** The d=32 shapes are re-run
    with the index forced to a higher-recall configuration (more tables,
    more probes). If the metrics do not move, recall 0.69 is *sufficient*
@@ -65,39 +65,36 @@ CASES = (
 # set recall, so both are raised and nothing else changes.
 HIGH_RECALL = {"num_tables": 48, "probes": 8}
 
-# Points above which the O(n^2) discrepancy is skipped.
-DISCREPANCY_MAX = 4096
-
 
 def metrics(points, dim):
-    """ESS's dispersion metrics for one point set on the unit torus.
+    """The two metrics worth reporting, both in toroidal L1.
+
+    Toroidal Clark-Evans (1.0 = uniform at every d, since the null is the
+    exact fixed-n expectation rather than the Poisson asymptotic) and
+    separation, the minimum pairwise distance.
+
+    Grid coverage and the fill distance are deliberately absent. Coverage
+    saturates and then inverts at d=8 (measured: LHS 0.988 > ESS 0.981 =
+    uniform 0.981) and cannot be built at all past d~20, since 2 cells per
+    dimension is already 2^d cells. The fill distance is the metric that
+    matches the name "empty space search", and it is the right one at low
+    d — it moves +46% on a set with a ball emptied out of it, where CE
+    moves -3% — but at d=32 with n=4000 no design can cover the torus and
+    it goes flat (ESS 5.708 vs uniform 5.750, 0.7%), while separation still
+    shows a 40% margin. Two metrics that hold at every dimension beat four
+    that each hold at some.
 
     Args:
         points (np.ndarray): (n, d) points in [0, 1).
-        dim (int): Dimensionality.
+        dim (int): Dimensionality (unused; kept for call-site symmetry).
 
     Returns:
-        dict: Clark-Evans (toroidal), minimum pairwise distance, grid
-        coverage where the cell count is tractable, and wrap-around
-        discrepancy for small sets.
+        dict: Clark-Evans and separation, both toroidal L1.
     """
-    n = points.shape[0]
-    out = {
+    return {
         "clark_evans": float(ess.utils.toroidal_clark_evans(points)),
-        "min_dist": float(ess.utils.calculate_min_pairwise_distance(points)),
+        "separation": float(ess.utils.toroidal_separation(points)),
     }
-    # Coverage needs a grid; 2 cells per dimension is already 2^d cells, so
-    # only ask where that is countable.
-    grid = 16 if dim <= 2 else (4 if dim <= 4 else 2)
-    if grid ** dim <= 1 << 20:
-        bounds = np.array([[0.0, 1.0]] * dim)
-        out["coverage"] = float(
-            ess.utils.calculate_grid_coverage(points, bounds, grid))
-    if n <= DISCREPANCY_MAX:
-        out["discrepancy"] = float(ess.utils.wrap_around_discrepancy(points))
-        out["discrepancy_expected"] = float(
-            ess.utils.expected_discrepancy(n, dim))
-    return out
 
 
 def anchors_of(anchors, dim, seed):
@@ -130,9 +127,8 @@ def run_baseline(kind, dim, anchors, candidates, seed):
 
 
 def report(rows):
-    keys = ["clark_evans", "min_dist", "coverage", "discrepancy"]
-    head = ["d", "anchors", "cands", "variant", "recall", "CE", "min_dist",
-            "coverage", "discrepancy"]
+    keys = ["clark_evans", "separation"]
+    head = ["d", "anchors", "cands", "variant", "recall", "CE", "separation"]
     print("| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for r in rows:

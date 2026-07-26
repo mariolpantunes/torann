@@ -491,9 +491,39 @@ Scored point sets whose voids are known by construction (`metric_probe.py`):
   where the toroidal L1 separation is 0.020. It measures a different
   geometry from the one ESS optimizes.
 
-Suggested panel: toroidal-L1 **separation** (needs the metric fixed) and
-**CE** at every d; **fill distance** (MC coverage radius) and its
-dimensionless companion **mesh ratio** = fill / (separation/2) at low d,
-where covering is achievable and where CE's void blindness bites; grid
-coverage only at d ≤ 2; `projection_discrepancy` above d=32, as the CE
-docstring already recommends.
+**Panel settled at two metrics, both toroidal L1: CE and separation.**
+`examples/bench_ess_quality.py` reports only those. Fill distance and mesh
+ratio stay documented in that file's `metrics` docstring as the right choice
+at low d, but they do not hold at d=32, and a metric that only works
+sometimes costs more than it explains.
+
+Both needed fixing in `ess.utils` first (ESS branch `metric-calibration`):
+
+* **CE was not calibrated above d≈8.** Its whole meaning is "1.0 = uniform",
+  and uniform samples scored 1.033 at d=16, 1.050–1.082 at d=32 and
+  1.103–1.136 at d=64 (5 seeds, sd 0.001–0.007 — systematic, not noise). The
+  normaliser was the Poisson asymptotic
+  `E[r] = Γ(1+1/d)(d!/n)^{1/d}/2`, which assumes `exp(-nV)` for the survival
+  function and `V(t) = (2t)^d/d!` for the ball volume. At d=32 the mean
+  nearest-neighbour distance is ≈4.9, so the ball has wrapped around every
+  coordinate and neither premise holds. The exact null is available in closed
+  enough form to just compute: a toroidal coordinate distance to a uniform
+  point is `U(0, 1/2)`, so the distance is Irwin-Hall/2, and
+  `E[R] = ∫ (1-V(t))^{n-1} dt` with `V` obtained by FFT-convolving the
+  one-coordinate density d times. Uniform now scores **0.999–1.003 at every
+  d from 4 to 64**. The old d=32 figures were inflated ~4%: ESS 1.2326 →
+  **1.1819**, with LHS and random landing on 0.999/1.000 as they should.
+  Every *comparison* in §4b is unaffected — they were all against measured
+  baselines, and CE is a ratio — but the absolute "+23% over random" reading
+  at d=32 was really +18%.
+* **Separation was measured in the wrong geometry.**
+  `calculate_min_pairwise_distance` is Euclidean and ignores the wrap, so it
+  is not the quantity ESS minimises: 0.176 vs 0.311 at d=8, 1.06 vs 4.18 at
+  d=32, and on a pair straddling the seam 0.633 vs 0.020. Added
+  `toroidal_separation`, which takes it from the same `exact_knn` scan CE
+  already pays for — so the two-metric panel costs one scan, not two.
+
+Also checked rather than assumed: the ceiling `2/Γ(1+1/d)` = 2.257 in 2D is
+real, but it needs the **diagonal** lattice (L1 balls are diamonds and
+diamonds tile) — measured 2.2574. The axis-aligned 16×16 grid reaches only
+1.597, so a grid is not the reference packing to compare against.
