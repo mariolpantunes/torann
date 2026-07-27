@@ -1,0 +1,287 @@
+<title>Does ESS need recall, or only plausible repellers?</title>
+<style>
+:root{
+  color-scheme: light;
+  --ground:#f7f8fa; --card:#ffffff; --ink:#10141b; --ink-2:#545c6b;
+  --muted:#7b8394; --rule:#dfe3ea; --accent:#2a78d6; --critical:#e34948;
+  --track:#eceff4;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --ground:#0e1116; --card:#161b22; --ink:#eef1f6; --ink-2:#aab3c0;
+    --muted:#7d8797; --rule:#262d38; --accent:#3987e5; --critical:#e66767;
+    --track:#1e242d;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --ground:#0e1116; --card:#161b22; --ink:#eef1f6; --ink-2:#aab3c0;
+  --muted:#7d8797; --rule:#262d38; --accent:#3987e5; --critical:#e66767;
+  --track:#1e242d;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  font-size:16px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px; margin:0 auto; padding:clamp(28px,5vw,72px) clamp(18px,4vw,40px) 96px;
+  display:flex; flex-direction:column; gap:44px;}
+.prose{max-width:68ch; display:flex; flex-direction:column; gap:16px;}
+h1{
+  font-family:ui-serif,Georgia,"Times New Roman",serif;
+  font-weight:600; font-size:clamp(30px,4.4vw,46px); line-height:1.12;
+  letter-spacing:-0.015em; margin:0; text-wrap:balance;
+}
+h2{
+  font-family:ui-serif,Georgia,serif; font-weight:600;
+  font-size:clamp(21px,2.6vw,27px); letter-spacing:-0.01em;
+  margin:0; text-wrap:balance;
+}
+h3{font-size:15px; font-weight:650; margin:0; letter-spacing:-0.005em;}
+p{margin:0; color:var(--ink-2);}
+.prose p{max-width:68ch}
+strong{color:var(--ink); font-weight:640}
+.eyebrow{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px; letter-spacing:0.14em; text-transform:uppercase;
+  color:var(--muted); margin:0;
+}
+.sub{font-size:17.5px; color:var(--ink-2); max-width:64ch; margin:0}
+.rule{height:1px; background:var(--rule); border:0; margin:0}
+section{display:flex; flex-direction:column; gap:20px}
+.verdict{
+  background:var(--card); border:1px solid var(--rule);
+  border-left:3px solid var(--accent);
+  border-radius:3px; padding:24px 26px;
+  display:flex; flex-direction:column; gap:12px; max-width:72ch;
+}
+.verdict p{color:var(--ink)}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:0.9em; font-variant-numeric:tabular-nums}
+code{background:var(--track); padding:0.12em 0.36em; border-radius:3px}
+.facet{background:var(--card); border:1px solid var(--rule); border-radius:4px;
+  padding:22px 24px; display:flex; flex-direction:column; gap:18px}
+.facets{display:grid; gap:18px; grid-template-columns:1fr}
+@media(min-width:900px){.facets{grid-template-columns:1fr 1fr}}
+.facet h3 span{color:var(--muted); font-weight:450}
+.plot{position:relative; display:flex; flex-direction:column; gap:9px}
+.nullrule{position:absolute; left:calc(96px + (100% - 96px) * var(--null));
+  top:0; bottom:0; width:0; border-left:1px dashed var(--muted); opacity:.75}
+.row{display:grid; grid-template-columns:96px 1fr; align-items:center; gap:0}
+.rowname{font-family:ui-monospace,Menlo,monospace; font-size:12px;
+  color:var(--ink-2); padding-right:10px; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis}
+.track{position:relative; height:22px; display:flex; align-items:center;
+  background:linear-gradient(var(--track),var(--track)) no-repeat;
+  background-size:100% 2px; background-position:0 50%}
+.bar{height:14px; background:var(--accent); border-radius:0 3px 3px 0;
+  box-shadow:0 0 0 2px var(--card)}
+.bar.below{background:var(--critical)}
+.val{font-family:ui-monospace,Menlo,monospace; font-size:12px;
+  font-variant-numeric:tabular-nums; color:var(--ink-2); padding-left:9px;
+  white-space:nowrap}
+.flag{color:var(--critical); font-family:system-ui,sans-serif; font-size:11px;
+  letter-spacing:.02em}
+.legend{display:flex; flex-wrap:wrap; gap:16px; align-items:center;
+  font-size:12.5px; color:var(--muted)}
+.key{display:inline-flex; align-items:center; gap:7px}
+.swatch{width:14px; height:8px; border-radius:2px; background:var(--accent);
+  display:inline-block}
+.swatch.crit{background:var(--critical)}
+.swatch.null{width:0; height:13px; border-left:1px dashed var(--muted);
+  border-radius:0}
+.tablewrap{overflow-x:auto; border:1px solid var(--rule); border-radius:4px;
+  background:var(--card)}
+table{border-collapse:collapse; width:100%; min-width:640px; font-size:13.5px}
+th{
+  font-family:ui-monospace,Menlo,monospace; font-size:10.5px;
+  letter-spacing:.1em; text-transform:uppercase; color:var(--muted);
+  text-align:right; font-weight:500; padding:13px 16px;
+  border-bottom:1px solid var(--rule); white-space:nowrap;
+}
+th:first-child{text-align:left}
+td{padding:11px 16px; text-align:right; border-bottom:1px solid var(--rule);
+  font-family:ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums;
+  color:var(--ink-2); white-space:nowrap}
+td.arm{text-align:left; color:var(--ink)}
+tr:last-child td{border-bottom:0}
+tr.ctl td{color:var(--ink); background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.sd{color:var(--muted); font-size:11px}
+.ladder{display:flex; flex-direction:column; gap:0; max-width:72ch}
+.rung{display:grid; grid-template-columns:26px 1fr; gap:14px;
+  padding:14px 0; border-top:1px solid var(--rule)}
+.rung:first-child{border-top:0}
+.rungno{font-family:ui-monospace,Menlo,monospace; font-size:11.5px;
+  color:var(--muted); padding-top:2px}
+.rung b{font-family:ui-monospace,Menlo,monospace; font-size:13.5px;
+  color:var(--ink); font-weight:500}
+.rung p{font-size:14px; margin-top:3px}
+footer{color:var(--muted); font-size:13px; max-width:68ch}
+a{color:var(--accent)}
+a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
+  outline-offset:3px}
+</style>
+<div class="wrap">
+<header class="prose">
+  <p class="eyebrow">torann · ESS · neighbour-selection ablation</p>
+  <h1>Does ESS need recall, or only plausible repellers?</h1>
+  <p class="sub">An exact index, corrupted on purpose. 3 seeds per arm,
+  paired by seed, 2 shapes. Recall turns out to have a
+  <em>floor</em>, not a price — and the floor is low.</p>
+</header>
+
+<hr class="rule">
+
+<section class="prose">
+  <div class="verdict">
+    <p class="eyebrow">Verdict</p>
+    <p><strong>Half the true neighbours can go almost free; all of them
+    cannot go at all.</strong> Dropping to recall 0.5 while holding locality
+    fixed costs 0.45% Clark-Evans at d=32 and
+    3.78% at d=8. Dropping to recall 0 costs
+    17.2% at d=32 and
+    44.0% at d=8 — collapsing to the uniform
+    null or below it — <em>even when the substituted neighbours are only
+    5&ndash;12% further away</em>.</p>
+    <p>So this lands on the branch where a distance <em>ranking</em> is the
+    product. The index must return real nearest neighbours, but it has
+    genuine slack in how many of them are true — which is roughly where the
+    tuner already sits. Redesigning around cost per <em>plausible local
+    neighbour</em> is ruled out: that arm is indistinguishable from random.</p>
+  </div>
+</section>
+
+<section class="prose">
+  <h2>Why the earlier evidence looked ambiguous</h2>
+  <p>Two measurements pointed opposite ways. Recall 0.69 at d=32 costs only
+  1.28% CE against perfect recall, which suggests recall is cheap to give
+  up. But cutting LSH tables to lower recall costs 4.3% CE, which suggests
+  it is not. Both can be true, because fewer tables degrades recall
+  <em>and</em> locality together — the experiment confounds them.</p>
+  <p>This ablation separates the two. The index is exact throughout, so
+  recall is not a property of the index here; it is imposed. Between the
+  query and the force kernel the neighbour list is replaced by a controlled
+  corruption of it, and the <strong>true toroidal-L1 distance of whatever
+  was substituted is passed through</strong>. Only the selection changes.
+  Force magnitudes are never confounded with it.</p>
+  <p><code>mean ratio</code> below is the delivered neighbour distance over
+  the true k-th distance — the locality knob, made comparable across
+  dimensions. <code>recall</code> is measured against the exact answer the
+  same index computed.</p>
+</section>
+
+<section>
+  <div class="prose"><h2>The ladder</h2>
+  <p>Ordered by how local the selection is. Only the first two arms contain
+  true neighbours at all.</p></div>
+  <div class="ladder"><div class="rung"><div class="rungno">1</div><div><b>exact</b><p>True k nearest neighbours. The control.</p></div></div><div class="rung"><div class="rungno">2</div><div><b>top2k</b><p>k drawn from the true 2k nearest — half the true neighbours survive, and locality is essentially untouched.</p></div></div><div class="rung"><div class="rungno">3</div><div><b>rank1-4k</b><p>k drawn from ranks k..4k. Not one true neighbour, but the nearest points that are not true neighbours.</p></div></div><div class="rung"><div class="rungno">4</div><div><b>rank8-16k</b><p>k drawn from ranks 8k..16k. Still local relative to n, several times the true neighbour distance.</p></div></div><div class="rung"><div class="rungno">5</div><div><b>ratio2x</b><p>k drawn from everything within 2x the k-th distance — the arm as originally specified.</p></div></div><div class="rung"><div class="rungno">6</div><div><b>uniform</b><p>k uniformly random points. The null.</p></div></div></div>
+</section>
+
+<section>
+  <div class="prose"><h2>Clark-Evans regularity</h2>
+  <p>1.0 is the uniform null at every dimension. Higher is more regular —
+  the thing ESS exists to produce.</p></div>
+  <div class="legend"><span class="key"><span class="swatch"></span>at or above the uniform null</span><span class="key"><span class="swatch crit"></span>below the uniform null — actively clustered</span><span class="key"><span class="swatch null"></span>uniform null</span></div>
+  <div class="facets"><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; 0+4000 points</span></h3><div class="plot" style="--null:0.7675">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.2074</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:92.17%"></div><span class="val">1.2019</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar" style="width:76.63%"></div><span class="val">0.9993</span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:75.38%"></div><span class="val">0.9830 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:76.75%"></div><span class="val">1.0008</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:76.75%"></div><span class="val">1.0008</span></div></div>
+</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; 0+2048 points</span></h3><div class="plot" style="--null:0.6308">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.4741</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:89.09%"></div><span class="val">1.4183</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar below" style="width:51.84%"></div><span class="val">0.8253 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:59.30%"></div><span class="val">0.9440 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:63.34%"></div><span class="val">1.0083</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:63.08%"></div><span class="val">1.0042</span></div></div>
+</div></div></div>
+</section>
+
+<section>
+  <div class="prose"><h2>Separation</h2>
+  <p>The minimum pairwise distance, toroidal L1. This is where the mechanism
+  shows: when the true nearest neighbours are withheld, nothing repels the
+  pairs that are actually touching, and they fuse.</p></div>
+  <div class="legend"><span class="key"><span class="swatch"></span>at or above the uniform null</span><span class="key"><span class="swatch crit"></span>below the uniform null — actively clustered</span><span class="key"><span class="swatch null"></span>uniform null</span></div>
+  <div class="facets"><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; 0+4000 points</span></h3><div class="plot" style="--null:0.6050">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">6.0752</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:90.54%"></div><span class="val">5.9403</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar below" style="width:55.32%"></div><span class="val">3.6295 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:56.00%"></div><span class="val">3.6741 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:60.40%"></div><span class="val">3.9632</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:60.50%"></div><span class="val">3.9695</span></div></div>
+</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; 0+2048 points</span></h3><div class="plot" style="--null:0.3025">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">0.9058</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:78.74%"></div><span class="val">0.7703</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar below" style="width:2.57%"></div><span class="val">0.0251 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:18.74%"></div><span class="val">0.1833 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:30.47%"></div><span class="val">0.2981</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:30.25%"></div><span class="val">0.2959</span></div></div>
+</div></div></div>
+</section>
+
+<section class="prose">
+  <h2>Reading the collapse</h2>
+  <p><code>rank1-4k</code> is the informative arm: its neighbours are only
+  12% further away than the
+  true ones at d=8, and 5%
+  at d=32. Being nearly-nearest buys nothing. The pairs at risk of fusing
+  are exactly the ones the force law must see, and plausible mid-range
+  repulsion does not compensate for missing them — separation falls
+  97% at d=8 and
+  40% at d=32.</p>
+  <p>The severity is strongly dimension-dependent, and this is the part
+  worth not over-reading. At d=8 a near-miss neighbour list is
+  <em>worse than random</em> — CE 0.8253 against a
+  null of 1.0042 — because it actively holds points
+  together while pushing on the wrong pairs, where random neighbours at
+  least apply an isotropic mean-field pressure. At d=32 that gap nearly
+  vanishes (0.9993 against
+  1.0008): once recall is zero, every arm lands on
+  the null and how local the substitutes were stops mattering.</p>
+  <p>The arm as originally specified confirms why it needed replacing. At
+  d=32, <code>ratio2x</code> and <code>uniform</code> agree to four
+  decimal places on every column — the ball of radius 2x the k-th distance
+  has swallowed the entire point set, exactly the concentration argument
+  that governs the rest of this index's design. The rank-window arms were
+  added for that reason: they pin recall at zero while varying locality
+  independently, which is the separation the original design intended but
+  could not achieve at these dimensions.</p>
+</section>
+
+<section>
+  <div class="prose"><h2>The full record</h2></div>
+  <section><h3>d = 32 &nbsp;·&nbsp; 0+4000 points</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+<tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>1.00</td><td>1.2074 <span class="sd">±0.0015</span></td><td>—</td><td>6.0752</td><td>151</td></tr>
+<tr><td class="arm">top2k</td><td>0.500</td><td>1.00</td><td>1.2019 <span class="sd">±0.0021</span></td><td>-0.45%</td><td>5.9403</td><td>126</td></tr>
+<tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.05</td><td>0.9993 <span class="sd">±0.0014</span></td><td>-17.24%</td><td>3.6295</td><td>110</td></tr>
+<tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.16</td><td>0.9830 <span class="sd">±0.0039</span></td><td>-18.59%</td><td>3.6741</td><td>117</td></tr>
+<tr><td class="arm">ratio2x</td><td>0.001</td><td>1.45</td><td>1.0008 <span class="sd">±0.0003</span></td><td>-17.11%</td><td>3.9632</td><td>40</td></tr>
+<tr><td class="arm">uniform</td><td>0.001</td><td>1.45</td><td>1.0008 <span class="sd">±0.0003</span></td><td>-17.11%</td><td>3.9695</td><td>40</td></tr>
+</tbody></table></div></section><section><h3>d = 8 &nbsp;·&nbsp; 0+2048 points</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+<tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>0.99</td><td>1.4741 <span class="sd">±0.0063</span></td><td>—</td><td>0.9058</td><td>166</td></tr>
+<tr><td class="arm">top2k</td><td>0.500</td><td>0.99</td><td>1.4183 <span class="sd">±0.0176</span></td><td>-3.78%</td><td>0.7703</td><td>131</td></tr>
+<tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.12</td><td>0.8253 <span class="sd">±0.0210</span></td><td>-44.01%</td><td>0.0251</td><td>171</td></tr>
+<tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.46</td><td>0.9440 <span class="sd">±0.0049</span></td><td>-35.96%</td><td>0.1833</td><td>151</td></tr>
+<tr><td class="arm">ratio2x</td><td>0.009</td><td>1.71</td><td>1.0083 <span class="sd">±0.0029</span></td><td>-31.60%</td><td>0.2981</td><td>38</td></tr>
+<tr><td class="arm">uniform</td><td>0.002</td><td>2.28</td><td>1.0042 <span class="sd">±0.0019</span></td><td>-31.88%</td><td>0.2959</td><td>27</td></tr>
+</tbody></table></div></section>
+</section>
+
+<footer>
+  <p>Generated by <code>examples/report_recall_ablation.py</code> from
+  <code>recall_ablation.json</code>. Reproduce with
+  <code>python examples/bench_recall_ablation.py --seeds 3</code>.
+  Clark-Evans and separation are both toroidal L1; the CE null is the exact
+  fixed-n expectation, not the Poisson asymptotic.</p>
+</footer>
+</div>
