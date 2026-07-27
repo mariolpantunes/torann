@@ -260,6 +260,38 @@ Run this early and run it dirty first: current defaults, current L1 index,
 one optimizer, to find out whether the effect exists at all before
 investing in the full design.
 
+#### 2.1 Three methodology rules, each learned by getting it wrong
+
+`pyBlindOpt/examples/bench_init_oblesa.py` (branch `init-benchmark`).
+These are recorded because the first two versions of this benchmark
+produced confident, publishable-looking tables that were pure noise.
+
+1. **The same seed must hit the same code path.** The arms consume very
+   different amounts of randomness while initializing — ESS draws for every
+   particle of every epoch, plain sampling draws once. Passing the
+   optimizer whatever generator state the initializer left behind gives
+   each arm a different DE trajectory, so two things vary per seed and both
+   get attributed to the initializer. Seed the optimizer's generator
+   *identically across arms*. Re-running six cells with this fix **flipped
+   five of the six winners.**
+2. **Compare convergence curves at matched evaluation counts, not final
+   scores.** The initializer acts on generation zero and DE washes it out
+   long before the budget ends, so an endpoint is mostly optimizer
+   variance. Record best-so-far per generation and read every arm at 10 /
+   25 / 50 / 100% of budget, accounting for the fact that arms which paid
+   more to initialize reach a given budget later.
+3. **Sanity-check the invariant the methods themselves guarantee.** OBLESA
+   selects greedily from OBL's candidate pool *plus* the ESS batch, so its
+   chosen population must be pointwise no worse than OBL's at every rank.
+   It is — verified on every seed. Any result contradicting a structural
+   invariant is a bug in the harness, and that check is what located both
+   defects above.
+
+The dispersion is the reason all three matter: a single cell (rastrigin,
+d=32, n_pop=512) ranged 24.9–186.9 across eight seeds. At 8–20 seeds the
+winner changed at every budget checkpoint. **Plan for >= 100 seeds at
+small `n_pop`**, and treat any table without them as a smoke test.
+
 ### P2 — Index baseline and the metric gate, run concurrently
 
 **P2a (torann): does the index scale the way we think?** Nothing in
