@@ -67,6 +67,14 @@ OUT = os.path.join(os.path.dirname(__file__), "out")
 CASES = (
     (32, 0, 4000),
     (8, 0, 2048),
+    # The filled start, which is the job ESS is actually for: the anchors
+    # never move, so a candidate whose true nearest neighbour is static can
+    # only resolve that force by moving itself. Whether corrupted selection
+    # matters *there* is a different question from the empty start, and
+    # `_smart_init` (exact in every arm) now runs too. Ratios follow the
+    # suite's shapes; d=8 is the suite's shape 4 at full size.
+    (32, 2000, 4000),
+    (8, 1024, 2048),
 )
 
 ARMS = ("exact", "top2k", "rank1-4k", "rank8-16k", "ratio2x", "uniform")
