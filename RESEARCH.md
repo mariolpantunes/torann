@@ -209,13 +209,52 @@ are DB/theory conference papers). Established:
   with dynamic compound hash functions and virtual rehashing. Overlaps P3
   below; read before claiming novelty there.
 
-Still to check, each able to invalidate a claim: whether §1.2's
-rate-mixture construction is known (the completely-monotone step and grid
-LSH are both textbook; the *toroidal* combination may not be); Chierichetti
-& Kumar on which similarity functions are LSHable, which bounds what
-non-distance scores can achieve; Aggarwal, Hinneburg & Keim (ICDT'01) on
-fractional norms, the standing citation for §7.2; and any prior ANN work
-under periodic boundary conditions.
+Confirmed via DBLP/OpenAlex (Semantic Scholar's unauthenticated pool
+returns a hard 429; DBLP indexes this corpus better anyway):
+
+* **Aggarwal, Hinneburg & Keim (ICDT'01)**, *On the Surprising Behavior of
+  Distance Metrics in High Dimensional Space* — 2067 citations, the
+  standing citation for §7.2.
+* **Chierichetti & Kumar (SODA'12 / JACM'15)**, *LSH-Preserving Functions
+  and Their Applications* — characterises which similarity functions admit
+  an LSH, and so bounds what P3's non-distance scores can achieve.
+
+**Forward citation traversal from Datar et al.** (1000 citing works scanned
+via OpenAlex) found **no** prior art for §1.2's toroidal rate-mixture
+construction, and none for LSH under periodic boundary conditions. Six
+titles matched the construction's vocabulary; none is this. That is
+meaningful but not conclusive — the same construction could be described in
+vocabulary the filter did not anticipate.
+
+### 2.1 The paper that attacks the `L^p` premise directly
+
+**Mirkes, Allohibi & Gorban (2020), Entropy** — *Fractional Norms and
+Quasinorms Do Not Help to Overcome the Curse of Dimensionality* (44
+citations, cites Datar et al.). It must be answered in any paper claiming
+`p < 1` helps:
+
+> fractional quasinorms have a greater relative contrast and coefficient of
+> variation than `l2`, **but this difference decays with increasing space
+> dimension** … **a greater relative contrast does not mean a better
+> classification quality** … the difference in kNN classifier performance
+> for `p` = 0.5, 1, 2 is **statistically insignificant**.
+
+They confirm §7.2's *measurement* and reject the *inference*. Two responses,
+one solid and one still owed:
+
+* **On decay — our data disagrees, in the relevant sense.** Absolute
+  contrast falls with `d` for every `p`, but the *ratio* of low-`p` contrast
+  to L1 contrast **grows**: 3.12× at d=8, 5.03× at d=16, 6.93× at d=32,
+  6.39× at d=64 (`p=0.25` over `p=1`, from §7.2). Their claim is about the
+  absolute gap; the multiplicative advantage does not decay over the range
+  that matters here.
+* **On contrast not implying benefit — they are right and this is exactly
+  the P2b gate.** Their evidence is kNN *classification*; the claim here is
+  about a repulsion force law that §7 measured to be unable to distinguish
+  rank 1 from rank 64. Different task, so their result does not transfer
+  directly — but it is published evidence that precisely this inference
+  fails elsewhere, which raises the prior that P2b comes back negative.
+  **Run P2b before building anything in P4.**
 
 ### P1 — OBLESA end to end: the experiment the paper is made of
 
