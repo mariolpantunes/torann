@@ -4,10 +4,18 @@ Written to be read *first* in a fresh session. §1–§3 are results that should
 not be re-derived; §4 is the list of things measured and rejected, which is
 the expensive knowledge here; §5 is the proposed per-dimension grid LSH,
 assessed against those measurements; §6 is the recall question, now
-**answered**; **§7 is the newest work and the one to read before planning** —
-above `d ~ 8` the ESS force law stops discriminating between neighbours,
-which changes what the index is being asked to do, and §7.4 is the brief for
-the next session (a hash family designed natively for `p < 1`).
+**answered**; §7 is why the ESS force law stops discriminating above
+`d ~ 8`, which changes what the index is being asked to do.
+
+**§8 is the newest work and the one to read before planning.** It is the
+first end-to-end measurement on the thing the whole stack exists to serve —
+OBLESA driving an optimizer, 30 000 runs — and it says the empty-space stage
+does not currently earn its cost against controls that spend the same
+budget without it. That makes the force-law fix the critical path rather
+than an optimization, and it is why the plan (`RESEARCH.md`, branch
+`metric-lp`) gates the `L^p` hash behind an ESS-side experiment. §7.4's
+brief for a `p < 1` hash family is **superseded** by `RESEARCH.md` §1, which
+settles the construction.
 
 Detail behind every number: `OPTIMIZE.md`. Method rules: benchmarks must be
 representative, optimization decisions come from profilers, and anything
@@ -458,3 +466,104 @@ have to be re-derived per `p`.
   between rank 1 and rank 64 needs `r^-81` at d=32 (`r^-133` at d=64). The
   Gaussian's `r^2` in the exponent is what makes the same job reachable at
   `sigma/r1 = 0.113`, so `softened_inverse_force` is not the route.
+
+---
+
+## 8. The end-to-end answer: ESS does not currently earn its cost
+
+**Read this with §7.** §7 says the force law stops discriminating above
+`d ~ 8`; §8 is what that costs downstream, measured for the first time on
+the thing the whole stack exists to serve. Planning document: `RESEARCH.md`
+on branch `metric-lp`. Benchmark: `pyBlindOpt/examples/bench_init_oblesa.py`
+and `report_init_oblesa.py`, branch `init-benchmark`.
+
+Everything measured in torann and ess before this was *intrinsic* — Clark-
+Evans, toroidal separation, recall, ms/epoch. None of it showed that a
+population initialized this way leads an optimizer anywhere better.
+
+**30 000 runs**: 12 initializers × 5 functions × `d ∈ {2,5,10,20,40}` ×
+100 paired seeds, driving differential evolution. Metric is the acceleration
+rate of Rahnamayan et al., `(1 - Σn(arm)/Σn(random)) × 100`, with the target
+in each cell set to the median final value the random arm reaches there.
+
+| arm | calls | AR% (iters) | AR% (calls) | success |
+|---|---|---|---|---|
+| random | N | 0.00 | 0.00 | 59.6% |
+| lhs / sobol | N | 3.1 / 4.4 | 3.1 / 4.4 | 61.7 / 62.6% |
+| **random4x** (control) | 4N | 14.43 | 11.29 | 67.2% |
+| **obl2x** (control) | 4N | **18.92** | **15.78** | 70.6% |
+| obl | 2N | 15.35 | 13.78 | 69.4% |
+| **qobl** | 2N | **42.23** | **40.66** | **86.4%** |
+| oblesa | 4N | 15.90 | 12.76 | 68.2% |
+| **oblesa-quasi** | 4N | **42.37** | 39.23 | 85.3% |
+| oblesa-div25 / div50 / rsel | 4N | 9.2 / 9.4 / 6.5 | 6.0 / 6.3 / 3.3 | 60–63% |
+
+### 8.1 What it means for torann
+
+1. **The empty-space stage returns nothing detectable.** Default OBLESA
+   (15.90%) is *beaten* by `obl2x` (18.92%) — the same 4N budget spent on
+   random plus opposites, no ESS. And `oblesa-quasi` is level with `qobl`,
+   which costs half as much, so per function call **quasi-OBL wins**
+   (40.66% vs 39.23%). Wherever OBLESA is strong, plain quasi-opposition
+   reaches the same place for 2N instead of 4N.
+2. **The dimensional gain is opposition-driven, not ESS-driven.** By
+   dimension, `qobl` runs 8.7 → 76.9% and `oblesa-quasi` 7.2 → 76.9%,
+   tracking each other at every step; `oblesa` (34.1% at d=40) never
+   separates from `obl` (35.9%) or `obl2x` (38.5%). The claim that
+   empty-space search should matter *more* as `d` rises is not visible in
+   this data.
+3. **The knob dwarfs the method.** Quasi-opposition is worth ~2.7× standard
+   opposition in both OBL and OBLESA. Every prior evaluation, including the
+   GECCO Companion '26 paper's OBLESA arms, used `opp="standard"` — the
+   weaker setting. The diversity knobs *hurt*: `div25` 9.17%, `div50`
+   9.42%, `rsel` 6.48%, all below the 15.90% default, which is awkward
+   given that spatial diversity is exactly what ESS supplies.
+4. **The index was never exercised.** At `n_pop=30` ESS runs on 60 points,
+   below torann's brute-force crossover of 512, so the LSH path did no work
+   in any of the 30 000 runs. **torann's relevance is confined to the
+   large-population regime, and that regime is still untested end to end.**
+
+**So the force-law work is what stands between ESS and a contribution**, and
+it is now the critical path rather than an optimization. Run `RESEARCH.md`'s
+P2b gate — does toroidal `L^0.5` actually improve ESS quality, brute force,
+no index — before building the `L^p` family in Rust.
+
+### 8.2 A published result that argues against the `L^p` route
+
+**Mirkes, Allohibi & Gorban, *Entropy* 2020**, *Fractional Norms and
+Quasinorms Do Not Help to Overcome the Curse of Dimensionality* (cites Datar
+et al.). They confirm §7.2's measurement — low `p` does raise relative
+contrast — and then show it **does not translate into kNN classification
+quality**, with `p = 0.5, 1, 2` differing insignificantly.
+
+Their decay claim our data answers: absolute contrast falls with `d` for
+every `p`, but the *ratio* of `p=0.25` contrast to L1 contrast **grows** —
+3.12× at d=8, 5.03× at d=16, 6.93× at d=32, 6.39× at d=64. Their
+contrast-does-not-imply-benefit claim stands, is about a different task
+(classification, not a repulsion force law), and is precisely why P2b is a
+gate rather than a formality.
+
+### 8.3 Benchmark rules, each learned by getting it wrong
+
+Three successive versions of this benchmark produced confident,
+publishable-looking tables that were noise. The structural invariant —
+OBLESA selects greedily from a superset of OBL's candidates, so it cannot be
+worse on the population it starts from — caught all three.
+
+* **The same seed must hit the same code path.** ESS consumes far more
+  randomness than plain sampling; passing the optimizer whatever generator
+  state the initializer left behind gave each arm a different search
+  trajectory. Seeding the optimizer identically across arms **flipped five
+  of six cell winners**.
+* **Compare convergence curves, not endpoints.** The initializer acts on
+  generation zero and the optimizer washes it out; a final fitness is mostly
+  optimizer variance.
+* **Iterations first, function calls second.** Charging initialization to a
+  fixed call budget cost OBLESA four generations of 200 and manufactured a
+  significant "OBLESA worse than random" on sphere at d=2 and d=4 that
+  reverses sign under iteration accounting.
+* **No fixed absolute tolerance.** `alpha = 0.1` is unreachable for
+  rastrigin at d=32 and passed in two generations by sphere at d=2. Target
+  what the baseline actually achieves in that cell.
+* Dispersion is why all of it matters: one cell ranged 24.9–186.9 over eight
+  seeds. **100 seeds is the floor**, not a luxury.
