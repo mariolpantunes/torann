@@ -8,4 +8,12 @@ build/
 target/
 examples/out/
 exploration/out/
+
+# Benchmark and exploration results: regenerate them, never review them.
+*.json
+
+# Agent scratch
 .claude/
+.goose/
+.goosehints
+.agy/
