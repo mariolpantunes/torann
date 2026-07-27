@@ -1,0 +1,519 @@
+<title>torann × ESS — session report</title>
+<style>
+:root{
+  color-scheme: light;
+  --ground:#f7f8fa; --card:#ffffff; --ink:#10141b; --ink-2:#545c6b;
+  --muted:#7b8394; --rule:#dfe3ea; --accent:#2a78d6; --critical:#e34948;
+  --track:#eceff4;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --ground:#0e1116; --card:#161b22; --ink:#eef1f6; --ink-2:#aab3c0;
+    --muted:#7d8797; --rule:#262d38; --accent:#3987e5; --critical:#e66767;
+    --track:#1e242d;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --ground:#0e1116; --card:#161b22; --ink:#eef1f6; --ink-2:#aab3c0;
+  --muted:#7d8797; --rule:#262d38; --accent:#3987e5; --critical:#e66767;
+  --track:#1e242d;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  font-size:16px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px; margin:0 auto; padding:clamp(28px,5vw,72px) clamp(18px,4vw,40px) 96px;
+  display:flex; flex-direction:column; gap:44px;}
+.prose{max-width:68ch; display:flex; flex-direction:column; gap:16px;}
+h1{
+  font-family:ui-serif,Georgia,"Times New Roman",serif;
+  font-weight:600; font-size:clamp(30px,4.4vw,46px); line-height:1.12;
+  letter-spacing:-0.015em; margin:0; text-wrap:balance;
+}
+h2{
+  font-family:ui-serif,Georgia,serif; font-weight:600;
+  font-size:clamp(21px,2.6vw,27px); letter-spacing:-0.01em;
+  margin:0; text-wrap:balance;
+}
+h3{font-size:15px; font-weight:650; margin:0; letter-spacing:-0.005em;}
+p{margin:0; color:var(--ink-2);}
+.prose p{max-width:68ch}
+strong{color:var(--ink); font-weight:640}
+.eyebrow{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px; letter-spacing:0.14em; text-transform:uppercase;
+  color:var(--muted); margin:0;
+}
+.sub{font-size:17.5px; color:var(--ink-2); max-width:64ch; margin:0}
+.rule{height:1px; background:var(--rule); border:0; margin:0}
+section{display:flex; flex-direction:column; gap:20px}
+.verdict{
+  background:var(--card); border:1px solid var(--rule);
+  border-left:3px solid var(--accent);
+  border-radius:3px; padding:24px 26px;
+  display:flex; flex-direction:column; gap:12px; max-width:72ch;
+}
+.verdict p{color:var(--ink)}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:0.9em; font-variant-numeric:tabular-nums}
+code{background:var(--track); padding:0.12em 0.36em; border-radius:3px}
+.facet{background:var(--card); border:1px solid var(--rule); border-radius:4px;
+  padding:22px 24px; display:flex; flex-direction:column; gap:18px}
+.facets{display:grid; gap:18px; grid-template-columns:1fr}
+@media(min-width:900px){.facets{grid-template-columns:1fr 1fr}}
+.facet h3 span{color:var(--muted); font-weight:450}
+.plot{position:relative; display:flex; flex-direction:column; gap:9px}
+.nullrule{position:absolute; left:calc(96px + (100% - 96px) * var(--null));
+  top:0; bottom:0; width:0; border-left:1px dashed var(--muted); opacity:.75}
+.row{display:grid; grid-template-columns:96px 1fr; align-items:center; gap:0}
+.rowname{font-family:ui-monospace,Menlo,monospace; font-size:12px;
+  color:var(--ink-2); padding-right:10px; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis}
+.track{position:relative; height:22px; display:flex; align-items:center;
+  background:linear-gradient(var(--track),var(--track)) no-repeat;
+  background-size:100% 2px; background-position:0 50%}
+.bar{height:14px; background:var(--accent); border-radius:0 3px 3px 0;
+  box-shadow:0 0 0 2px var(--card)}
+.bar.below{background:var(--critical)}
+.val{font-family:ui-monospace,Menlo,monospace; font-size:12px;
+  font-variant-numeric:tabular-nums; color:var(--ink-2); padding-left:9px;
+  white-space:nowrap}
+.flag{color:var(--critical); font-family:system-ui,sans-serif; font-size:11px;
+  letter-spacing:.02em}
+.legend{display:flex; flex-wrap:wrap; gap:16px; align-items:center;
+  font-size:12.5px; color:var(--muted)}
+.key{display:inline-flex; align-items:center; gap:7px}
+.swatch{width:14px; height:8px; border-radius:2px; background:var(--accent);
+  display:inline-block}
+.swatch.crit{background:var(--critical)}
+.swatch.null{width:0; height:13px; border-left:1px dashed var(--muted);
+  border-radius:0}
+.tablewrap{overflow-x:auto; border:1px solid var(--rule); border-radius:4px;
+  background:var(--card)}
+table{border-collapse:collapse; width:100%; min-width:640px; font-size:13.5px}
+th{
+  font-family:ui-monospace,Menlo,monospace; font-size:10.5px;
+  letter-spacing:.1em; text-transform:uppercase; color:var(--muted);
+  text-align:right; font-weight:500; padding:13px 16px;
+  border-bottom:1px solid var(--rule); white-space:nowrap;
+}
+th:first-child{text-align:left}
+td{padding:11px 16px; text-align:right; border-bottom:1px solid var(--rule);
+  font-family:ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums;
+  color:var(--ink-2); white-space:nowrap}
+td.arm{text-align:left; color:var(--ink)}
+tr:last-child td{border-bottom:0}
+tr.ctl td{color:var(--ink); background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.sd{color:var(--muted); font-size:11px}
+.ladder{display:flex; flex-direction:column; gap:0; max-width:72ch}
+.rung{display:grid; grid-template-columns:26px 1fr; gap:14px;
+  padding:14px 0; border-top:1px solid var(--rule)}
+.rung:first-child{border-top:0}
+.rungno{font-family:ui-monospace,Menlo,monospace; font-size:11.5px;
+  color:var(--muted); padding-top:2px}
+.rung b{font-family:ui-monospace,Menlo,monospace; font-size:13.5px;
+  color:var(--ink); font-weight:500}
+.rung p{font-size:14px; margin-top:3px}
+footer{color:var(--muted); font-size:13px; max-width:68ch}
+a{color:var(--accent)}
+a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
+  outline-offset:3px}
+
+.tiles{display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
+.tile{background:var(--card); border:1px solid var(--rule); border-radius:4px;
+  padding:18px 20px; display:flex; flex-direction:column; gap:5px}
+.tile .n{font-family:ui-monospace,Menlo,monospace; font-size:26px;
+  font-variant-numeric:tabular-nums; color:var(--ink); letter-spacing:-0.02em}
+.tile .n.warn{color:var(--critical)}
+.tile .lab{font-size:12.5px; color:var(--muted); line-height:1.45}
+.chart{background:var(--card); border:1px solid var(--rule); border-radius:4px;
+  padding:20px 22px; overflow-x:auto}
+.chart svg{display:block; min-width:520px; width:100%; height:auto}
+.s1{fill:var(--s1)} .s2{fill:var(--s2)} .s3{fill:var(--s3)}
+.gridline{stroke:var(--rule); stroke-width:1}
+.axis{fill:var(--muted); font-size:11px;
+  font-family:ui-monospace,Menlo,monospace}
+.dlabel{fill:var(--ink-2); font-size:10.5px;
+  font-family:ui-monospace,Menlo,monospace}
+.lineser{fill:none; stroke-width:2; stroke-linecap:round;
+  stroke-linejoin:round}
+:root{--s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--s1:#3987e5; --s2:#d95926; --s3:#199e70}
+}
+:root[data-theme="dark"]{--s1:#3987e5; --s2:#d95926; --s3:#199e70}
+.nav{display:flex; flex-wrap:wrap; gap:8px 18px; font-size:13px}
+.nav a{color:var(--ink-2); text-decoration:none; border-bottom:1px solid var(--rule)}
+.nav a:hover{color:var(--accent); border-bottom-color:var(--accent)}
+.verdict.warn{border-left-color:var(--critical)}
+.stack{display:flex; flex-direction:column; gap:12px}
+.note{font-size:13.5px; color:var(--muted); max-width:68ch}
+</style>
+<div class="wrap">
+
+<header class="prose">
+  <p class="eyebrow">torann · branch query-batched-join · 2026-07-27</p>
+  <h1>What the index is actually being asked to do</h1>
+  <p class="sub">One open question answered, one new wall found. Recall has
+  a floor rather than a price — and above d≈8 the force law consuming those
+  neighbours stops being able to tell them apart, which changes the
+  problem.</p>
+  <nav class="nav">
+    <a href="#baseline">Baselines</a>
+    <a href="#recall">Recall ablation</a>
+    <a href="#force">The force-law wall</a>
+    <a href="#grid">Grid feasibility</a>
+    <a href="#metric">Metric contrast</a>
+    <a href="#lp">L^p retrieval ceiling</a>
+    <a href="#tuner">The tuner</a>
+    <a href="#ruled-out">Ruled out</a>
+    <a href="#next">What is next</a>
+  </nav>
+</header>
+
+<hr class="rule">
+
+<section>
+  <div class="tiles">
+<div class="tile"><div class="n">0.45%</div><div class="lab">CE cost of halving recall at d=32, empty start — the slack the index can spend</div></div>
+<div class="tile"><div class="n warn">17%</div><div class="lab">CE cost of losing all true neighbours, though substitutes are only 5% further away</div></div>
+<div class="tile"><div class="n warn">86%</div><div class="lab">how hard the 64th neighbour pushes relative to the 1st at d=32 — the force law cannot discriminate</div></div>
+<div class="tile"><div class="n warn">93.2%</div><div class="lab">ceiling on L^0.5 recall from the L1 hash, at any retrieval width</div></div>
+</div>
+</section>
+
+<section class="prose" id="baseline">
+  <h2>Baselines, and the trap underneath them</h2>
+  <p>ESS imports the <em>installed</em> torann, not the repository. Every
+  number here was taken after rebuilding and reinstalling the wheel, with
+  the installed <code>.so</code> hash checked against the one built from
+  this branch. An earlier session lost an hour to measuring a 12-day-old
+  build twice.</p>
+  <p>The standing sweep, 48 configurations, reported per epoch:
+  <strong>brute 359.8 ms/epoch</strong> geometric mean
+  (82% of it query), <strong>LSH 16.25
+  ms/epoch</strong> (55% query). One sweep run was
+  discarded and repeated because another job overlapped ~90 s of it.</p>
+</section>
+
+<section>
+  <div class="prose"><h3>The six ESS shapes, batched join vs per-query</h3>
+  <p class="note">Every shape's trajectory fingerprint matched — results are
+  bit-identical across the two paths.</p></div>
+  <div class="tablewrap"><table class=""><thead><tr><th>d</th><th>shape</th><th>L</th><th>per-query</th><th>batched</th><th>speed-up</th><th>recall</th></tr></thead><tbody>
+<tr><td>2</td><td>0+256</td><td>—</td><td>0.17s</td><td>0.14s</td><td>n/a</td><td>exact</td></tr>
+<tr><td>2</td><td>256+512</td><td>4</td><td>0.24s</td><td>0.21s</td><td>1.14×</td><td>1.000</td></tr>
+<tr><td>8</td><td>0+1024</td><td>8</td><td>0.48s</td><td>0.39s</td><td>1.24×</td><td>0.991</td></tr>
+<tr><td>8</td><td>1024+2048</td><td>8</td><td>1.18s</td><td>0.85s</td><td>1.38×</td><td>1.000</td></tr>
+<tr><td>32</td><td>0+10000</td><td>24</td><td>17.65s</td><td>12.75s</td><td>1.38×</td><td>0.689</td></tr>
+<tr><td>32</td><td>10000+20000</td><td>24</td><td>101.12s</td><td>64.82s</td><td>1.56×</td><td>0.861</td></tr>
+<tr><td><strong>all</strong></td><td><strong>six shapes</strong></td><td></td><td><strong>120.83s</strong></td><td><strong>79.16s</strong></td><td><strong>1.53×</strong></td><td>query 1.65×</td></tr>
+</tbody></table></div>
+</section>
+
+<section class="prose" id="recall">
+  <h2>Does ESS need recall, or only plausible repellers?</h2>
+  <p>The evidence was ambiguous because it confounded two things: cutting
+  LSH tables degrades recall <em>and</em> locality together. This separates
+  them. The index is exact throughout, so recall is <strong>imposed</strong>
+  rather than measured — the neighbour list is corrupted between the query
+  and the force kernel, and the true toroidal-L1 distance of every
+  substituted point is passed through, so only the selection changes and
+  force magnitudes are never confounded with it.</p>
+</section>
+
+<section>
+  <div class="prose">
+    <div class="verdict">
+      <p class="eyebrow">Answer</p>
+      <p><strong>Recall has a floor, not a price.</strong> Half the true
+      neighbours can go almost free — 0.45% CE at
+      d=32, 0.29% from the filled start — but
+      losing all of them collapses the result to the uniform null, even
+      when the substitutes are only 5% further away. A distance
+      <em>ranking</em> is the product. Redesigning the index around cost per
+      <em>plausible local neighbour</em> is ruled out.</p>
+      <p>The filled start — anchors that cannot be pushed, which is the case ESS is actually for — is uniformly <em>less</em> sensitive (10.4% at recall 0 against 17.2% empty), so the slack measured from an empty start is a lower bound on the slack in production.</p>
+    </div>
+  </div>
+  <div class="legend">
+    <span class="key"><span class="swatch"></span>at or above the uniform
+    null</span>
+    <span class="key"><span class="swatch crit"></span>below it — actively
+    clustered</span>
+    <span class="key"><span class="swatch null"></span>uniform null</span>
+  </div>
+  <div class="facets"><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; empty start&nbsp;·&nbsp; 0+4000</span></h3><div class="plot" style="--null:0.7675">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.2074</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:92.17%"></div><span class="val">1.2019</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar" style="width:76.63%"></div><span class="val">0.9993</span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:75.38%"></div><span class="val">0.9830 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:76.75%"></div><span class="val">1.0008</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:76.75%"></div><span class="val">1.0008</span></div></div>
+</div></div><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; filled start&nbsp;·&nbsp; 2000+4000</span></h3><div class="plot" style="--null:0.8287">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.1427</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:92.32%"></div><span class="val">1.1394</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar" style="width:82.94%"></div><span class="val">1.0236</span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:81.64%"></div><span class="val">1.0075 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:82.87%"></div><span class="val">1.0227</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:82.87%"></div><span class="val">1.0227</span></div></div>
+</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; empty start&nbsp;·&nbsp; 0+2048</span></h3><div class="plot" style="--null:0.6308">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.4741</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:89.09%"></div><span class="val">1.4183</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar below" style="width:51.84%"></div><span class="val">0.8253 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:59.30%"></div><span class="val">0.9440 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:63.34%"></div><span class="val">1.0083</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:63.08%"></div><span class="val">1.0042</span></div></div>
+</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; filled start&nbsp;·&nbsp; 1024+2048</span></h3><div class="plot" style="--null:0.7185">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.3375</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:90.27%"></div><span class="val">1.3040</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar below" style="width:66.40%"></div><span class="val">0.9591 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:69.91%"></div><span class="val">1.0098 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:72.40%"></div><span class="val">1.0459</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:71.85%"></div><span class="val">1.0379</span></div></div>
+</div></div></div>
+</section>
+
+<section>
+  <div class="prose"><h3>The full record</h3></div>
+  <section><h3>d = 32 &nbsp;·&nbsp; empty start &nbsp;·&nbsp; 0+4000</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+<tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>1.00</td><td>1.2074 <span class="sd">±0.0015</span></td><td>—</td><td>6.0752</td><td>151</td></tr>
+<tr><td class="arm">top2k</td><td>0.500</td><td>1.00</td><td>1.2019 <span class="sd">±0.0021</span></td><td>-0.45%</td><td>5.9403</td><td>126</td></tr>
+<tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.05</td><td>0.9993 <span class="sd">±0.0014</span></td><td>-17.24%</td><td>3.6295</td><td>110</td></tr>
+<tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.16</td><td>0.9830 <span class="sd">±0.0039</span></td><td>-18.59%</td><td>3.6741</td><td>117</td></tr>
+<tr><td class="arm">ratio2x</td><td>0.001</td><td>1.45</td><td>1.0008 <span class="sd">±0.0003</span></td><td>-17.11%</td><td>3.9632</td><td>40</td></tr>
+<tr><td class="arm">uniform</td><td>0.001</td><td>1.45</td><td>1.0008 <span class="sd">±0.0003</span></td><td>-17.11%</td><td>3.9695</td><td>40</td></tr>
+</tbody></table></div></section><section><h3>d = 32 &nbsp;·&nbsp; filled start &nbsp;·&nbsp; 2000+4000</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+<tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>1.00</td><td>1.1427 <span class="sd">±0.0021</span></td><td>—</td><td>4.1058</td><td>118</td></tr>
+<tr><td class="arm">top2k</td><td>0.500</td><td>1.00</td><td>1.1394 <span class="sd">±0.0024</span></td><td>-0.29%</td><td>4.1058</td><td>112</td></tr>
+<tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.04</td><td>1.0236 <span class="sd">±0.0008</span></td><td>-10.42%</td><td>3.4952</td><td>118</td></tr>
+<tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.14</td><td>1.0075 <span class="sd">±0.0020</span></td><td>-11.83%</td><td>3.6029</td><td>114</td></tr>
+<tr><td class="arm">ratio2x</td><td>0.001</td><td>1.45</td><td>1.0227 <span class="sd">±0.0003</span></td><td>-10.50%</td><td>3.6974</td><td>27</td></tr>
+<tr><td class="arm">uniform</td><td>0.001</td><td>1.45</td><td>1.0227 <span class="sd">±0.0003</span></td><td>-10.50%</td><td>3.6974</td><td>27</td></tr>
+</tbody></table></div></section><section><h3>d = 8 &nbsp;·&nbsp; empty start &nbsp;·&nbsp; 0+2048</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+<tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>0.99</td><td>1.4741 <span class="sd">±0.0063</span></td><td>—</td><td>0.9058</td><td>166</td></tr>
+<tr><td class="arm">top2k</td><td>0.500</td><td>0.99</td><td>1.4183 <span class="sd">±0.0176</span></td><td>-3.78%</td><td>0.7703</td><td>131</td></tr>
+<tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.12</td><td>0.8253 <span class="sd">±0.0210</span></td><td>-44.01%</td><td>0.0251</td><td>171</td></tr>
+<tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.46</td><td>0.9440 <span class="sd">±0.0049</span></td><td>-35.96%</td><td>0.1833</td><td>151</td></tr>
+<tr><td class="arm">ratio2x</td><td>0.009</td><td>1.71</td><td>1.0083 <span class="sd">±0.0029</span></td><td>-31.60%</td><td>0.2981</td><td>38</td></tr>
+<tr><td class="arm">uniform</td><td>0.002</td><td>2.28</td><td>1.0042 <span class="sd">±0.0019</span></td><td>-31.88%</td><td>0.2959</td><td>27</td></tr>
+</tbody></table></div></section><section><h3>d = 8 &nbsp;·&nbsp; filled start &nbsp;·&nbsp; 1024+2048</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+<tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>0.98</td><td>1.3375 <span class="sd">±0.0056</span></td><td>—</td><td>0.3291</td><td>110</td></tr>
+<tr><td class="arm">top2k</td><td>0.500</td><td>0.99</td><td>1.3040 <span class="sd">±0.0041</span></td><td>-2.51%</td><td>0.3291</td><td>106</td></tr>
+<tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.12</td><td>0.9591 <span class="sd">±0.0206</span></td><td>-28.29%</td><td>0.0526</td><td>128</td></tr>
+<tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.43</td><td>1.0098 <span class="sd">±0.0052</span></td><td>-24.50%</td><td>0.2033</td><td>125</td></tr>
+<tr><td class="arm">ratio2x</td><td>0.008</td><td>1.72</td><td>1.0459 <span class="sd">±0.0083</span></td><td>-21.81%</td><td>0.2371</td><td>53</td></tr>
+<tr><td class="arm">uniform</td><td>0.002</td><td>2.39</td><td>1.0379 <span class="sd">±0.0054</span></td><td>-22.40%</td><td>0.2395</td><td>51</td></tr>
+</tbody></table></div></section>
+</section>
+
+<section class="prose" id="force">
+  <h2>The new wall: above d≈8 the force law stops discriminating</h2>
+  <p>Everything above treats the index's job as "return the true k
+  nearest". This is about the fact that the thing consuming those
+  neighbours can no longer tell them apart. Measured on ESS-converged
+  points with the Gaussian law <code>esa</code> defaults to:</p>
+</section>
+
+<section>
+  <div class="chart"><svg viewBox="0 0 760 250" role="img" aria-label="grouped bar chart"><line class="gridline" x1="46" y1="216.0" x2="748" y2="216.0"/><text class="axis" x="38" y="220.0" text-anchor="end">0%</text><line class="gridline" x1="46" y1="165.5" x2="748" y2="165.5"/><text class="axis" x="38" y="169.5" text-anchor="end">25%</text><line class="gridline" x1="46" y1="115.0" x2="748" y2="115.0"/><text class="axis" x="38" y="119.0" text-anchor="end">50%</text><line class="gridline" x1="46" y1="64.5" x2="748" y2="64.5"/><text class="axis" x="38" y="68.5" text-anchor="end">75%</text><line class="gridline" x1="46" y1="14.0" x2="748" y2="14.0"/><text class="axis" x="38" y="18.0" text-anchor="end">100%</text><rect class="s1" x="150.0" y="14.1" width="26.0" height="201.9" rx="2"/><text class="dlabel" x="163.0" y="10.1" text-anchor="middle">99.95</text><text class="axis" x="163.0" y="238" text-anchor="middle">d=2</text><rect class="s1" x="384.0" y="168.4" width="26.0" height="47.6" rx="2"/><text class="dlabel" x="397.0" y="164.4" text-anchor="middle">23.58</text><text class="axis" x="397.0" y="238" text-anchor="middle">d=8</text><rect class="s1" x="618.0" y="189.2" width="26.0" height="26.8" rx="2"/><text class="dlabel" x="631.0" y="185.2" text-anchor="middle">13.27</text><text class="axis" x="631.0" y="238" text-anchor="middle">d=32</text></svg></div><div class="legend"><span class="key"><span class="swatch" style="background:var(--s1)"></span>share of the vote from ranks 1–8</span></div>
+  <div class="tablewrap"><table class=""><thead><tr><th>d</th><th>rank 1 weight</th><th>rank 8</th><th>rank 64</th><th>share from ranks 1–8</th></tr></thead><tbody>
+<tr><td>2</td><td>0.1586</td><td>0.02083</td><td>3.66e-27</td><td>99.95%</td></tr>
+<tr><td>8</td><td>0.1235</td><td>0.1024</td><td>0.0193</td><td>23.58%</td></tr>
+<tr><td>32</td><td>0.349</td><td>0.3296</td><td>0.299</td><td>13.27%</td></tr>
+</tbody></table></div>
+  <div class="prose stack">
+    <p>At d=32 the 64th neighbour pushes <strong>86% as hard as the
+    nearest</strong>, because all 64 distances lie in [6.13, 6.31] — a 3%
+    spread. Three consequences:</p>
+    <p><strong>Magnitude carries almost no information at high d.</strong>
+    The entire signal is <em>which</em> points come back; a wrongly-returned
+    far neighbour votes at nearly full strength. That is the mechanism
+    behind the collapse above.</p>
+    <p><strong>Radius mode cannot work at d=32 either</strong>, since
+    "inside R" stops being a distinction. Related: at convergence
+    <em>zero</em> neighbours lie inside R at any shape tested — the nearest
+    sits at 1.15–1.4·R, because ESS pushes to equilibrium just outside the
+    interaction radius.</p>
+    <p><strong>ESS destroys its own contrast as it converges.</strong>
+    Relative spread at d=32 is 24.2% on uniform points against 2.9% on
+    converged ones — making points equidistant is precisely its job. Any
+    benchmark on random data measures an easier problem than the real one.</p>
+  </div>
+</section>
+
+<section class="prose" id="grid">
+  <h2>Cells sized from the force law: exact at d≤4, impossible at d≥8</h2>
+  <p>Look in the query's own cell plus the face-adjacent ones — von
+  Neumann, <code>1+2d</code> cells; the L1 ball makes diagonal cells
+  pointless. That needs <strong>capture</strong> (width <code>w ≥ R</code>,
+  since L∞ ≤ L1) and <strong>selectivity</strong> (occupancy
+  <code>n/B<sup>d</sup></code> small) simultaneously. They cross between
+  d=4 and d=8.</p>
+</section>
+
+<section>
+  <div class="tablewrap"><table class=""><thead><tr><th>d</th><th>n</th><th>R</th><th>cells/dim allowed (capture)</th><th>needed (occupancy)</th><th>1+2d</th><th>verdict</th></tr></thead><tbody>
+<tr><td>2</td><td>512</td><td>0.0442</td><td>22.63</td><td>10.12</td><td>5</td><td>works</td></tr>
+<tr><td>4</td><td>2048</td><td>0.1956</td><td>5.11</td><td>4.50</td><td>9</td><td>works</td></tr>
+<tr><td>8</td><td>2048</td><td>0.7355</td><td>1.36</td><td>2.12</td><td>17</td><td><span style="color:var(--critical)">impossible</span></td></tr>
+<tr><td>16</td><td>2048</td><td>2.2118</td><td>0.45</td><td>1.46</td><td>33</td><td><span style="color:var(--critical)">impossible</span></td></tr>
+<tr><td>32</td><td>10000</td><td>5.1095</td><td>0.20</td><td>1.27</td><td>65</td><td><span style="color:var(--critical)">impossible</span></td></tr>
+<tr><td>64</td><td>2048</td><td>12.4236</td><td>0.08</td><td>1.10</td><td>129</td><td><span style="color:var(--critical)">impossible</span></td></tr>
+</tbody></table></div>
+  <p class="note">At d≥16 the capturing cell is <em>larger than the whole
+  domain</em>. This is the same wall as the measured geometry elsewhere,
+  now in the force law's own terms — and it is why a ring-search engine
+  stays scoped to d≤4.</p>
+</section>
+
+<section class="prose" id="metric">
+  <h2>Lower p restores contrast — about two octaves of dimension</h2>
+  <p>Relative spread <code>(r₆₄−r₁)/r₁</code> on ESS-converged points. p=0.25
+  at d=32 beats L1 at d=16, and approaches L1 at d=8.</p>
+</section>
+
+<section>
+  <div class="chart"><svg viewBox="0 0 760 250" role="img" aria-label="grouped bar chart"><line class="gridline" x1="46" y1="216.0" x2="748" y2="216.0"/><text class="axis" x="38" y="220.0" text-anchor="end">0%</text><line class="gridline" x1="46" y1="165.5" x2="748" y2="165.5"/><text class="axis" x="38" y="169.5" text-anchor="end">20%</text><line class="gridline" x1="46" y1="115.0" x2="748" y2="115.0"/><text class="axis" x="38" y="119.0" text-anchor="end">40%</text><line class="gridline" x1="46" y1="64.5" x2="748" y2="64.5"/><text class="axis" x="38" y="68.5" text-anchor="end">60%</text><line class="gridline" x1="46" y1="14.0" x2="748" y2="14.0"/><text class="axis" x="38" y="18.0" text-anchor="end">80%</text><rect class="s1" x="91.8" y="155.4" width="26.0" height="60.6" rx="2"/><text class="dlabel" x="104.8" y="151.4" text-anchor="middle">24</text><rect class="s2" x="120.8" y="92.3" width="26.0" height="123.7" rx="2"/><text class="dlabel" x="133.8" y="88.3" text-anchor="middle">49</text><rect class="s3" x="149.8" y="27.1" width="26.0" height="188.9" rx="2"/><text class="dlabel" x="162.8" y="23.1" text-anchor="middle">74.8</text><text class="axis" x="133.8" y="238" text-anchor="middle">d=8</text><rect class="s1" x="267.2" y="197.6" width="26.0" height="18.4" rx="2"/><text class="dlabel" x="280.2" y="193.6" text-anchor="middle">7.3</text><rect class="s2" x="296.2" y="161.5" width="26.0" height="54.5" rx="2"/><text class="dlabel" x="309.2" y="157.5" text-anchor="middle">21.6</text><rect class="s3" x="325.2" y="123.3" width="26.0" height="92.7" rx="2"/><text class="dlabel" x="338.2" y="119.3" text-anchor="middle">36.7</text><text class="axis" x="309.2" y="238" text-anchor="middle">d=16</text><rect class="s1" x="442.8" y="208.7" width="26.0" height="7.3" rx="2"/><text class="dlabel" x="455.8" y="204.7" text-anchor="middle">2.9</text><rect class="s2" x="471.8" y="187.0" width="26.0" height="29.0" rx="2"/><text class="dlabel" x="484.8" y="183.0" text-anchor="middle">11.5</text><rect class="s3" x="500.8" y="165.2" width="26.0" height="50.8" rx="2"/><text class="dlabel" x="513.8" y="161.2" text-anchor="middle">20.1</text><text class="axis" x="484.8" y="238" text-anchor="middle">d=32</text><rect class="s1" x="618.2" y="211.5" width="26.0" height="4.5" rx="2"/><text class="dlabel" x="631.2" y="207.5" text-anchor="middle">1.8</text><rect class="s2" x="647.2" y="199.8" width="26.0" height="16.2" rx="2"/><text class="dlabel" x="660.2" y="195.8" text-anchor="middle">6.4</text><rect class="s3" x="676.2" y="187.0" width="26.0" height="29.0" rx="2"/><text class="dlabel" x="689.2" y="183.0" text-anchor="middle">11.5</text><text class="axis" x="660.2" y="238" text-anchor="middle">d=64</text></svg></div><div class="legend"><span class="key"><span class="swatch" style="background:var(--s1)"></span>p = 1.0</span><span class="key"><span class="swatch" style="background:var(--s2)"></span>p = 0.5</span><span class="key"><span class="swatch" style="background:var(--s3)"></span>p = 0.25</span></div>
+  <div class="prose"><p class="note">The required force sharpness relaxes
+  with it — σ/r₁ for 10:1 discrimination goes from
+  0.113 at p=1 to 0.309 at p=0.25 — so the two fixes
+  reinforce rather than compete. A power law is not the route: reaching the
+  same 10:1 needs r<sup>−81</sup> at d=32 and
+  r<sup>−133</sup> at d=64.</p></div>
+</section>
+
+<section class="prose" id="lp">
+  <h2>But the L1 hash cannot retrieve L^p neighbours</h2>
+  <p>The grid hash collides with probability <code>1 − B·δ</code> per
+  sampled dimension, so <code>log P(collide) ~ −B·Σδⱼ</code> — <strong>a
+  function of L1 and nothing else</strong>. Two points with equal L1 and
+  very different L^0.5 are retrieved with equal probability, so ranking its
+  candidates by L^p reranks a set that was never selected for it.</p>
+</section>
+
+<section>
+  <div class="chart"><svg viewBox="0 0 760 240" role="img" aria-label="retrieval curve"><line class="gridline" x1="46" y1="206.0" x2="744" y2="206.0"/><text class="axis" x="38" y="210.0" text-anchor="end">0%</text><line class="gridline" x1="46" y1="158.5" x2="744" y2="158.5"/><text class="axis" x="38" y="162.5" text-anchor="end">25%</text><line class="gridline" x1="46" y1="111.0" x2="744" y2="111.0"/><text class="axis" x="38" y="115.0" text-anchor="end">50%</text><line class="gridline" x1="46" y1="63.5" x2="744" y2="63.5"/><text class="axis" x="38" y="67.5" text-anchor="end">75%</text><line class="gridline" x1="46" y1="16.0" x2="744" y2="16.0"/><text class="axis" x="38" y="20.0" text-anchor="end">100%</text><path class="lineser" d="M46.0,175.6 L278.7,64.8 L511.3,28.9 L744.0,28.9" stroke="var(--s1)"/><circle cx="46.0" cy="175.6" r="4.5" fill="var(--s1)" stroke="var(--card)" stroke-width="2"/><text class="dlabel" x="46.0" y="164.6" text-anchor="middle">16%</text><text class="axis" x="46.0" y="228" text-anchor="middle">k=5</text><circle cx="278.7" cy="64.8" r="4.5" fill="var(--s1)" stroke="var(--card)" stroke-width="2"/><text class="dlabel" x="278.7" y="53.8" text-anchor="middle">74.3%</text><text class="axis" x="278.7" y="228" text-anchor="middle">k=50</text><circle cx="511.3" cy="28.9" r="4.5" fill="var(--s1)" stroke="var(--card)" stroke-width="2"/><text class="dlabel" x="511.3" y="17.9" text-anchor="middle">93.2%</text><text class="axis" x="511.3" y="228" text-anchor="middle">k=200</text><circle cx="744.0" cy="28.9" r="4.5" fill="var(--s1)" stroke="var(--card)" stroke-width="2"/><text class="dlabel" x="744.0" y="17.9" text-anchor="middle">93.2%</text><text class="axis" x="744.0" y="228" text-anchor="middle">k=500</text><line class="gridline" x1="46" y1="28.9" x2="744" y2="28.9" stroke="var(--critical)" stroke-dasharray="4 3"/></svg></div>
+  <div class="prose stack">
+    <p>Measured against the real LSH at d=32, n=4000. The dashed line is
+    the plateau: <strong>it is not retrieval width, it is the hash's own L1
+    recall</strong> (0.689 here). The missing ~7% never collide, so no
+    rerank at any width reaches them.</p>
+    <p>The mitigating fact is that the L^p-nearest are not <em>far</em> in
+    L1 — median L1 rank 18, 90th percentile
+    55, max 147 — and the refine kernel already
+    scores ~4118 candidates per query, so the rerank itself costs one
+    <code>vsqrtps</code> per lane plus a bigger heap, not extra retrieval.
+    <strong>But do not ship it as an L^p index.</strong> The cap is
+    structural.</p>
+  </div>
+</section>
+
+<section class="prose" id="tuner">
+  <h2>The tuner optimises a target nobody chose</h2>
+  <p><code>_tune</code> sets <code>L = ceil(log(0.10) / log(1 − p1))</code>,
+  clamped to [4, 24]. That <code>0.10</code> is a hardcoded <strong>90%
+  collision target for a true k-NN</strong> — a recall objective never
+  derived from what ESS needs. Query is 68–85% of ESS wall time and L drives
+  probe count linearly:</p>
+</section>
+
+<section>
+  <div class="tablewrap"><table class=""><thead><tr><th>per-table collision p1</th><th>L for 90% (current)</th><th>for 69% (delivered)</th><th>for 50%</th></tr></thead><tbody>
+<tr><td>0.05</td><td>45</td><td>23</td><td><strong>14</strong></td></tr>
+<tr><td>0.10</td><td>22</td><td>12</td><td><strong>7</strong></td></tr>
+</tbody></table></div>
+  <div class="prose stack">
+    <div class="verdict warn">
+      <p class="eyebrow">The contradiction worth resolving first</p>
+      <p>Imposed recall 0.5 costs <strong>0.45%</strong> CE. But cutting
+      tables to L=12 costs <strong>4.3%</strong> and L=8 costs
+      <strong>7.3%</strong>. Those cannot both describe "less recall", so
+      cutting tables must be doing something else.</p>
+      <p>Two candidates, both testable in ~20 minutes: misses are replaced
+      by <em>far</em> points rather than omitted (the −18% regime), or low
+      recall flattens the force EMA and fires the early-stop prematurely, so
+      the loss is a convergence artifact. The ablation's epoch counts favour
+      the second — corrupted arms stopped at 40 epochs against 151 for
+      exact. <strong>The measurement:</strong> run at L=24 and L=8 and record
+      the true rank of every returned neighbour.</p>
+    </div>
+    <p class="note">What is missing is not a knob —
+    <code>num_tables</code>, <code>resolution</code>,
+    <code>dims_per_table</code>, <code>target_bucket_size</code>,
+    <code>probes</code>, <code>query_block_size</code> and
+    <code>brute_threshold</code> all override the tuner — but an
+    <em>objective</em>: no way to say "I need recall 0.5, not 0.9".</p>
+  </div>
+</section>
+
+<section class="prose" id="ruled-out">
+  <h2>Ruled out this session</h2>
+</section>
+
+<section>
+  <div class="tablewrap"><table class=""><thead><tr><th>condition</th><th>d</th><th>p</th><th>mean k-occurrence</th><th>max</th><th>skew</th></tr></thead><tbody>
+<tr><td>uniform</td><td>8</td><td>1.0</td><td>5.0</td><td>13</td><td>+0.32</td></tr>
+<tr><td>ESS-converged</td><td>8</td><td>1.0</td><td>5.0</td><td>15</td><td>+0.47</td></tr>
+<tr><td>uniform</td><td>32</td><td>1.0</td><td>5.0</td><td>14</td><td>+0.36</td></tr>
+<tr><td>ESS-converged</td><td>32</td><td>1.0</td><td>5.0</td><td>13</td><td>+0.40</td></tr>
+<tr><td>ESS-converged</td><td>32</td><td>0.5</td><td>5.0</td><td>14</td><td>+0.37</td></tr>
+</tbody></table></div>
+  <div class="prose stack">
+    <p><strong>Hubness.</strong> No runaway hubs anywhere — skew +0.32…+0.47
+    with a maximum k-occurrence of 13–15 against a mean of 5, for uniform
+    and converged points, at both dimensions, under p=1 and p=0.5. So
+    hubness-corrected metrics (mutual proximity, local scaling) are not a
+    lead.</p>
+    <p><strong>A power-law force.</strong> r<sup>−81</sup> at d=32 for 10:1
+    discrimination. The Gaussian's r² in the exponent is what makes the same
+    job reachable.</p>
+    <p><strong>The original "within 2× the k-th distance" arm.</strong> At
+    d=32 it agrees with uniform random to four decimals on every column —
+    the ball has swallowed the whole point set. Replaced by rank-window arms
+    that pin recall at zero while varying locality independently.</p>
+  </div>
+</section>
+
+<section class="prose" id="next">
+  <h2>What is next</h2>
+  <p><strong>A hash family designed natively for p &lt; 1.</strong> The
+  target is per-dimension collision <code>~exp(−c·δ^p)</code>. The lever is
+  randomising the cell width: <code>E_w[max(0, 1−δ/w)]</code> represents any
+  convex decreasing f, and <code>exp(−c·δ^p)</code> is convex for p&lt;1.
+  The obstacle is toroidal — the wrap needs <code>w = 1/B</code> with
+  <em>integer</em> B, capping the mixing distribution at w=0.5 instead of a
+  continuum. That is theory to settle before code. The bar to beat is the
+  93.2% rerank ceiling; below it, the construction has bought nothing.</p>
+  <p>A sharper force law (σ 0.5 → ~0.11 at d=32) is the other half of the
+  fix and belongs to ESS, not to the index.</p>
+  <p><strong>Not yet measured.</strong> ESS is a refinement method — called
+  repeatedly, each call handed the points it produced before — so the
+  filled start is the normal case and the static tier grows without bound.
+  Every benchmark here measures a single call, and each call re-fits the
+  index and re-tunes (B,K,L) from scratch.
+  <code>bench_refine_rounds.py</code> is written for exactly this and has
+  never been run. Separately, <strong>there is no FAISS comparison on the
+  ESS workload at all</strong> — the existing scripts use uniform random
+  data at k=2·D — so "competitive with FAISS on ESS" should be treated as
+  unestablished.</p>
+</section>
+
+<footer>
+  <p>Generated by <code>examples/report_session.py</code> from
+  <code>bench_base.json</code> and <code>recall_ablation*.json</code>;
+  the <code>exploration/</code> tables are carried as labelled constants
+  reproducible by re-running those scripts. Clark-Evans and separation are
+  toroidal L1, with the exact fixed-n null rather than the Poisson
+  asymptotic. Ablation figures are 3 seeds, paired by seed.</p>
+</footer>
+</div>
