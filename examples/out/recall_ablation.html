@@ -129,7 +129,7 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
   <p class="eyebrow">torann · ESS · neighbour-selection ablation</p>
   <h1>Does ESS need recall, or only plausible repellers?</h1>
   <p class="sub">An exact index, corrupted on purpose. 3 seeds per arm,
-  paired by seed, 2 shapes. Recall turns out to have a
+  paired by seed, 4 shapes. Recall turns out to have a
   <em>floor</em>, not a price — and the floor is low.</p>
 </header>
 
@@ -139,13 +139,22 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
   <div class="verdict">
     <p class="eyebrow">Verdict</p>
     <p><strong>Half the true neighbours can go almost free; all of them
-    cannot go at all.</strong> Dropping to recall 0.5 while holding locality
-    fixed costs 0.45% Clark-Evans at d=32 and
+    cannot go at all.</strong> From an <em>empty start</em>, dropping to
+    recall 0.5 while holding locality fixed costs
+    0.45% Clark-Evans at d=32 and
     3.78% at d=8. Dropping to recall 0 costs
     17.2% at d=32 and
     44.0% at d=8 — collapsing to the uniform
     null or below it — <em>even when the substituted neighbours are only
     5&ndash;12% further away</em>.</p>
+    <p><strong>The filled start — the case ESS is
+    actually for — is uniformly less sensitive.</strong> With anchors that
+    cannot be pushed, recall 0.5 costs 0.29% at
+    d=32 and 2.51% at d=8; recall 0 costs
+    10.4% and
+    28.3%. Every arm hurts less than it does
+    from an empty start, so the slack above is a lower bound on the slack
+    in production.</p>
     <p>So this lands on the branch where a distance <em>ranking</em> is the
     product. The index must return real nearest neighbours, but it has
     genuine slack in how many of them are true — which is roughly where the
@@ -185,7 +194,7 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
   <p>1.0 is the uniform null at every dimension. Higher is more regular —
   the thing ESS exists to produce.</p></div>
   <div class="legend"><span class="key"><span class="swatch"></span>at or above the uniform null</span><span class="key"><span class="swatch crit"></span>below the uniform null — actively clustered</span><span class="key"><span class="swatch null"></span>uniform null</span></div>
-  <div class="facets"><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; 0+4000 points</span></h3><div class="plot" style="--null:0.7675">
+  <div class="facets"><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; empty start &nbsp;·&nbsp; 0+4000</span></h3><div class="plot" style="--null:0.7675">
 <div class="nullrule" aria-hidden="true"></div>
 <div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.2074</span></div></div>
 <div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:92.17%"></div><span class="val">1.2019</span></div></div>
@@ -193,7 +202,15 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
 <div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:75.38%"></div><span class="val">0.9830 <span class="flag">below the null</span></span></div></div>
 <div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:76.75%"></div><span class="val">1.0008</span></div></div>
 <div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:76.75%"></div><span class="val">1.0008</span></div></div>
-</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; 0+2048 points</span></h3><div class="plot" style="--null:0.6308">
+</div></div><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; filled start &nbsp;·&nbsp; 2000+4000</span></h3><div class="plot" style="--null:0.8287">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.1427</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:92.32%"></div><span class="val">1.1394</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar" style="width:82.94%"></div><span class="val">1.0236</span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:81.64%"></div><span class="val">1.0075 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:82.87%"></div><span class="val">1.0227</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:82.87%"></div><span class="val">1.0227</span></div></div>
+</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; empty start &nbsp;·&nbsp; 0+2048</span></h3><div class="plot" style="--null:0.6308">
 <div class="nullrule" aria-hidden="true"></div>
 <div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.4741</span></div></div>
 <div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:89.09%"></div><span class="val">1.4183</span></div></div>
@@ -201,6 +218,14 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
 <div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:59.30%"></div><span class="val">0.9440 <span class="flag">below the null</span></span></div></div>
 <div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:63.34%"></div><span class="val">1.0083</span></div></div>
 <div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:63.08%"></div><span class="val">1.0042</span></div></div>
+</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; filled start &nbsp;·&nbsp; 1024+2048</span></h3><div class="plot" style="--null:0.7185">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">1.3375</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:90.27%"></div><span class="val">1.3040</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar below" style="width:66.40%"></div><span class="val">0.9591 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:69.91%"></div><span class="val">1.0098 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:72.40%"></div><span class="val">1.0459</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:71.85%"></div><span class="val">1.0379</span></div></div>
 </div></div></div>
 </section>
 
@@ -210,7 +235,7 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
   shows: when the true nearest neighbours are withheld, nothing repels the
   pairs that are actually touching, and they fuse.</p></div>
   <div class="legend"><span class="key"><span class="swatch"></span>at or above the uniform null</span><span class="key"><span class="swatch crit"></span>below the uniform null — actively clustered</span><span class="key"><span class="swatch null"></span>uniform null</span></div>
-  <div class="facets"><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; 0+4000 points</span></h3><div class="plot" style="--null:0.6050">
+  <div class="facets"><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; empty start &nbsp;·&nbsp; 0+4000</span></h3><div class="plot" style="--null:0.6050">
 <div class="nullrule" aria-hidden="true"></div>
 <div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">6.0752</span></div></div>
 <div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:90.54%"></div><span class="val">5.9403</span></div></div>
@@ -218,7 +243,15 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
 <div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:56.00%"></div><span class="val">3.6741 <span class="flag">below the null</span></span></div></div>
 <div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:60.40%"></div><span class="val">3.9632</span></div></div>
 <div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:60.50%"></div><span class="val">3.9695</span></div></div>
-</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; 0+2048 points</span></h3><div class="plot" style="--null:0.3025">
+</div></div><div class="facet"><h3>d = 32 <span>&nbsp;·&nbsp; filled start &nbsp;·&nbsp; 2000+4000</span></h3><div class="plot" style="--null:0.8338">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">4.1058</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">4.1058</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar below" style="width:78.82%"></div><span class="val">3.4952 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:81.25%"></div><span class="val">3.6029 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:83.38%"></div><span class="val">3.6974</span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:83.38%"></div><span class="val">3.6974</span></div></div>
+</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; empty start &nbsp;·&nbsp; 0+2048</span></h3><div class="plot" style="--null:0.3025">
 <div class="nullrule" aria-hidden="true"></div>
 <div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">0.9058</span></div></div>
 <div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:78.74%"></div><span class="val">0.7703</span></div></div>
@@ -226,6 +259,14 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
 <div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:18.74%"></div><span class="val">0.1833 <span class="flag">below the null</span></span></div></div>
 <div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar" style="width:30.47%"></div><span class="val">0.2981</span></div></div>
 <div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:30.25%"></div><span class="val">0.2959</span></div></div>
+</div></div><div class="facet"><h3>d = 8 <span>&nbsp;·&nbsp; filled start &nbsp;·&nbsp; 1024+2048</span></h3><div class="plot" style="--null:0.6739">
+<div class="nullrule" aria-hidden="true"></div>
+<div class="row"><div class="rowname">exact</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">0.3291</span></div></div>
+<div class="row"><div class="rowname">top2k</div><div class="track"><div class="bar" style="width:92.59%"></div><span class="val">0.3291</span></div></div>
+<div class="row"><div class="rowname">rank1-4k</div><div class="track"><div class="bar below" style="width:14.79%"></div><span class="val">0.0526 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">rank8-16k</div><div class="track"><div class="bar below" style="width:57.19%"></div><span class="val">0.2033 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">ratio2x</div><div class="track"><div class="bar below" style="width:66.71%"></div><span class="val">0.2371 <span class="flag">below the null</span></span></div></div>
+<div class="row"><div class="rowname">uniform</div><div class="track"><div class="bar" style="width:67.39%"></div><span class="val">0.2395</span></div></div>
 </div></div></div>
 </section>
 
@@ -260,26 +301,40 @@ a:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);
 
 <section>
   <div class="prose"><h2>The full record</h2></div>
-  <section><h3>d = 32 &nbsp;·&nbsp; 0+4000 points</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+  <section><h3>d = 32 &nbsp;·&nbsp; empty start &nbsp;·&nbsp; 0+4000</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
 <tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>1.00</td><td>1.2074 <span class="sd">±0.0015</span></td><td>—</td><td>6.0752</td><td>151</td></tr>
 <tr><td class="arm">top2k</td><td>0.500</td><td>1.00</td><td>1.2019 <span class="sd">±0.0021</span></td><td>-0.45%</td><td>5.9403</td><td>126</td></tr>
 <tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.05</td><td>0.9993 <span class="sd">±0.0014</span></td><td>-17.24%</td><td>3.6295</td><td>110</td></tr>
 <tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.16</td><td>0.9830 <span class="sd">±0.0039</span></td><td>-18.59%</td><td>3.6741</td><td>117</td></tr>
 <tr><td class="arm">ratio2x</td><td>0.001</td><td>1.45</td><td>1.0008 <span class="sd">±0.0003</span></td><td>-17.11%</td><td>3.9632</td><td>40</td></tr>
 <tr><td class="arm">uniform</td><td>0.001</td><td>1.45</td><td>1.0008 <span class="sd">±0.0003</span></td><td>-17.11%</td><td>3.9695</td><td>40</td></tr>
-</tbody></table></div></section><section><h3>d = 8 &nbsp;·&nbsp; 0+2048 points</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+</tbody></table></div></section><section><h3>d = 32 &nbsp;·&nbsp; filled start &nbsp;·&nbsp; 2000+4000</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+<tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>1.00</td><td>1.1427 <span class="sd">±0.0021</span></td><td>—</td><td>4.1058</td><td>118</td></tr>
+<tr><td class="arm">top2k</td><td>0.500</td><td>1.00</td><td>1.1394 <span class="sd">±0.0024</span></td><td>-0.29%</td><td>4.1058</td><td>112</td></tr>
+<tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.04</td><td>1.0236 <span class="sd">±0.0008</span></td><td>-10.42%</td><td>3.4952</td><td>118</td></tr>
+<tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.14</td><td>1.0075 <span class="sd">±0.0020</span></td><td>-11.83%</td><td>3.6029</td><td>114</td></tr>
+<tr><td class="arm">ratio2x</td><td>0.001</td><td>1.45</td><td>1.0227 <span class="sd">±0.0003</span></td><td>-10.50%</td><td>3.6974</td><td>27</td></tr>
+<tr><td class="arm">uniform</td><td>0.001</td><td>1.45</td><td>1.0227 <span class="sd">±0.0003</span></td><td>-10.50%</td><td>3.6974</td><td>27</td></tr>
+</tbody></table></div></section><section><h3>d = 8 &nbsp;·&nbsp; empty start &nbsp;·&nbsp; 0+2048</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
 <tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>0.99</td><td>1.4741 <span class="sd">±0.0063</span></td><td>—</td><td>0.9058</td><td>166</td></tr>
 <tr><td class="arm">top2k</td><td>0.500</td><td>0.99</td><td>1.4183 <span class="sd">±0.0176</span></td><td>-3.78%</td><td>0.7703</td><td>131</td></tr>
 <tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.12</td><td>0.8253 <span class="sd">±0.0210</span></td><td>-44.01%</td><td>0.0251</td><td>171</td></tr>
 <tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.46</td><td>0.9440 <span class="sd">±0.0049</span></td><td>-35.96%</td><td>0.1833</td><td>151</td></tr>
 <tr><td class="arm">ratio2x</td><td>0.009</td><td>1.71</td><td>1.0083 <span class="sd">±0.0029</span></td><td>-31.60%</td><td>0.2981</td><td>38</td></tr>
 <tr><td class="arm">uniform</td><td>0.002</td><td>2.28</td><td>1.0042 <span class="sd">±0.0019</span></td><td>-31.88%</td><td>0.2959</td><td>27</td></tr>
+</tbody></table></div></section><section><h3>d = 8 &nbsp;·&nbsp; filled start &nbsp;·&nbsp; 1024+2048</h3><div class="tablewrap"><table><thead><tr><th>arm</th><th>recall</th><th>mean ratio</th><th>Clark-Evans</th><th>vs exact</th><th>separation</th><th>epochs</th></tr></thead><tbody>
+<tr class="ctl"><td class="arm">exact</td><td>1.000</td><td>0.98</td><td>1.3375 <span class="sd">±0.0056</span></td><td>—</td><td>0.3291</td><td>110</td></tr>
+<tr><td class="arm">top2k</td><td>0.500</td><td>0.99</td><td>1.3040 <span class="sd">±0.0041</span></td><td>-2.51%</td><td>0.3291</td><td>106</td></tr>
+<tr><td class="arm">rank1-4k</td><td>0.000</td><td>1.12</td><td>0.9591 <span class="sd">±0.0206</span></td><td>-28.29%</td><td>0.0526</td><td>128</td></tr>
+<tr><td class="arm">rank8-16k</td><td>0.000</td><td>1.43</td><td>1.0098 <span class="sd">±0.0052</span></td><td>-24.50%</td><td>0.2033</td><td>125</td></tr>
+<tr><td class="arm">ratio2x</td><td>0.008</td><td>1.72</td><td>1.0459 <span class="sd">±0.0083</span></td><td>-21.81%</td><td>0.2371</td><td>53</td></tr>
+<tr><td class="arm">uniform</td><td>0.002</td><td>2.39</td><td>1.0379 <span class="sd">±0.0054</span></td><td>-22.40%</td><td>0.2395</td><td>51</td></tr>
 </tbody></table></div></section>
 </section>
 
 <footer>
   <p>Generated by <code>examples/report_recall_ablation.py</code> from
-  <code>recall_ablation.json</code>. Reproduce with
+  <code>recall_ablation.json, recall_ablation_anchored.json</code>. Reproduce with
   <code>python examples/bench_recall_ablation.py --seeds 3</code>.
   Clark-Evans and separation are both toroidal L1; the CE null is the exact
   fixed-n expectation, not the Poisson asymptotic.</p>

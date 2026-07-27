@@ -228,10 +228,20 @@ Notes for whoever reads this next:
   near-miss list scores CE 0.8253 against a null of 1.0042 — it holds
   points together while pushing on the wrong pairs. By d=32 every
   zero-recall arm simply lands on the null.
-* The anchored (filled-start) shapes were still running when this was
-  written; the first three seeds at d=32, 2000+4000 gave exact 1.1424 /
-  top2k 1.1413, i.e. the same ~0.3–0.45%, so the conclusion looks stable
-  across start conditions. **Finish that run and confirm.**
+* **The filled start is uniformly *less* sensitive**, and it is the case
+  ESS is actually for. 3 seeds, `recall_ablation_anchored.json`:
+
+  | arm | d=32 empty | d=32 filled | d=8 empty | d=8 filled |
+  |---|---|---|---|---|
+  | top2k (recall 0.5) | −0.45% | **−0.29%** | −3.78% | **−2.51%** |
+  | rank1-4k (recall 0) | −17.2% | **−10.4%** | −44.0% | **−28.3%** |
+
+  So the slack measured from an empty start is a *lower bound* on the slack
+  in production. Anchors also pin `separation` — at both filled shapes the
+  `exact` and `top2k` arms score identically (4.1058 at d=32), because the
+  minimum pairwise distance is set by the static tier, which no arm can
+  move. Read separation as saturated for the good arms in the filled case;
+  it still discriminates the collapsed ones (3.4952 for `rank1-4k`).
 
 ### 6a. The contradiction this exposes — the best speed lead on the list
 

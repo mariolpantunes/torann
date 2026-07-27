@@ -315,8 +315,30 @@ def render(rows, source):
         s = stats[shape]
         return 100 * (s[arm]["sep"] - s["exact"]["sep"]) / s["exact"]["sep"]
 
-    hi, lo = shapes[0], shapes[-1]          # deepest and shallowest shape
-    d_hi, d_lo = hi[0], lo[0]
+    # Never quote an empty-start number beside a filled-start one as though
+    # they were the same experiment: they are different jobs, and the filled
+    # start is the one ESS actually runs.
+    dims = sorted({s[0] for s in shapes}, reverse=True)
+    d_hi, d_lo = dims[0], dims[-1]
+
+    def pick(d, filled):
+        got = [s for s in shapes if s[0] == d and bool(s[1]) == filled]
+        return got[0] if got else None
+
+    hi = pick(d_hi, False) or pick(d_hi, True)
+    lo = pick(d_lo, False) or pick(d_lo, True)
+    hi_f, lo_f = pick(d_hi, True), pick(d_lo, True)
+    has_filled = hi_f is not None and lo_f is not None
+
+    filled_note = ("" if not has_filled else
+                   f"""<p><strong>The filled start — the case ESS is
+    actually for — is uniformly less sensitive.</strong> With anchors that
+    cannot be pushed, recall 0.5 costs {abs(pct(hi_f, 'top2k')):.2f}% at
+    d={d_hi} and {abs(pct(lo_f, 'top2k')):.2f}% at d={d_lo}; recall 0 costs
+    {abs(pct(hi_f, 'rank1-4k')):.1f}% and
+    {abs(pct(lo_f, 'rank1-4k')):.1f}%. Every arm hurts less than it does
+    from an empty start, so the slack above is a lower bound on the slack
+    in production.</p>""")
 
     return f"""<title>Does ESS need recall, or only plausible repellers?</title>
 <style>{CSS}</style>
@@ -335,14 +357,16 @@ def render(rows, source):
   <div class="verdict">
     <p class="eyebrow">Verdict</p>
     <p><strong>Half the true neighbours can go almost free; all of them
-    cannot go at all.</strong> Dropping to recall 0.5 while holding locality
-    fixed costs {abs(pct(hi, 'top2k')):.2f}% Clark-Evans at d={d_hi} and
+    cannot go at all.</strong> From an <em>empty start</em>, dropping to
+    recall 0.5 while holding locality fixed costs
+    {abs(pct(hi, 'top2k')):.2f}% Clark-Evans at d={d_hi} and
     {abs(pct(lo, 'top2k')):.2f}% at d={d_lo}. Dropping to recall 0 costs
     {abs(pct(hi, 'rank1-4k')):.1f}% at d={d_hi} and
     {abs(pct(lo, 'rank1-4k')):.1f}% at d={d_lo} — collapsing to the uniform
     null or below it — <em>even when the substituted neighbours are only
     {100 * (stats[hi]['rank1-4k']['ratio'] - 1):.0f}&ndash;{
     100 * (stats[lo]['rank1-4k']['ratio'] - 1):.0f}% further away</em>.</p>
+    {filled_note}
     <p>So this lands on the branch where a distance <em>ranking</em> is the
     product. The index must return real nearest neighbours, but it has
     genuine slack in how many of them are true — which is roughly where the
