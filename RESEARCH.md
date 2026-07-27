@@ -419,10 +419,15 @@ If the gate opens, two genuinely different products — do not conflate them:
   If it appears in the paper it has to be a controlled run on the real loop
   — `k=5`, self-join, index mutated in place, ESS-converged data — not the
   uniform-random scripts in `examples/`.
-* **Which torus?** OBLESA optimizes over box-bounded real domains; torann's
-  toroidal wrap is what removes ESS's boundary walls, but a *toroidal*
-  prior is wrong for a bounded objective — the optimum near a box edge is
-  not adjacent to the opposite edge. Whether the wrap helps or hurts
-  optimizer performance is an empirical question that P1's design must
-  isolate (it is a plausible confound for every ESS arm), and it has never
-  been asked in either repo.
+* **Why the torus exists** — recorded because it was nearly mis-framed here
+  as a modelling assumption. It is not. OBLESA optimizes over a bounded box
+  and delivers into one; the torus lives *inside* the relaxation. ESS moves
+  particles by physical repulsion, and with hard walls the wall behaves as
+  an enormous particle: it perturbs far too many particles at once, and the
+  resulting wall-particle bouncing never settles, which is what broke the
+  early-stop mechanism. The toroidal domain removes the wall rather than
+  softening it — particles navigate off one edge and back on the other, so
+  they neither clamp to the boundary nor collapse toward the centre. So the
+  wrap is the fix for a diagnosed failure, and the open question is only the
+  empirical one P1 answers anyway: whether points relaxed under a toroidal
+  metric are good starting points for a box-bounded objective.
