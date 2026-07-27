@@ -1,9 +1,12 @@
-"""Pure NumPy reference implementation of the LSH index contract.
+"""Pure NumPy reference implementation of the toroidal L1 LSH index.
 
-This implementation defines the normative behaviour (see CONTRACT.md): the
-native implementation must produce byte-identical hash tables and
-equivalent query results for the same parameters. Keep it readable — it is
-the specification the Rust port is validated against.
+This implementation *is* the specification: the native implementation must
+produce byte-identical hash tables and equivalent query results for the
+same parameters, and the conformance suite checks exactly that. Keep it
+readable — there is no separate normative document.
+
+The guarantee is specific to the L1 hash below. A backend built on a
+different hash family answers to its own specification, not to this one.
 """
 
 from __future__ import annotations

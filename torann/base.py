@@ -5,9 +5,9 @@ LSH reference (`lsh.py`), the Rust acceleration (`rust.py`) — answers the
 same calls, so the public wrapper (`wrapper.py`) can select one at fit time
 and the conformance suite can run unchanged against each.
 
-The *normative* behaviour of the LSH implementations (hash formula, tie
-rules, byte-identical tables) is specified in ``CONTRACT.md``; ``lsh.py``
-is its executable reference. The Rust class is a native ``pyclass`` and is
+The *normative* behaviour of the L1 LSH implementations (hash formula, tie
+rules, byte-identical tables) is defined by ``lsh.py``, its executable
+reference. The Rust class is a native ``pyclass`` and is
 registered as a virtual subclass rather than inheriting.
 
 Array conventions (validated by the wrapper before any call): points are

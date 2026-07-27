@@ -1,8 +1,8 @@
 //! torann's native core: the toroidal L1 LSH index in Rust.
 //!
-//! Implements `torann/CONTRACT.md` exactly: given the same parameters
-//! the tables are byte-identical to the pure-NumPy reference. The tie rules
-//! that guarantee it:
+//! Implements `torann/lsh.py` exactly: given the same parameters the
+//! tables are byte-identical to that pure-NumPy reference, which is the
+//! specification. The tie rules that guarantee it:
 //!
 //! - tier builds sort by (key, id)            [stable argsort of asc. ids]
 //! - selective update merges new-before-kept  [np.searchsorted side=left]
@@ -51,7 +51,7 @@ fn lower_bound(a: &[i64], v: i64) -> usize {
 /// fractional part is always representable). Unlike fmod this is two
 /// branchless instructions (floor lowers to vroundsd), inlineable and
 /// vectorizable. Negativity is the one precondition, and the facade's
-/// mod-1 reduction (CONTRACT.md) guarantees it with room to spare.
+/// mod-1 reduction guarantees it with room to spare.
 #[inline(always)]
 fn wrap_unit(s: f64) -> f64 {
     debug_assert!(s >= 0.0, "point + offset must be non-negative");
@@ -972,7 +972,7 @@ impl RustLshIndex {
         pairs
     }
 
-    /// Prefix relaxation for one under-filled query (see CONTRACT.md).
+    /// Prefix relaxation for one under-filled query (see `lsh.py`).
     fn relax_query(&self, ws: &mut Ws, top: &mut TopK, x: &[f64], k: usize, ex: i64) {
         let mut base = vec![0i64; self.l];
         for t in 0..self.l {

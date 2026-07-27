@@ -39,7 +39,8 @@ the search itself lives in interchangeable implementations of
 ``base.BaseIndex``: exact brute force (``brute.py``) below the measured
 crossover threshold, and above it an LSH implementation — Rust
 (``torann._native``) when the compiled module is present, the pure-Python
-reference (``lsh.py``) otherwise. See ``CONTRACT.md`` and ANALYSIS.md.
+reference (``lsh.py``) otherwise — ``lsh.py`` is the specification the
+native core is validated against. See ANALYSIS.md for measurements.
 """
 
 from __future__ import annotations

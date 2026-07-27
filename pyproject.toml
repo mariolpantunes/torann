@@ -48,7 +48,6 @@ Issues = "https://github.com/mariolpantunes/torann/issues"
 module-name = "torann._native"
 features = ["pyo3/extension-module"]
 include = [
-    { path = "torann/CONTRACT.md", format = ["sdist", "wheel"] },
     { path = "LICENSE", format = "sdist" },
 ]
 

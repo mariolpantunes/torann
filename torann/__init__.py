@@ -24,8 +24,9 @@ Modules:
     * `torann.lsh` — the pure-NumPy LSH reference implementation.
     * `torann.rust` — the compiled core (``torann._native``, PyO3 + rayon).
 
-The hash, table layout and cross-implementation guarantees are specified
-in ``CONTRACT.md``; measurements live in ``ANALYSIS.md``.
+The hash, table layout and cross-implementation guarantees are defined by
+``torann.lsh``, the reference implementation; measurements live in
+``ANALYSIS.md``.
 """
 
 from .wrapper import ToroidalNN, available_backends

@@ -41,7 +41,7 @@ def recall(approx_idx, exact_idx):
 
 def ref_keys(nn, ids):
     """Hash keys recomputed from the facade's parameters — the normative
-    formula from CONTRACT.md, independent of any backend's tables."""
+    L1 formula, independent of any backend's tables."""
     X = nn._arena[ids]
     keys = np.empty((nn._L, len(ids)), dtype=np.int64)
     for t in range(nn._L):
@@ -207,7 +207,7 @@ class TestLSHMode(unittest.TestCase):
         self.assertEqual((nn._B, nn._L, nn._K), (2, 5, 7))
 
     def test_tables_match_normative_hash(self):
-        """The backend's tables must be exactly the CONTRACT.md hash of the
+        """The backend's tables must be exactly the normative L1 hash of the
         current positions, key-sorted with ids aligned."""
         nn = self.make().fit(self.static, self.cands)
         tab = nn._impl.tables()

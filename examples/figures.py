@@ -46,7 +46,7 @@ RC = {
 
 
 def cell_keys(X, B, u):
-    """The 2D hash of CONTRACT.md: one table, K = 2, S = (0, 1)."""
+    """The 2D L1 hash: one table, K = 2, S = (0, 1)."""
     codes = np.minimum((np.mod(X + u, 1.0) * B).astype(np.int64), B - 1)
     return codes[:, 0] + B * codes[:, 1]
 

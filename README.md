@@ -30,8 +30,8 @@ anchors, a moving candidate tier, selective updates, batch promotion.
   structurally guaranteed.
 * **Self-tuning**: `fit(..., k=...)` or `radius=...` derives the hash
   parameters (B, K, L) from the workload; explicit arguments always win.
-* **Three interchangeable implementations** of one contract
-  (`torann/CONTRACT.md`): exact NumPy brute force, a pure-Python LSH
+* **Three interchangeable implementations** of one interface
+  (`torann/base.py`): exact NumPy brute force, a pure-Python LSH
   reference, and a Rust core (PyO3 + rayon) that produces byte-identical
   hash tables at 60–120× the speed. Without the compiled module the
   package still runs, on the reference implementation.
@@ -142,8 +142,9 @@ direct-address offset table serves the static tier), keys are digit
 concatenations so *prefix relaxation* — dropping low-order digits —
 widens a bucket into a wider contiguous range without any distance scan,
 and every gathered candidate is refined with the exact toroidal L1 before
-the top-k. Full details: `torann/CONTRACT.md` (normative),
-`ANALYSIS.md` (measured), `PLAN.md` (the gate decisions).
+the top-k. Full details: `torann/lsh.py` (the reference implementation,
+normative for the L1 hash), `ANALYSIS.md` (measured), `PLAN.md` (the gate
+decisions).
 
 ## Benchmarks
 
