@@ -12,6 +12,12 @@ exploration/out/
 # Benchmark and exploration results: regenerate them, never review them.
 *.json
 
+# Working notes: session handoffs, plans, measurement logs. They record
+# intermediate results and are rewritten constantly, so they are kept on
+# disk rather than in history. README.md is documentation and stays.
+*.md
+!README.md
+
 # Agent scratch
 .claude/
 .goose/

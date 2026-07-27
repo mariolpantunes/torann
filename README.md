@@ -142,14 +142,14 @@ direct-address offset table serves the static tier), keys are digit
 concatenations so *prefix relaxation* — dropping low-order digits —
 widens a bucket into a wider contiguous range without any distance scan,
 and every gathered candidate is refined with the exact toroidal L1 before
-the top-k. Full details: `torann/lsh.py` (the reference implementation,
-normative for the L1 hash), `ANALYSIS.md` (measured), `PLAN.md` (the gate
-decisions).
+the top-k. Full details: `torann/lsh.py` — the reference implementation,
+normative for the L1 hash.
 
 ## Benchmarks
 
-Measured on an AMD Ryzen AI 7 PRO 350 (16 threads), d=16, k=32
-(`ANALYSIS.md` v3 has the full grids, crossover and complexity tables):
+Measured on an AMD Ryzen AI 7 PRO 350 (16 threads), d=16, k=32.
+Regenerate the full grids, crossover and complexity tables with
+`python examples/benchmark.py`:
 
 ![queries vs n](assets/bench_query.png)
 
