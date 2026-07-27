@@ -3,8 +3,19 @@
 Read `NEXT.md` first — §3 (measured geometry), §4 (measured and rejected)
 and §7 (the force-law collapse) are the standing facts this programme is
 built on and must not be re-derived. This document is the plan that follows
-from them. The primary output is a **paper**; the index is the artefact that
-supports it.
+from them.
+
+**The output is a paper, targeting GECCO 2027, and its subject is OBLESA.**
+That fixes the shape of everything below. The stack is
+`pyBlindOpt/OBLESA -> ess -> torann`: OBLESA combines opposition-based
+learning with ESS expansion to jump-start a population-based optimizer, ESS
+does the empty-space filling, and torann is the toroidal index that makes
+ESS tractable. For an evolutionary-computation audience the claim has to be
+about **optimizer performance**, so ESS and torann are machinery — necessary,
+and interesting in their own right, but a section rather than the spine.
+§1's `L^p` family is machinery for the machinery. Phase order in §2 reflects
+that: the end-to-end OBLESA evaluation is on the critical path and every
+index result is subordinate to it.
 
 Method rules are unchanged and non-negotiable: benchmarks must be
 representative of the ESS workload, optimization decisions come from
@@ -139,37 +150,119 @@ construction was *necessary* rather than merely elegant.
 
 Ordered by what unblocks what, not by appeal.
 
-### P0 — Literature, before any Rust
+### P0 — Literature
 
-The paper is the primary output, so prior art is a blocking dependency, and
-**this session did not complete it.** Semantic Scholar rate-limited
-throughout; arXiv does not index the relevant corpus (Datar SoCG'04, Gan
-SIGMOD'12, Aggarwal ICDT'01 are all DB/theory conference papers). What was
-established:
+Partly done. Two corpora matter and they are very different.
+
+**The EC corpus — and the gap OBLESA sits in.** This is the one that decides
+the paper, and it is more favourable than expected. Kazimipour, Li & Qin,
+*A Review of Population Initialization Techniques for Evolutionary
+Algorithms* (CEC 2014, 358 citations) closes with open questions that name
+this work almost exactly:
+
+* "Nearly all previous studies have been done on low dimensional single
+  objective problems (less than 60 dimensions)."
+* **"There has been little agreement on validation of those findings in
+  high dimensional spaces. For example, [one] claimed that the desirable
+  effect of uniformity of initial population is more significant in high
+  dimensions (up to 50 dimensions) while [another], in contrast, claimed
+  that uniform initialization techniques (e.g., QRS) lose their
+  effectiveness in problems of 12 or more dimensions."**
+* "Most comparison studies on population initialization are limited to a
+  few (mostly less than four) techniques."
+
+The disagreement is live: Tharwat & Schenck report *no* significant
+difference among five initialization methods; Agushaka et al. find an
+algorithm-dependent effect over 11 methods × 10 metaheuristics; other work
+reports Sobol/Halton as *particularly* effective in high dimension.
+
+**That contradiction is the paper's opening, and this stack already holds a
+mechanism for it.** The EC literature disputes whether space-filling
+initialization keeps helping above `d ~ 12`. `NEXT.md` independently
+measured, from the geometry side, that the *metrics which define* space
+filling stop discriminating in the same place: grid coverage saturates and
+inverts at d=8 (§4.8), fill distance goes flat at d=32 (§4.9), and §7 shows
+distance concentration collapses the contrast that "uniform coverage" is
+defined by. The reason the field disagrees about uniformity above ~12
+dimensions may simply be that it is measuring uniformity with instruments
+that stop working there. A paper that (a) demonstrates the instrument
+failure, (b) supplies `L^p` and a metric panel that survive it, and (c)
+shows the effect on real optimizer performance, is a coherent GECCO
+contribution — and notably one where the *negative* results are still
+publishable.
+
+Direct baselines to beat, not merely cite: Rahnamayan, Tizhoosh & Salama,
+*A novel population initialization method for accelerating evolutionary
+algorithms* (OBL initialization — the "OBL" half of OBLESA), and
+Kazimipour, Li & Qin, *Effects of Population Initialization on Differential
+Evolution for Large Scale Optimization* (CEC 2014), which supplies the
+methodological template and one finding to design around: **initialization
+matters more at smaller population sizes.**
+
+**The ANN corpus.** Incomplete — Semantic Scholar rate-limited throughout
+and arXiv does not index it (Datar SoCG'04, Gan SIGMOD'12, Aggarwal ICDT'01
+are DB/theory conference papers). Established:
 
 * **Datar et al. (SoCG'04)** — canonical `p`-stable LSH, explicitly covers
-  `p < 1`. The reference the §1.1 argument must engage with.
-* **C2LSH, Gan et al. (SIGMOD'12, 330+ citations)** — uses *collision
-  counting* over hash functions, with dynamic compound hash functions and
-  virtual rehashing. **This overlaps P2 below and must be read before P2
-  is claimed as novel** (see the honest scoping note there).
+  `p < 1`. The reference §1.1's argument must engage with.
+* **C2LSH, Gan et al. (SIGMOD'12, 330+ citations)** — *collision counting*
+  with dynamic compound hash functions and virtual rehashing. Overlaps P3
+  below; read before claiming novelty there.
 
-Still to check, and each one can invalidate a claim:
+Still to check, each able to invalidate a claim: whether §1.2's
+rate-mixture construction is known (the completely-monotone step and grid
+LSH are both textbook; the *toroidal* combination may not be); Chierichetti
+& Kumar on which similarity functions are LSHable, which bounds what
+non-distance scores can achieve; Aggarwal, Hinneburg & Keim (ICDT'01) on
+fractional norms, the standing citation for §7.2; and any prior ANN work
+under periodic boundary conditions.
 
-* Whether the rate-mixture / Poisson-breakpoint construction of §1.2 is
-  known. The completely-monotone-to-Laplace-mixture step is textbook and
-  grid LSH is textbook; the *toroidal* combination is what may be new.
-* Chierichetti & Kumar on which similarity functions are LSHable —
-  directly bounds what item 3 (non-distance scores) can hope for.
-* Aggarwal, Hinneburg & Keim (ICDT'01) on fractional norms in high
-  dimension — the standing citation for §7.2's contrast argument.
-* Prior work on ANN under periodic boundary conditions at all.
+### P1 — OBLESA end to end: the experiment the paper is made of
 
-Retry Semantic Scholar (429 is transient) or use institutional access.
+**Missing from every plan so far, and it is the spine.** Everything measured
+to date — CE, toroidal separation, recall, ms/epoch — is an *intrinsic*
+metric of the sampler or the index. Not one measurement in either repo shows
+that an ESS-initialized optimizer finds better optima. For GECCO that is the
+only claim that counts, and it is the one that can still fail.
 
-### P1 — Baseline and gate, run concurrently
+Design, following the Kazimipour CEC'14 template so the result is
+comparable to the literature it argues with:
 
-**P1a (torann): does the index scale the way we think?** Nothing in
+* **Optimizers**: several from `pyBlindOpt` (DE, PSO, GWO at minimum) —
+  the survey's own criticism is that comparisons use too few, and the
+  reported effect is algorithm-dependent, so a single optimizer proves
+  nothing.
+* **Initializers**: random, LHS, Sobol, OBL (Rahnamayan), ESS alone, and
+  OBLESA. Six arms, against a literature where "most comparison studies
+  are limited to fewer than four".
+* **Problems**: a standard suite (CEC'13 LSGO and/or CEC'17), swept over
+  dimension **through the `d ~ 8-12` region where both literatures
+  disagree** — that sweep is the paper's central figure.
+* **Population size** as an explicit factor: CEC'14 found initialization
+  matters more when the population is small, and OBLESA's cost is paid per
+  initial individual.
+* **Budget**: fixed function evaluations, *and* separately fixed wall time —
+  ESS is not free, and a GECCO reviewer will ask what the initialization
+  cost bought. This is where torann's speed work becomes a result rather
+  than an appendix.
+* **Statistics**: >= 30 runs, Wilcoxon signed-rank pairwise plus
+  Friedman/Nemenyi across arms. Non-negotiable given that the field's
+  existing answers contradict each other.
+
+> **This gate outranks all the others.** If OBLESA does not beat OBL and
+> Sobol on optimizer performance, then no amount of `L^p` index work
+> rescues the paper, and the honest paper becomes "why space-filling
+> initialization stops paying above `d ~ 8`, measured three ways" — which
+> §4.8, §4.9 and §7 already largely support, and which the literature
+> explicitly asks for.
+
+Run this early and run it dirty first: current defaults, current L1 index,
+one optimizer, to find out whether the effect exists at all before
+investing in the full design.
+
+### P2 — Index baseline and the metric gate, run concurrently
+
+**P2a (torann): does the index scale the way we think?** Nothing in
 `OPTIMIZE.md` measures scaling in `n` — every benchmark is at fixed sizes,
 so both standing complexity claims are unverified. `bench_scaling.py`:
 `n` in {1k … 1M} × `d` in {4, 8, 32} × {brute, LSH}; report single-query
@@ -184,7 +277,7 @@ invariants), cross-backend equality at sizes the current suite never
 reaches, and `bench_refine_rounds.py` — written, never run, and the only
 benchmark that measures ESS's *actual* repeated-call mode.
 
-**P1b (ess): the force-law gate.** §7.2's chain has an untested link:
+**P2b (ess): the force-law gate.** §7.2's chain has an untested link:
 contrast is a property of the metric, not the index. A perfect `L^p` index
 only pays if the force law consumes `L^p` distances. Brute path only, no
 index changes, d in {8, 16, 32}, 3 seeds, paired, both starts: swap the
@@ -195,11 +288,11 @@ shows required sharpness relaxes with `p`, so without the second factor
 `sigma` fix is far cheaper.
 
 > **Decision rule.** If `L^0.5` at tuned `sigma` does not beat L1 at tuned
-> `sigma` by more than the between-seed sd (0.0037 CE at d=32), P3 is
+> `sigma` by more than the between-seed sd (0.0037 CE at d=32), P4 is
 > descoped from "make ESS better" to "make a better index", and the paper's
 > claim narrows accordingly.
 
-**P1c: the `0.10` collision target.** `_tune` sets
+**P2c: the `0.10` collision target.** `_tune` sets
 `L = ceil(log(0.10)/log(1-p1))` — a hardcoded 90% collision target for a
 true k-NN, never derived from what ESS needs, while §6 measured that imposed
 recall 0.5 costs 0.45% CE. Dropping to 50% gives `L≈7` where the model gives
@@ -207,7 +300,7 @@ recall 0.5 costs 0.45% CE. Dropping to 50% gives `L≈7` where the model gives
 Independent of everything else and the largest unclaimed speed item on the
 list. The measurement that decides it is in `NEXT.md` §6a.
 
-### P2 — Scores that are not distances
+### P3 — Scores that are not distances
 
 The `p -> 0` limit of `sum_j delta_j^p` is the *count of coordinates that
 differ at all* — and the hash already computes it, as digit agreements
@@ -241,9 +334,9 @@ hubness-corrected metrics on measurement (no runaway hubs anywhere, `p=1`
 or `p=0.5`, d=8 or d=32). Their contrast rationale is formally separate but
 strictly dominated by P3 on principle and by collision counting on cost.
 
-### P3 — Build the family
+### P4 — Build the family
 
-Gated by P1b. Now a build rather than a research question.
+Gated by P2b, and subordinate to P1. Now a build, not a research question.
 
 * Per-`(table, dim)` breakpoint arrays; `code = searchsorted(bp, frac(x+u))`;
   mixed-radix keys `sum_j code_j * prod_{i<j} B_i`.
@@ -258,7 +351,7 @@ Gated by P1b. Now a build rather than a research question.
   `prod_j B_j <= 2^62`.
 * `p=1.0` ships as the regression anchor. Note it reproduces today's
   *collision law* only in the small-`delta` limit, not bit-for-bit — a
-  Poisson grid is not a uniform grid. Bit-identity is a P1a baseline
+  Poisson grid is not a uniform grid. Bit-identity is a P2a baseline
   concern, not a P3 constraint.
 * **Validation criterion, fixed in advance:** recall against true `L^p` k-NN
   must beat **93.2%**, §7.3's structural rerank ceiling. Below that the
@@ -266,7 +359,7 @@ Gated by P1b. Now a build rather than a research question.
 * Numerics: `(sum u^p)^(1/p)` reaches 1.4e5 at d=32, p=0.25 — range-check
   the force normalisation and the log-sum-exp path.
 
-### P4 — Autoencoders / matrix factorization
+### P5 — Autoencoders / matrix factorization
 
 Last, highest variance, and decidable by one measurement.
 
@@ -310,17 +403,26 @@ If the gate opens, two genuinely different products — do not conflate them:
   tables, the `max(0, 1-B*delta)` law, the digit structure prefix
   relaxation relies on. A backend on a different family answers to its own
   specification. `lsh.py` remains the executable reference for the L1
-  backend; P3's family will document its own.
+  backend; P4's family will document its own.
 * **Both repos merged to `main`** (torann `7538844`, ess `f9c22da`) before
   this branch, so the metric work does not stack on an unmerged
   optimization branch.
+* **Venue GECCO 2027**, no hard deadline. That is roughly a year, which is
+  enough for P1 to fail and be re-aimed once — so P1 runs first and dirty.
 
 ## 4. Still open
 
-* P0 is incomplete — see the list there. **No novelty claim until it is.**
+* P0's ANN half is incomplete. **No novelty claim until it is.**
 * Whether the `p=1` Poisson member should replace the uniform grid in the
-  shipped L1 path, or coexist. Decided by P3's speed measurement, not now.
+  shipped L1 path, or coexist. Decided by P4's speed measurement, not now.
 * The FAISS comparison remains unestablished on the ESS workload (§7.5).
   If it appears in the paper it has to be a controlled run on the real loop
   — `k=5`, self-join, index mutated in place, ESS-converged data — not the
   uniform-random scripts in `examples/`.
+* **Which torus?** OBLESA optimizes over box-bounded real domains; torann's
+  toroidal wrap is what removes ESS's boundary walls, but a *toroidal*
+  prior is wrong for a bounded objective — the optimum near a box edge is
+  not adjacent to the opposite edge. Whether the wrap helps or hurts
+  optimizer performance is an empirical question that P1's design must
+  isolate (it is a plausible confound for every ESS arm), and it has never
+  been asked in either repo.
