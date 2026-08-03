@@ -13,6 +13,8 @@ import unittest
 import numpy as np
 
 from torann import ToroidalNN, available_backends
+from torann.brute import (BruteIndex, exact_knn, exact_radius, pairwise_l1,
+                          pairwise_lp)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -410,6 +412,121 @@ class TestRangeQueries(unittest.TestCase):
         res = nn.query_radius(self.radius)
         for (ids, _), ref in zip(res, self._exact_sets()):
             np.testing.assert_array_equal(np.sort(ids), ref)
+
+
+class TestExactLp(unittest.TestCase):
+    """The exact ``L^p`` path (`torann.brute`), the only place ``p != 1``
+    is served — everything approximate assumes a metric, and ``p < 1`` is
+    not one.
+
+    The reference here is deliberately the naive
+    ``(sum min(delta, 1-delta)**p)`` block, written out per test rather than
+    shared with the implementation, so a change to the blocked accumulation
+    cannot make the reference agree with it by construction.
+    """
+
+    PS = (0.25, 0.5, 0.75, 1.0, 2.0)
+
+    def naive(self, Q, P, p):
+        diff = np.abs(Q[:, None, :] - P[None, :, :])
+        delta = np.minimum(diff, 1.0 - diff)
+        return (delta ** p).sum(-1) ** (1.0 / p)
+
+    def sample(self, m, n, d, seed=3):
+        rng = np.random.default_rng(seed)
+        return (np.ascontiguousarray(rng.random((m, d))),
+                np.ascontiguousarray(rng.random((n, d))))
+
+    def test_p_one_is_the_unrooted_sum(self):
+        """The sum *is* the distance at p=1, and no root is taken."""
+        Q, P = self.sample(20, 60, 5)
+        np.testing.assert_array_equal(pairwise_lp(Q, P, 1.0),
+                                      pairwise_l1(Q, P))
+
+    def test_pairwise_matches_naive_across_p_and_all_three_paths(self):
+        for d in (2, 5, 7, 8, 16, 129):        # <8, lane tree, block form
+            Q, P = self.sample(15, 40, d)
+            for p in self.PS:
+                got = pairwise_lp(Q, P, p) ** (1.0 / p)
+                np.testing.assert_allclose(
+                    got, self.naive(Q, P, p), rtol=1e-12, atol=1e-12,
+                    err_msg=f"d={d} p={p}")
+
+    def test_knn_matches_naive_ranking_and_distances(self):
+        for p in self.PS:
+            Q, P = self.sample(25, 120, 9)
+            _, dst = exact_knn(P, Q, 7, p=p)
+            ref = self.naive(Q, P, p)
+            order = np.argsort(ref, axis=1, kind="stable")[:, :7]
+            np.testing.assert_allclose(dst, np.take_along_axis(ref, order, 1),
+                                       rtol=1e-11, err_msg=f"p={p}")
+
+    def test_knn_selection_is_rank_equivalent_to_the_root(self):
+        """Selecting on the un-rooted sum must pick the same set as
+        selecting on the distance — the reason the root is deferred."""
+        Q, P = self.sample(30, 200, 12)
+        for p in (0.25, 0.5, 0.75):
+            idx, _ = exact_knn(P, Q, 5, p=p)
+            rooted = np.argsort(self.naive(Q, P, p), axis=1,
+                                kind="stable")[:, :5]
+            self.assertEqual(sorted(map(tuple, np.sort(idx, axis=1))),
+                             sorted(map(tuple, np.sort(rooted, axis=1))))
+
+    def test_radius_threshold_is_in_lp_units(self):
+        Q, P = self.sample(20, 150, 6)
+        for p in self.PS:
+            ref = self.naive(Q, P, p)
+            r = float(np.median(ref))
+            indptr, ids, dst = exact_radius(P, Q, r, p=p)
+            for i in range(Q.shape[0]):
+                got = np.sort(ids[indptr[i]:indptr[i + 1]])
+                np.testing.assert_array_equal(
+                    got, np.flatnonzero(ref[i] <= r),
+                    err_msg=f"p={p} row={i}")
+            self.assertTrue((dst <= r + 1e-9).all())
+
+    def test_exclusion_and_padding_survive_the_root(self):
+        Q, P = self.sample(10, 4, 5)
+        ex = np.arange(10, dtype=np.int64) % 4
+        idx, dst = exact_knn(P, Q, 8, exclude_ids=ex, p=0.5)
+        self.assertTrue((idx[:, 3:] == -1).all())        # 4 points, 1 excluded
+        self.assertTrue(np.isinf(dst[:, 3:]).all())
+        self.assertFalse((idx[:, :3] == ex[:, None]).any())
+
+    def test_coincident_points_are_zero_not_nan(self):
+        """p < 1 raises deltas to a negative-adjacent power nowhere, but a
+        duplicated point still has to come back at distance zero."""
+        rng = np.random.default_rng(11)
+        P = rng.random((30, 6))
+        P[7] = P[3]
+        idx, dst = exact_knn(P, P[3:4], 2, p=0.25)
+        self.assertTrue(np.isfinite(dst).all())
+        self.assertEqual(dst[0, 0], 0.0)
+        self.assertCountEqual(idx[0].tolist(), [3, 7])
+
+    def test_wrap_is_metric_independent(self):
+        """A pair straddling the seam is as near as the same gap inside."""
+        for p in self.PS:
+            a = np.array([[0.02] * 4])
+            b = np.array([[0.97] * 4, [0.07] * 4])
+            d = pairwise_lp(a, b, p) ** (1.0 / p)
+            self.assertAlmostEqual(d[0, 0], d[0, 1], places=12)
+
+    def test_brute_index_carries_p(self):
+        Q, P = self.sample(12, 80, 7)
+        ix = BruteIndex(p=0.5)
+        ix.build(P, 40)
+        idx, dst = ix.query_knn(Q, 4)
+        ref = np.sort(self.naive(Q, P, 0.5), axis=1)[:, :4]
+        np.testing.assert_allclose(dst, ref, rtol=1e-11)
+
+    def test_non_positive_p_rejected(self):
+        Q, P = self.sample(4, 8, 3)
+        for bad in (0.0, -1.0):
+            with self.assertRaises(ValueError):
+                pairwise_lp(Q, P, bad)
+            with self.assertRaises(ValueError):
+                BruteIndex(p=bad)
 
 
 class TestValidation(unittest.TestCase):
