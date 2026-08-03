@@ -58,6 +58,16 @@ pip install .
 
 **Requirements:** Python ≥ 3.10, numpy.
 
+**CPU:** published x86-64 wheels are built with an AVX2 + FMA floor — Intel
+Haswell (2013) and AMD Excavator (2015) onward. That is not gratuitous: the
+distance kernel is built on `wide::f32x8`, which without AVX has no 256-bit
+register to lower to and falls back to two `f32x4`, costing 25% (406 ms →
+542 ms on the reference shape). AVX-512 buys nothing beyond AVX2 and is not
+used. On a CPU without AVX2 the compiled backend is not loaded and the
+pure-Python implementation is used instead, with a warning; installing from
+the sdist builds a native module for whatever the machine has. arm64 needs
+no floor — NEON is baseline there.
+
 ## Quick Start
 
 ```python

@@ -7,10 +7,24 @@ on:
 permissions:
   contents: read
 
-# The wheels are built with maturin (mixed Rust/Python package). The
-# committed .cargo/config.toml pins `target-cpu=native` for local builds;
-# distributed wheels must stay portable, so every build job removes it
-# first (source installs from the sdist keep the native tuning).
+# The wheels are built with maturin (mixed Rust/Python package).
+#
+# x86-64 wheels are built with an **AVX2 + FMA floor**, which the committed
+# .cargo/config.toml already applies, so these jobs leave it alone. That
+# floor is worth 25% and is not optional in practice: without AVX there is
+# no 256-bit register for `wide::f32x8` to lower to, it falls back to two
+# `f32x4`, and the query kernel goes 406 ms -> 542 ms on the reference shape
+# (OPTIMIZE.md §6). AVX-512 buys nothing further, so there is no third
+# variant to build.
+#
+# These jobs previously did `rm -f .cargo/config.toml` to strip a
+# `target-cpu=native` setting. That removed the crash risk *and* the 25%:
+# every wheel published that way ran the SSE fallback. Portability is now
+# handled where it belongs, at import — `torann/rust.py` checks for AVX2 and
+# falls back to the pure-Python backend rather than taking SIGILL.
+#
+# aarch64 needs no flags: NEON is baseline on arm64 and the config section is
+# gated on x86, so it does not apply there.
 
 jobs:
   wheels-linux:
@@ -20,8 +34,6 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
-      - name: Portable build flags
-        run: rm -f .cargo/config.toml
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -40,8 +52,6 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
-      - name: Portable build flags
-        run: rm -f .cargo/config.toml
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -56,8 +66,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Portable build flags
-        run: Remove-Item -Force .cargo/config.toml
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:

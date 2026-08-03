@@ -7,11 +7,14 @@ are the conformance suite a native backend must pass. Cross-backend
 equivalence (byte-identical tables, matching results) is tested at the end.
 """
 
+import io
 import logging
 import unittest
+import unittest.mock
 
 import numpy as np
 
+import torann.rust as rust
 from torann import ToroidalNN, available_backends
 
 logging.basicConfig(level=logging.INFO)
@@ -410,6 +413,62 @@ class TestRangeQueries(unittest.TestCase):
         res = nn.query_radius(self.radius)
         for (ids, _), ref in zip(res, self._exact_sets()):
             np.testing.assert_array_equal(np.sort(ids), ref)
+
+
+class TestCpuFloor(unittest.TestCase):
+    """The AVX2 gate in front of the compiled backend.
+
+    Published x86-64 wheels are built with ``+avx2,+fma`` because the floor
+    is worth 25% (OPTIMIZE.md §6). The gate is what makes that safe on a CPU
+    without it: the module falls back to the pure-Python backend instead of
+    taking SIGILL, which Python cannot catch and which would surface as a
+    bare crash with no traceback.
+    """
+
+    @staticmethod
+    def _platform(machine, **system):
+        """Patch what the detector sees: machine, and how `system` behaves."""
+        return (unittest.mock.patch.object(rust.platform, "machine",
+                                           return_value=machine),
+                unittest.mock.patch.object(rust.platform, "system", **system))
+
+    def test_detection_answers_and_never_raises(self):
+        self.assertIsInstance(rust._cpu_supports_avx2(), bool)
+
+    def test_non_x86_needs_no_floor(self):
+        """aarch64 has NEON as baseline, so there is nothing to gate on."""
+        with unittest.mock.patch.object(rust.platform, "machine",
+                                        return_value="aarch64"):
+            self.assertTrue(rust._cpu_supports_avx2())
+
+    def test_unknown_platform_assumes_supported(self):
+        """
+        The fallback costs 25-75x, so an undetectable CPU must not be assumed
+        old: guessing "no" on a machine that was fine is the more damaging
+        error of the two.
+        """
+        machine, system = self._platform("x86_64", return_value="Plan9")
+        with machine, system:
+            self.assertTrue(rust._cpu_supports_avx2())
+
+    def test_detection_failure_assumes_supported(self):
+        """Detection must never be able to break the import."""
+        machine, system = self._platform("x86_64", side_effect=OSError("boom"))
+        with machine, system:
+            self.assertTrue(rust._cpu_supports_avx2())
+
+    def test_linux_reads_the_cpuinfo_flags(self):
+        for flags, expected in ((" fpu vme avx2 bmi1 ", True),
+                                (" fpu vme avx bmi1 ", False),
+                                (" sse2 ssse3 ", False)):
+            with unittest.mock.patch.object(rust.platform, "machine",
+                                            return_value="x86_64"), \
+                 unittest.mock.patch.object(rust.platform, "system",
+                                            return_value="Linux"), \
+                 unittest.mock.patch(
+                     "builtins.open",
+                     return_value=io.StringIO(f"flags\t:{flags}\n")):
+                self.assertIs(rust._cpu_supports_avx2(), expected, flags)
 
 
 class TestValidation(unittest.TestCase):
