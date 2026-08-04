@@ -1,6 +1,6 @@
 """1D experiments: collision law, winding defect, seam invariance, stability.
 
-Candidates (see PLAN.md):
+Candidates:
   H1  rotated integer grid   h(x) = floor(B ((x+u) mod 1))        [toroidal]
   H2  integer projection     h(x) = floor(B ((z x + u) mod 1))    [toroidal, suspect]
   H3  naive shifted grid     h(x) = floor((x+u) / (1/B))          [not toroidal]

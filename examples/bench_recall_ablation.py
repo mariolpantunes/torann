@@ -1,6 +1,6 @@
 """Does ESS need recall, or only plausible repellers?
 
-`OPTIMIZE.md` §4b measured that recall 0.69 at d=32 costs 1.28% CE against
+Recall 0.69 at d=32 was measured to cost 1.28% CE against
 perfect recall, while dropping tables to *lower* recall costs 4.3%. Those
 two look contradictory until you notice that fewer tables degrades recall
 **and** locality together, so that experiment confounds them. This one

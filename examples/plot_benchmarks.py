@@ -1,6 +1,6 @@
-"""Render the README benchmark figures from the ANALYSIS.md measurements.
+"""Render the README benchmark figures from recorded measurements.
 
-The numbers below are the phase-8 measurements documented in ANALYSIS.md
+The numbers below are the phase-8 measurements
 (v3) — AMD Ryzen AI 7 PRO 350, 16 threads, d=16, k=32, best of 3. They can
 be re-measured with `examples/bench_backends.py`, `compare_faiss_flat.py`
 and `ess_sim.py`; this script only draws them.

@@ -4,7 +4,7 @@
 # shape (n=50k, d=32, k=5), native and this floor are 404 ms and 406 ms —
 # the native build really does emit AVX-512, and it buys nothing over AVX2.
 # Baseline x86-64 is 542 ms, because `wide::f32x8` has no 256-bit register to
-# lower to and falls back to two `f32x4`. See OPTIMIZE.md §6.
+# lower to and falls back to two `f32x4`.
 #
 # Building on a pre-AVX2 CPU: override with
 #   RUSTFLAGS="-C target-cpu=native" cargo build --release

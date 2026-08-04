@@ -11,7 +11,7 @@ neighbour votes at nearly full strength. Two independent fixes:
    steepness is required — as a `sigma/R` for the Gaussian and as an
    exponent for a power law — and what it costs in dynamic range.
 2. **A lower p.** Toroidal `L^p` for `p < 1` is known to keep more
-   relative contrast in high dimension. `requirements.md` §7 settled on
+   relative contrast in high dimension. The project settled on
    L1 "deliberately", noting the grid-LSH family provably covers
    `p in (0, 1]` — so the hash needs no change. What p<1 gives up is the
    triangle inequality, which this index only ever used for the pruning

@@ -62,6 +62,8 @@ jobs:
 
   # The package must keep working without the compiled module: this job
   # runs the same suite against the pure-Python reference implementation.
+  # It is also what backs the AVX2 gate in `torann/rust.py` — a CPU without
+  # AVX2 lands on exactly this path, so it has to stay green.
   test-pure-python:
     runs-on: ubuntu-latest
     steps:

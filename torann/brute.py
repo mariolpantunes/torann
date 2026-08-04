@@ -1,9 +1,10 @@
 """Exact toroidal-L1 search — blocked NumPy, no approximation.
 
-Below the wrapper's ``brute_threshold`` this *is* the index (crossover
-measurements in ANALYSIS.md: exact search wins outright at small n). It is
-also the ground truth the LSH implementations are validated against, and
-serves ``query_radius(exact=True)`` at any size via the module functions.
+Below the wrapper's ``brute_threshold`` this *is* the index: exact search
+wins outright at small n, measured per backend (see
+``ToroidalNN._BRUTE_DEFAULTS``). It is also the ground truth the LSH
+implementations are validated against, and serves
+``query_radius(exact=True)`` at any size via the module functions.
 """
 
 from __future__ import annotations

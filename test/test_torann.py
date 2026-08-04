@@ -419,7 +419,7 @@ class TestCpuFloor(unittest.TestCase):
     """The AVX2 gate in front of the compiled backend.
 
     Published x86-64 wheels are built with ``+avx2,+fma`` because the floor
-    is worth 25% (OPTIMIZE.md §6). The gate is what makes that safe on a CPU
+    is worth 25%. The gate is what makes that safe on a CPU
     without it: the module falls back to the pure-Python backend instead of
     taking SIGILL, which Python cannot catch and which would surface as a
     bare crash with no traceback.

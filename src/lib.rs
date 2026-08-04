@@ -21,9 +21,18 @@
 //! through per-chunk buffers with no per-point allocation, and a batch of
 //! queries is answered by a **bucket-centric join** (`query_block`) that
 //! loads each bucket once per block instead of once per query. Refinement
-//! runs on eight f32 accumulators, four tile rows at a time. Rejected-by-
-//! measurement variants are recorded in ANALYSIS.md and OPTIMIZE.md so they
-//! are not re-tried.
+//! runs on eight f32 accumulators, four tile rows at a time.
+//!
+//! Two things about this file are load-bearing and easy to undo by
+//! accident. The kernel is bound by **dependency-chain latency, not
+//! instruction count** — reducing instructions made it measurably worse,
+//! and the fix was ILP (`ROWS = 4`), so a "simplification" that shortens
+//! the code is likely to cost time. And the index is **execution-bound,
+//! not memory-bound**, so optimisations justified by fewer memory loads do
+//! not convert: two attempts to raise bucket reuse (bucket-major work
+//! partitioning, and reordering queries by hash key) each reduced traffic
+//! as designed and moved the clock by nothing or less. A proposal here
+//! needs a cycle argument, not a traffic argument.
 
 // The kernels index with `for i in 0..n` on purpose: most loops write to
 // several arrays at once and were profile-tuned in this exact shape. The
@@ -69,10 +78,15 @@ fn wrap_unit(s: f64) -> f64 {
 /// The eight lanes are one `wide::f32x8` because **LLVM does not vectorize
 /// the scalar form**: written with slices, or with the chunks re-typed to
 /// `&[f32; 8]`, the query loop disassembles to `vsubss`/`vminss` with not a
-/// single packed op, and the query runs 1.55× slower (measured, §OPTIMIZE.md
-/// §3). `wide` is a safe, stable-Rust SIMD wrapper — no `unsafe` here, no
-/// nightly `std::simd` — that lowers to AVX2 where the target has it and to
-/// SSE where it does not, keeping the lane mapping either way.
+/// single packed op, and the query runs 1.55× slower. `wide` is a safe,
+/// stable-Rust SIMD wrapper — no `unsafe` here, no nightly `std::simd` —
+/// that lowers to AVX2 where the target has it and to SSE where it does
+/// not, keeping the lane mapping either way.
+///
+/// **Which is why the build pins an AVX2 floor.** Without it there is no
+/// 256-bit register to lower to, `f32x8` becomes two `f32x4`, and the
+/// query goes 406 ms -> 542 ms on the reference shape. See
+/// `.cargo/config.toml` and `torann/rust.py`.
 #[inline]
 fn dist_l1_32(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());

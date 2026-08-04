@@ -25,8 +25,9 @@ Modules:
     * `torann.rust` — the compiled core (``torann._native``, PyO3 + rayon).
 
 The hash, table layout and cross-implementation guarantees are defined by
-``torann.lsh``, the reference implementation; measurements live in
-``ANALYSIS.md``.
+``torann.lsh``, the reference implementation. Benchmarks are regenerated
+with ``python examples/benchmark.py``; the maintainers' measurement notes
+are kept out of the distribution because they are rewritten constantly.
 """
 
 from .wrapper import ToroidalNN, available_backends

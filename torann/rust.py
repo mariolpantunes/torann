@@ -1,14 +1,14 @@
 """The Rust acceleration: ``torann._native`` (PyO3 + rayon).
 
 The native class implements the same behaviour as ``lsh.py`` — byte-identical
-tables, equivalent results — at 25–75× the speed
-(ANALYSIS.md). It is a native ``pyclass``, so it registers as a virtual
-subclass of :class:`torann.base.BaseIndex` instead of inheriting.
+tables, equivalent results — at 25–75× the speed. It is a native
+``pyclass``, so it registers as a virtual subclass of
+:class:`torann.base.BaseIndex` instead of inheriting.
 
 **Published x86-64 wheels require AVX2 and FMA.** That is not a portability
 oversight, it is worth 25%: `wide::f32x8` has no 256-bit register to lower to
 without AVX, so it falls back to two `f32x4` and the query kernel goes from
-406 ms to 542 ms on the reference shape (OPTIMIZE.md §6). AVX2 is Haswell
+406 ms to 542 ms on the reference shape. AVX2 is Haswell
 (2013) and Excavator (2015) onward; AVX-512 buys nothing further and is not
 required. `_cpu_supports_avx2` gates the import so a pre-AVX2 machine falls
 back to the pure-Python backend instead of taking SIGILL on the first packed

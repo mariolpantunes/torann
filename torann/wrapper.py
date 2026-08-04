@@ -1,6 +1,6 @@
 r"""torann — TORoidal Approximate Nearest Neighbours (public wrapper).
 
-Contract (PLAN.md, gate outcomes 2026-07-13):
+Contract:
 
 * **Metric**: toroidal L1 on the unit torus $[0,1)^d$, and nothing else.
   The hash family's guarantee is an L1 guarantee, so L1 is the public
@@ -40,7 +40,11 @@ the search itself lives in interchangeable implementations of
 crossover threshold, and above it an LSH implementation — Rust
 (``torann._native``) when the compiled module is present, the pure-Python
 reference (``lsh.py``) otherwise — ``lsh.py`` is the specification the
-native core is validated against. See ANALYSIS.md for measurements.
+native core is validated against, byte-identical tables included.
+
+Note the compiled core is gated on AVX2 (see ``torann.rust``): published
+x86-64 wheels are built with that floor, and a CPU without it falls back
+to ``lsh.py`` rather than crashing.
 """
 
 from __future__ import annotations
@@ -119,7 +123,7 @@ class ToroidalNN:
         seed: Seed for hash functions and tuning samples.
         brute_threshold: Exact search while total points <= this. ``None``
             (default) picks the measured brute/LSH crossover of the backend:
-            4096 for python, 512 for rust (ANALYSIS.md, crossover section).
+            4096 for python, 512 for rust.
         num_tables: Tables $L$. ``None`` = tuned (default 16 without hints).
         resolution: Cells per dimension $B \ge 2$. ``None`` = tuned
             (default 3).
@@ -129,16 +133,20 @@ class ToroidalNN:
             ``max(32, k_hint)``.
         probes: Neighbour-cell probes per table per query.
         query_block_size: Queries per block of the batched join. ``None``
-            (default) sizes blocks from the workload: as large as bucket
-            reuse wants, capped so a block's query tile stays cache-resident
-            and so the blocks divide evenly over the workers. ``1`` selects
-            the per-query path (one deduplicated candidate list per query),
-            which is what small batches want.
+            (default) is one block per worker, which is what bucket reuse
+            wants: a bucket is loaded once per block and scored against
+            every query in it. Two attempts to raise that reuse further —
+            partitioning the work by bucket, and reordering queries by
+            hash key — were built and both lost to their own overhead, so
+            this sizing is deliberate rather than a placeholder. ``1``
+            selects the per-query path (one deduplicated candidate list
+            per query), which is what small batches want, and is also the
+            independent reference the batched join is validated against.
         backend: LSH implementation — ``"auto"`` (first installed of rust,
             python), or an explicit name.
     """
 
-    # Measured brute/LSH crossover per backend (ANALYSIS.md): the NumPy
+    # Measured brute/LSH crossover per backend: the NumPy
     # brute path stays competitive to ~4-8k points against the python
     # LSH, while the native implementation wins from the smallest sizes
     # tested.

@@ -33,8 +33,12 @@ anchors, a moving candidate tier, selective updates, batch promotion.
 * **Three interchangeable implementations** of one interface
   (`torann/base.py`): exact NumPy brute force, a pure-Python LSH
   reference, and a Rust core (PyO3 + rayon) that produces byte-identical
-  hash tables at 60–120× the speed. Without the compiled module the
-  package still runs, on the reference implementation.
+  hash tables at 60–120× the speed. Without the compiled module — or on a
+  CPU below the [AVX2 floor](#installation) — the package still runs, on
+  the reference implementation.
+* **No `unsafe`**: the SIMD kernel is `wide`, a safe stable-Rust wrapper.
+  Hand-written `core::arch` intrinsics were measured at 21% faster and
+  declined; that trade is deliberate and stays open.
 
 ## Installation
 
@@ -157,9 +161,11 @@ normative for the L1 hash.
 
 ## Benchmarks
 
-Measured on an AMD Ryzen AI 7 PRO 350 (16 threads), d=16, k=32.
-Regenerate the full grids, crossover and complexity tables with
-`python examples/benchmark.py`:
+Measured on an AMD Ryzen AI 7 PRO 350 (16 threads), d=16, k=32, on a build
+carrying the AVX2 floor described under [Installation](#installation) —
+which is what the published wheels now ship, so these are numbers you get
+rather than numbers only the developer got. Regenerate the full grids,
+crossover and complexity tables with `python examples/benchmark.py`:
 
 ![queries vs n](assets/bench_query.png)
 

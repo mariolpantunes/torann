@@ -13,9 +13,8 @@ permissions:
 # .cargo/config.toml already applies, so these jobs leave it alone. That
 # floor is worth 25% and is not optional in practice: without AVX there is
 # no 256-bit register for `wide::f32x8` to lower to, it falls back to two
-# `f32x4`, and the query kernel goes 406 ms -> 542 ms on the reference shape
-# (OPTIMIZE.md §6). AVX-512 buys nothing further, so there is no third
-# variant to build.
+# `f32x4`, and the query kernel goes 406 ms -> 542 ms on the reference shape.
+# AVX-512 buys nothing further, so there is no third variant to build.
 #
 # These jobs previously did `rm -f .cargo/config.toml` to strip a
 # `target-cpu=native` setting. That removed the crash risk *and* the 25%:
@@ -40,6 +39,17 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist --interpreter 3.10 3.11 3.12 3.13 3.14
           manylinux: auto
+      # The bug this replaced was a wheel that silently lost its AVX2 floor,
+      # so assert the floor is in the artifact rather than trusting the
+      # config to have been picked up through maturin's container.
+      - name: Verify the x86-64 wheel is built with AVX2
+        if: matrix.target == 'x86_64'
+        run: |
+          python -m zipfile -e dist/*.whl /tmp/whl
+          so=$(find /tmp/whl -name '_native*.so' | head -1)
+          n=$(objdump -d "$so" | grep -c '%ymm')
+          echo "256-bit instructions in $so: $n"
+          test "$n" -gt 0 || { echo "::error::wheel has no AVX2 code"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}

@@ -7,12 +7,12 @@ measured separately during the query-path work:
   qualitatively across it: below `d = 8` the eight-lane distance kernel has
   no full vector to fill, and above `d ~ 16` concentration of measure makes
   every candidate roughly equidistant, which is what kills bucket pruning
-  (OPTIMIZE.md §1).
+  (measured: the cost is locality and dependency latency, not pruning).
 * **start** — `empty` is the from-scratch first batch (no anchors, no
   `_smart_init`); `filled` has a static tier, so it pays for initialization
   against existing points, which is the re-exploration case ESS exists for.
 * **search mode** — `knn` and `radius`. Radius mode had *no* measurements at
-  all before this file (OPTIMIZE.md §5 item 4) while being a first-class
+  all before this file, while being a first-class
   `ess.esa` argument.
 * **engine** — `brute` (exact, and the ground truth recall is measured
   against) and `lsh`, forced with `brute_threshold` so the same `n` runs both
