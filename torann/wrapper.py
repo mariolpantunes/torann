@@ -74,9 +74,12 @@ def _lsh_class(name: str):
     if name == "python":
         return PythonLshIndex
     if name == "rust":
-        if not rust.AVAILABLE:
+        # Test the class itself, not the parallel `AVAILABLE` flag: they can
+        # drift, and the class is what the caller is about to instantiate.
+        if rust.RustLshIndex is None:
             raise ImportError(
-                "torann._native is not installed (build with maturin)")
+                "torann._native is not available (not built, or this CPU is "
+                "below the AVX2 floor the published wheels are built with)")
         return rust.RustLshIndex
     raise ValueError(f"unknown backend {name!r}; expected 'auto', "
                      f"{', '.join(map(repr, _AUTO_ORDER))}")
