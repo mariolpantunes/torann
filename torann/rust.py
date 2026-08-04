@@ -65,7 +65,9 @@ def _cpu_supports_avx2() -> bool:
             # the call returns 0 for an unknown feature -- indistinguishable
             # from "unsupported", so a false negative is possible on an old
             # Windows with a new CPU. It costs speed, never correctness.
-            windll = getattr(ctypes, "windll")  # Windows-only attribute
+            # `windll` exists only on Windows, so it is not on the
+            # cross-platform stub; this branch cannot run elsewhere.
+            windll = ctypes.windll  # type: ignore[attr-defined]
             return bool(windll.kernel32.IsProcessorFeaturePresent(40))
     except Exception:  # detection must never be able to break the import
         logger.debug("AVX2 detection failed; assuming supported", exc_info=True)
@@ -90,4 +92,4 @@ else:
     RustLshIndex = None
     AVAILABLE = False
 
-__all__ = ["RustLshIndex", "AVAILABLE"]
+__all__ = ["AVAILABLE", "RustLshIndex"]

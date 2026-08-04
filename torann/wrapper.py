@@ -50,7 +50,7 @@ to ``lsh.py`` rather than crashing.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -150,7 +150,7 @@ class ToroidalNN:
     # brute path stays competitive to ~4-8k points against the python
     # LSH, while the native implementation wins from the smallest sizes
     # tested.
-    _BRUTE_DEFAULTS = {"python": 4096, "rust": 512}
+    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = {"python": 4096, "rust": 512}
 
     def __init__(
         self,
@@ -205,7 +205,7 @@ class ToroidalNN:
         candidate_points: np.ndarray | None = None,
         k: int | None = None,
         radius: float | None = None,
-    ) -> "ToroidalNN":
+    ) -> ToroidalNN:
         """Build the index from zero. Hash functions are drawn (and tuned)
         here and kept stable for the whole run.
 
@@ -370,7 +370,7 @@ class ToroidalNN:
         if self.dims_per_table is not None:
             K = self.dims_per_table
         else:
-            K = int(round(np.log(max(2.0, n / target)) / np.log(B)))
+            K = round(np.log(max(2.0, n / target)) / np.log(B))
         K = max(1, min(K, int(62 // np.log2(B))))  # key fits in int64
 
         if self.num_tables is not None:

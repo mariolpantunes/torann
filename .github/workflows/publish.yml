@@ -29,6 +29,7 @@ jobs:
   wheels-linux:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target: [x86_64, aarch64]
     steps:
@@ -41,15 +42,25 @@ jobs:
           manylinux: auto
       # The bug this replaced was a wheel that silently lost its AVX2 floor,
       # so assert the floor is in the artifact rather than trusting the
-      # config to have been picked up through maturin's container.
-      - name: Verify the x86-64 wheel is built with AVX2
+      # config to have been picked up through maturin's container. Every
+      # wheel is checked, not just one: `dist/*.whl` is one wheel per
+      # interpreter, and they are separate builds.
+      - name: Verify the x86-64 wheels carry the AVX2 floor
         if: matrix.target == 'x86_64'
         run: |
-          python -m zipfile -e dist/*.whl /tmp/whl
-          so=$(find /tmp/whl -name '_native*.so' | head -1)
-          n=$(objdump -d "$so" | grep -c '%ymm')
-          echo "256-bit instructions in $so: $n"
-          test "$n" -gt 0 || { echo "::error::wheel has no AVX2 code"; exit 1; }
+          set -euo pipefail
+          for whl in dist/*.whl; do
+            rm -rf /tmp/whl && mkdir -p /tmp/whl
+            python -m zipfile -e "$whl" /tmp/whl
+            find /tmp/whl -name '_native*.so' | while read -r so; do
+              n=$(objdump -d "$so" | grep -c '%ymm' || true)
+              echo "$(basename "$whl"): $n 256-bit instructions"
+              if [ "$n" -eq 0 ]; then
+                echo "::error::$(basename "$whl") has no AVX2 code"
+                exit 1
+              fi
+            done
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
@@ -58,6 +69,7 @@ jobs:
   wheels-macos:
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
         target: [x86_64, aarch64]
     steps:

@@ -13,7 +13,7 @@ import numpy as np
 
 from .base import BaseIndex
 
-__all__ = ["BruteIndex", "pairwise_l1", "exact_knn", "exact_radius"]
+__all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1"]
 
 # Element budget for the temporary (queries x points) distance blocks.
 _BUDGET = 1 << 24
