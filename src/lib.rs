@@ -351,6 +351,17 @@ const TILE: usize = 128;
 /// which pays for a dedup stamp but scores each candidate once — wins.
 const BATCH_MIN: usize = 64;
 
+/// Toroidal-L1 LSH index, compiled.
+///
+/// Behaviourally identical to `torann.lsh.PythonLshIndex` — given the same
+/// parameters the hash tables are byte-identical — at 25-75x the speed. It is
+/// selected automatically by `torann.ToroidalNN`; construct that instead of
+/// this, which takes pre-drawn hash parameters and validates nothing.
+///
+/// Two tiers: a *static* tier hashed and key-sorted once, growing only by
+/// `promote`, and a *candidate* tier refreshed per epoch by `update`. The
+/// index is exact after every operation — the hash decides which points are
+/// compared, never how far apart they are.
 #[pyclass]
 struct RustLshIndex {
     b: i64,
@@ -1142,6 +1153,17 @@ impl RustLshIndex {
 #[pymethods]
 impl RustLshIndex {
     #[new]
+    /// Build an empty index from drawn hash parameters.
+    ///
+    /// Args:
+    ///     b: Cells per dimension, `B >= 2`.
+    ///     k: Sampled dimensions per table, `K`.
+    ///     l: Number of tables, `L`.
+    ///     probes: Neighbour-cell probes per table per query.
+    ///     s: `(L, K)` int64 sampled dimension indices.
+    ///     u: `(L, K)` float64 per-dimension offsets in `[0, 1)`.
+    ///     block: Queries per block of the batched join; `1` selects the
+    ///         per-query path, `0` sizes blocks from the worker count.
     #[pyo3(signature = (b, k, l, probes, s, u, block=1024))]
     fn new(
         b: i64,
@@ -1186,6 +1208,12 @@ impl RustLshIndex {
         })
     }
 
+    /// Hash and sort both tiers from scratch.
+    ///
+    /// Args:
+    ///     points: `(n, d)` float64 in `[0, 1)`; the first `n_static` rows
+    ///         are the static tier, the rest the candidate tier.
+    ///     n_static: Size of the static tier.
     fn build(
         &mut self,
         py: Python<'_>,
@@ -1318,6 +1346,20 @@ impl RustLshIndex {
         Ok(())
     }
 
+    /// Exact k nearest neighbours of each query under toroidal L1.
+    ///
+    /// The hash selects candidates; every returned distance is exact. Rows
+    /// are ascending by `(distance, id)` and padded with `-1` / `inf` when
+    /// fewer than `k` points exist.
+    ///
+    /// Args:
+    ///     queries: `(m, d)` float64 in `[0, 1)`.
+    ///     k: Neighbours per query.
+    ///     exclude_ids: Optional `(m,)` int64, one id excluded per query —
+    ///         the self-join.
+    ///
+    /// Returns:
+    ///     `(idx, dist)`, both `(m, k)`: int64 ids and float64 distances.
     #[pyo3(signature = (queries, k, exclude_ids=None))]
     fn query_knn<'py>(
         &self,
@@ -1356,6 +1398,16 @@ impl RustLshIndex {
         ))
     }
 
+    /// Every point within `radius` of each query, exactly.
+    ///
+    /// Args:
+    ///     queries: `(m, d)` float64 in `[0, 1)`.
+    ///     radius: Toroidal-L1 cutoff.
+    ///     exclude_ids: Optional `(m,)` int64, one id excluded per query.
+    ///
+    /// Returns:
+    ///     `(indptr, ids, dists)` in CSR form: query `i` owns
+    ///     `ids[indptr[i]:indptr[i+1]]`.
     #[pyo3(signature = (queries, radius, exclude_ids=None))]
     fn query_radius<'py>(
         &self,
@@ -1428,6 +1480,11 @@ impl RustLshIndex {
         ))
     }
 
+    /// The raw hash tables, for cross-implementation comparison.
+    ///
+    /// Returns the sorted keys and ids of both tiers. These are what
+    /// "byte-identical to the reference" is asserted on, so the layout is
+    /// part of the contract rather than an implementation detail.
     fn tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let ns = self.n_static;
         let nc = self.n_cand();
@@ -1477,6 +1534,7 @@ impl RustLshIndex {
         Ok(d)
     }
 
+    /// Zero the counters read by `stats`.
     fn reset_stats(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         self.stats.gather_ns.store(0, Relaxed);
@@ -1488,16 +1546,19 @@ impl RustLshIndex {
         self.stats.relaxed.store(0, Relaxed);
     }
 
+    /// Points in the index, both tiers.
     #[getter]
     fn n_points(&self) -> usize {
         self.n_points
     }
 
+    /// Points in the static tier.
     #[getter]
     fn n_static(&self) -> usize {
         self.n_static
     }
 
+    /// Points in the candidate tier.
     #[getter]
     fn n_candidates(&self) -> usize {
         self.n_cand()
