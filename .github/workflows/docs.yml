@@ -54,6 +54,26 @@ jobs:
           cp -r assets docs_build/torann/assets
           touch docs_build/.nojekyll
 
+      # Dropping either copy leaves a set of pages with a broken logo, and
+      # nothing else would notice: the build still succeeds and the site
+      # still deploys. Verified here rather than by eye.
+      - name: Every page must resolve its logo
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path("docs_build")
+          pages = list(root.rglob("*.html"))
+          missing = [f"{p.relative_to(root)} -> {r}" for p in pages
+                     for r in set(re.findall(r'(?:src|href)="([^"]*logo\.svg)"',
+                                             p.read_text()))
+                     if not (p.parent / r).exists()]
+          if missing:
+              print("::error::logo references that do not resolve:")
+              print("\n".join(missing))
+              sys.exit(1)
+          print(f"checked {len(pages)} pages, all logo references resolve")
+          PY
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
