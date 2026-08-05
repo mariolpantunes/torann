@@ -207,6 +207,18 @@ pdoc --math -d google torann torann.wrapper torann.base torann.brute torann.lsh 
 
 ## Development
 
+The checks in CI also run at commit time:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+That gates each commit on ruff, basedpyright, vulture, the unit tests, and --
+because the native core is held to the same standard -- `cargo fmt --check`
+and `cargo clippy --release -- -D warnings`. `pre-commit run --all-files`
+checks the tree without committing.
+
 ```bash
 python examples/ess_sim.py             # the ESS main loop end to end, vs FAISS
 python examples/bench_backends.py      # per-op grid over (n, d, backend)
