@@ -1,13 +1,1 @@
-# Runtime -- mirrors `dependencies` in pyproject.toml exactly.
-# `test/test_packaging.py` asserts the two agree; a bare `numpy` here stated no
-# floor at all while pyproject.toml required 1.26.4.
 numpy>=1.26.4
-
-# Lint toolchain, pinned to the versions .github/workflows/main.yml installs.
-# Unpinned, a ruff release lands new rules in CI that the local gate never saw.
-ruff==0.16.1
-basedpyright==1.39.8
-vulture==2.16
-
-# Docs. Not needed to use the library.
-pdoc>=16.0.0

@@ -60,7 +60,7 @@ pip install --upgrade pip
 pip install .
 ```
 
-**Requirements:** Python ≥ 3.10, numpy.
+**Requirements:** Python ≥ 3.12, numpy.
 
 **CPU:** published x86-64 wheels are built with an AVX2 + FMA floor — Intel
 Haswell (2013) and AMD Excavator (2015) onward. That is not gratuitous: the
