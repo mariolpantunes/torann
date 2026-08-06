@@ -8,6 +8,7 @@ The same holds for the version and contact the package reports: pyBlindOpt
 shipped 0.3.0 saying it was 0.2.0, from a hand-kept copy nothing checked.
 """
 
+import importlib.metadata
 import os
 import re
 import tomllib
@@ -52,13 +53,33 @@ class TestPackaging(unittest.TestCase):
                 self.assertEqual(spec, self.declared[_name_of(spec)])
 
 
+def _installed():
+    """Is this distribution installed, or are we running from a bare checkout?"""
+    try:
+        importlib.metadata.version("torann")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return True
+
+
 class TestReportedMetadata(unittest.TestCase):
     def setUp(self):
         with open(os.path.join(ROOT, "pyproject.toml"), "rb") as handle:
             self.project = tomllib.load(handle)["project"]
 
+    @unittest.skipUnless(_installed(), "no distribution metadata to compare against")
     def test_reported_version_matches_the_published_one(self):
+        """What the package reports is what pyproject.toml declares.
+
+        Only meaningful against an installed distribution -- the version is
+        read from its metadata. A bare checkout (CI's pure-Python job runs
+        one) reports the dev fallback instead, which is asserted below.
+        """
         self.assertEqual(torann.__version__, self.project["version"])
+
+    @unittest.skipIf(_installed(), "distribution is installed")
+    def test_a_bare_checkout_reports_the_dev_fallback(self):
+        self.assertEqual(torann.__version__, "0.0.0.dev0")
 
     def test_contact_address_is_the_one_pyproject_publishes(self):
         self.assertEqual(torann.__email__, self.project["authors"][0]["email"])
