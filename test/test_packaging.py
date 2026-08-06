@@ -3,12 +3,17 @@
 They have drifted before -- the numpy floor read 2.4.0 in one file and 2.0.0
 in the other -- and nothing breaks when they do, so nothing surfaces it. This
 is the assertion that does.
+
+The same holds for the version and contact the package reports: pyBlindOpt
+shipped 0.3.0 saying it was 0.2.0, from a hand-kept copy nothing checked.
 """
 
 import os
 import re
 import tomllib
 import unittest
+
+import torann
 
 ROOT = os.path.join(os.path.dirname(__file__), os.pardir)
 
@@ -45,3 +50,15 @@ class TestPackaging(unittest.TestCase):
         for spec in self.dependencies:
             with self.subTest(dependency=spec):
                 self.assertEqual(spec, self.declared[_name_of(spec)])
+
+
+class TestReportedMetadata(unittest.TestCase):
+    def setUp(self):
+        with open(os.path.join(ROOT, "pyproject.toml"), "rb") as handle:
+            self.project = tomllib.load(handle)["project"]
+
+    def test_reported_version_matches_the_published_one(self):
+        self.assertEqual(torann.__version__, self.project["version"])
+
+    def test_contact_address_is_the_one_pyproject_publishes(self):
+        self.assertEqual(torann.__email__, self.project["authors"][0]["email"])

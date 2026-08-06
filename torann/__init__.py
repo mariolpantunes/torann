@@ -74,6 +74,23 @@ the maintainers' measurement notes are deliberately kept out of the
 distribution, because they are rewritten constantly.
 """
 
+import importlib.metadata
+
+__author__ = "Mário Antunes"
+__license__ = "MIT"
+__email__ = "mario.antunes@ua.pt"
+__url__ = "https://github.com/mariolpantunes/torann"
+__status__ = "Development"
+
+# Read from the installed distribution rather than a literal here: a hand-kept
+# copy drifts from pyproject.toml without failing anything, which is how
+# pyBlindOpt shipped 0.3.0 reporting 0.2.0. Source checkouts that were never
+# installed have no metadata, hence the fallback.
+try:
+    __version__ = importlib.metadata.version("torann")
+except importlib.metadata.PackageNotFoundError:  # pragma: no cover
+    __version__ = "0.0.0.dev0"
+
 from .wrapper import ToroidalNN, available_backends
 
 __all__ = ["ToroidalNN", "available_backends"]
