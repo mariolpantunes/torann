@@ -11,19 +11,29 @@ permissions:
 #
 # x86-64 wheels are built with an **AVX2 + FMA floor**, which the committed
 # .cargo/config.toml already applies, so these jobs leave it alone. That
-# floor is worth 25% and is not optional in practice: without AVX there is
-# no 256-bit register for `wide::f32x8` to lower to, it falls back to two
-# `f32x4`, and the query kernel goes 406 ms -> 542 ms on the reference shape.
-# AVX-512 buys nothing further, so there is no third variant to build.
+# floor is worth 17% and is not optional in practice: the distance kernel is
+# a scalar loop the compiler auto-vectorizes, and without AVX there is no
+# 256-bit register for it to lower to — the query goes 340 ms -> 408 ms on
+# the reference shape. AVX-512 is a further 4% at d=32 but nearly 2x *worse*
+# at d=8, so there is no third variant to build.
 #
 # These jobs previously did `rm -f .cargo/config.toml` to strip a
-# `target-cpu=native` setting. That removed the crash risk *and* the 25%:
+# `target-cpu=native` setting. That removed the crash risk *and* the floor:
 # every wheel published that way ran the SSE fallback. Portability is now
 # handled where it belongs, at import — `torann/rust.py` checks for AVX2 and
 # falls back to the pure-Python backend rather than taking SIGILL.
 #
 # aarch64 needs no flags: NEON is baseline on arm64 and the config section is
 # gated on x86, so it does not apply there.
+#
+# `rust-toolchain: stable` is pinned on every build job on purpose. The
+# distance kernel uses the algebraic float methods stabilized in Rust 1.98
+# (`Cargo.toml` declares the `rust-version`), and the manylinux container
+# ships whatever toolchain its image was built with — without this the
+# wheel build can fail on `algebraic_add` with no obvious cause.
+#
+# The interpreter list matches `requires-python = ">=3.12"`. Building 3.10
+# and 3.11 wheels produced artifacts pip would refuse to install.
 
 jobs:
   wheels-linux:
@@ -38,8 +48,9 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter 3.10 3.11 3.12 3.13 3.14
+          args: --release --out dist --interpreter 3.12 3.13 3.14
           manylinux: auto
+          rust-toolchain: stable
       # The bug this replaced was a wheel that silently lost its AVX2 floor,
       # so assert the floor is in the artifact rather than trusting the
       # config to have been picked up through maturin's container. Every
@@ -78,7 +89,8 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter 3.10 3.11 3.12 3.13 3.14
+          args: --release --out dist --interpreter 3.12 3.13 3.14
+          rust-toolchain: stable
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-macos-${{ matrix.target }}
@@ -92,7 +104,8 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x64
-          args: --release --out dist --interpreter 3.10 3.11 3.12 3.13 3.14
+          args: --release --out dist --interpreter 3.12 3.13 3.14
+          rust-toolchain: stable
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-windows-x64
@@ -107,6 +120,7 @@ jobs:
         with:
           command: sdist
           args: --out dist
+          rust-toolchain: stable
       - uses: actions/upload-artifact@v7
         with:
           name: sdist
