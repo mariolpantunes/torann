@@ -54,6 +54,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from torann import ToroidalNN  # noqa: E402
 from torann.brute import exact_knn, exact_radius  # noqa: E402
+from torann.metrics import toroidal_separation  # noqa: E402
 
 try:
     import ess
@@ -77,67 +78,27 @@ _CHECKED: list[bool] = []
 # Metrics — local, so this file has no hard dependency on ess
 # --------------------------------------------------------------------- #
 
-def expected_nn(n: int, dim: int) -> float:
-    r"""Mean nearest-neighbour toroidal-$L_1$ distance of $n$ uniform points.
+def quality(points: np.ndarray) -> float:
+    """Toroidal separation of a design — the shared metric.
 
-    Exact for fixed $n$, not the Poisson asymptotic
-    $\Gamma(1+1/d)(d!/n)^{1/d}/2$ — which reads 5–14% high above $d = 16$,
-    because by then the $L_1$ ball has wrapped around every coordinate and
-    neither $\exp(-nV)$ nor $V(t) = (2t)^d/d!$ holds. A toroidal coordinate
-    distance to a uniform point is $U(0, 1/2)$, so the distance is an
-    Irwin-Hall variable halved and
-
-    $$ \mathbb{E}[R] = \int_0^{d/2} (1 - V(t))^{n-1}\,dt $$
-
-    with $V$ obtained by convolving the one-coordinate density $d$ times via
-    FFT — stable where the closed-form alternating sum is not.
-
-    Args:
-        n: Number of points.
-        dim: Dimensionality.
-
-    Returns:
-        The expected nearest-neighbour distance under uniformity.
-    """
-    poisson = (math.gamma(1.0 + 1.0 / dim)
-               * math.exp((math.lgamma(dim + 1) - math.log(n)) / dim) / 2.0)
-    step = min(2.0e-4, poisson / 400.0)
-    m = int(round(dim * 0.5 / step)) + 1
-    size = 1 << int(math.ceil(math.log2(2 * m)))
-    half = int(round(0.5 / step)) + 1
-    dens = np.zeros(size)
-    dens[:half] = 2.0                    # U(0, 1/2) has density 2
-    dens[0] = dens[half - 1] = 1.0       # trapezoid end weights
-    dens *= step
-    pdf = np.fft.irfft(np.fft.rfft(dens) ** dim, size)[:m]
-    cdf = np.clip(np.cumsum(pdf), 0.0, 1.0)
-    return float(np.trapezoid(np.power(1.0 - cdf, n - 1), dx=step))
-
-
-def quality(points: np.ndarray) -> tuple[float, float]:
-    """Toroidal Clark-Evans and separation, from one exact k-NN scan.
+    Delegates to `torann.metrics.toroidal_separation` rather than keeping a
+    copy. It used to compute a toroidal Clark-Evans index here too, with its
+    own FFT null; both are gone. CE only resolves designs up to about
+    `d = 16`, and the second definition living in an example was how this
+    project and ESS ended up disagreeing about what "better" means.
+    `torann.metrics` records what else was measured and rejected.
 
     Args:
         points: ``(n, d)`` design in ``[0, 1)``.
 
     Returns:
-        ``(clark_evans, separation)``, both in toroidal L1.
+        The minimum pairwise toroidal-L1 distance; higher is better.
     """
-    pts = np.mod(np.ascontiguousarray(points, dtype=np.float64), 1.0)
-    n, dim = pts.shape
-    if n < 2:
-        return 0.0, 0.0
-    nn = exact_knn(pts, pts, 2)[1][:, 1]
-    ce = float(nn.mean() / expected_nn(n, dim))
-    sep = float(nn.min())
-    if HAVE_ESS and not _CHECKED:        # the two copies must agree
+    sep = toroidal_separation(points)
+    if HAVE_ESS and not _CHECKED:        # the two projects must agree
         _CHECKED.append(True)
-        # ESS dropped `toroidal_clark_evans`; separation is the metric the
-        # two projects still share, so it is the only one to cross-check.
-        # This module keeps the CE definition (`expected_nn`), and the other
-        # example scripts import it from here rather than from `ess.utils`.
-        assert abs(sep - ess.utils.toroidal_separation(pts)) < 1e-12
-    return ce, sep
+        assert abs(sep - ess.utils.toroidal_separation(points)) < 1e-12
+    return sep
 
 
 def recall(index: ToroidalNN, mode: str, k: int, radius: float,
@@ -321,7 +282,7 @@ def run(dim: int, n: int, start: str, mode: str, engine: str,
         used, full = epochs, arena
         fanout = float(np.mean(fan)) if fan else float("nan")
 
-    ce, sep = quality(full)
+    sep = quality(full)
     return {"dim": dim, "n": n, "start": start, "mode": mode,
             "engine": engine, "driver": "ess" if use_ess else "mimic",
             "epochs": used, "total_s": total,
@@ -332,7 +293,7 @@ def run(dim: int, n: int, start: str, mode: str, engine: str,
             "backend": index.backend_name or "brute",
             "tables": index.n_tables, "radius": radius, "fanout": fanout,
             "recall": recall(index, mode, K, radius),
-            "clark_evans": ce, "separation": sep,
+            "separation": sep,
             "fingerprint": int(np.asarray(full * 1e9, dtype=np.int64).sum())}
 
 
@@ -351,7 +312,7 @@ def table(rows: list[dict]) -> None:
             f"{r['ms_per_epoch']:.2f}", f"{r['query_ms_per_epoch']:.2f}",
             f"{share:.0f}%",
             "exact" if np.isnan(r["recall"]) else f"{r['recall']:.3f}",
-            f"{r['clark_evans']:.4f}", f"{r['separation']:.4f}",
+            f"{r['separation']:.4f}",
             "-" if np.isnan(r["fanout"]) else f"{r['fanout']:.1f}",
         ]) + " |")
 

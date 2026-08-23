@@ -21,7 +21,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from report_recall_ablation import (ARM_ORDER, CSS, aggregate,  # noqa: E402
+from report_recall_ablation import (CSS, aggregate,  # noqa: E402
                                     bars, table)
 
 OUT = os.path.join(os.path.dirname(__file__), "out")

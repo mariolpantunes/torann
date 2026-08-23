@@ -50,8 +50,6 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from torann import ToroidalNN  # noqa: E402
-# CE lives here, not in ess.utils, which no longer exports it.
-from benchmark import quality  # noqa: E402
 from torann.brute import exact_knn, pairwise_l1  # noqa: E402
 
 try:
@@ -231,30 +229,30 @@ def run(arm, dim, anchors, candidates, seed):
 
 
 def report(rows):
-    """Per shape, the ladder with CE and separation relative to the control."""
+    """Per shape, the ladder with separation relative to the control."""
     shapes = sorted({(r["dim"], r["anchors"], r["candidates"]) for r in rows})
     for dim, anchors, cands in shapes:
         sub = [r for r in rows if (r["dim"], r["anchors"], r["candidates"])
                == (dim, anchors, cands)]
-        base = np.mean([r["clark_evans"] for r in sub if r["arm"] == "exact"])
+        base = np.mean([r["separation"] for r in sub if r["arm"] == "exact"])
         print(f"\nd={dim}, {anchors}+{cands}, "
               f"{len({r['seed'] for r in sub})} seeds "
               f"(paired: same seed across arms)")
-        head = ["arm", "recall", "mean_ratio", "CE", "dCE vs exact",
-                "separation", "epochs"]
+        head = ["arm", "recall", "mean_ratio", "separation",
+                "dsep vs exact", "epochs"]
         print("| " + " | ".join(head) + " |")
         print("|" + "---|" * len(head))
         for arm in ARMS:
             a = [r for r in sub if r["arm"] == arm]
             if not a:
                 continue
-            ce = np.array([r["clark_evans"] for r in a])
-            sep = np.mean([r["separation"] for r in a])
+            sep_a = np.array([r["separation"] for r in a])
+            sep = float(sep_a.mean())
+            sd = sep_a.std(ddof=1) if len(sep_a) > 1 else 0.0
             print(f"| {arm} | {np.mean([r['recall'] for r in a]):.3f} "
                   f"| {np.mean([r['mean_ratio'] for r in a]):.2f} "
-                  f"| {ce.mean():.4f} +/- {ce.std(ddof=1) if len(ce) > 1 else 0:.4f} "
-                  f"| {100 * (ce.mean() - base) / base:+.2f}% "
-                  f"| {sep:.4f} "
+                  f"| {sep:.4f} +/- {sd:.4f} "
+                  f"| {100 * (sep - base) / base:+.2f}% "
                   f"| {np.mean([r['epochs'] for r in a]):.0f} |")
 
 
@@ -278,11 +276,10 @@ if __name__ == "__main__":
                 rows.append({
                     "dim": dim, "anchors": anchors, "candidates": cands,
                     "arm": arm, "seed": seed, **info,
-                    "clark_evans": float(quality(pts)[0]),
                     "separation": float(ess.utils.toroidal_separation(pts)),
                 })
                 print(f"  [d={dim} {arm} seed={seed}: "
-                      f"CE {rows[-1]['clark_evans']:.4f} "
+                      f"sep {rows[-1]['separation']:.4f} "
                       f"recall {info['recall']:.3f} "
                       f"ratio {info['mean_ratio']:.2f}]", flush=True)
 

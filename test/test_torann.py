@@ -563,6 +563,102 @@ class TestBackendEquivalence(unittest.TestCase):
                     self.assertGreater(same, 0.995)
 
 
+class TestMetrics(unittest.TestCase):
+    """`toroidal_separation` — the shared design-quality metric.
+
+    ESS scores its designs with this, so the definition is pinned here
+    rather than in whichever benchmark happens to call it.
+    """
+
+    def test_wrap_is_the_short_way_round(self):
+        """The whole point: a pair across the seam is near, not far."""
+        from torann.metrics import toroidal_separation
+        self.assertAlmostEqual(
+            toroidal_separation(np.array([[0.99], [0.01]])), 0.02)
+
+    def test_matches_a_brute_pairwise_minimum(self):
+        """Agrees with an independent O(n^2) scan, wrap included."""
+        from torann.metrics import toroidal_separation
+        rng = np.random.default_rng(0)
+        for d in (1, 2, 8):
+            pts = rng.random((60, d))
+            D = torus_l1(pts, pts)
+            np.fill_diagonal(D, np.inf)
+            self.assertAlmostEqual(
+                toroidal_separation(pts), float(D.min()), places=12,
+                msg=f"d={d}")
+
+    def test_inputs_are_reduced_mod_1(self):
+        """Same contract as the index: any real input is accepted."""
+        from torann.metrics import toroidal_separation
+        rng = np.random.default_rng(1)
+        pts = rng.random((40, 4))
+        for shift in (-3.0, 2.0):
+            self.assertAlmostEqual(toroidal_separation(pts),
+                                   toroidal_separation(pts + shift), places=12)
+
+    def test_degenerate_inputs(self):
+        """Fewer than two points has no pair; duplicates are 0 apart."""
+        from torann.metrics import toroidal_separation
+        self.assertEqual(toroidal_separation(np.zeros((0, 3))), 0.0)
+        self.assertEqual(toroidal_separation(np.zeros((1, 3))), 0.0)
+        self.assertEqual(toroidal_separation(np.zeros((5, 3))), 0.0)
+        with self.assertRaises(ValueError):
+            toroidal_separation(np.zeros(5))
+
+    def test_anchors_score_only_pairs_touching_the_batch(self):
+        """The refinement contract: anchor-anchor pairs must not floor it.
+
+        Two anchors 0.01 apart and a batch placed far from both. Scoring the
+        union would report 0.01 and call a good batch bad.
+        """
+        from torann.metrics import toroidal_separation
+        anchors = np.array([[0.00], [0.01]])
+        batch = np.array([[0.40], [0.70]])
+        # Each batch point's nearest neighbour is the other one, 0.30 away.
+        self.assertAlmostEqual(
+            toroidal_separation(batch, anchors), 0.30, places=12)
+        # Scoring the union instead would return the 0.01 anchor gap.
+        self.assertAlmostEqual(
+            toroidal_separation(np.vstack([anchors, batch])), 0.01, places=12)
+
+    def test_anchors_none_and_empty_agree(self):
+        from torann.metrics import toroidal_separation
+        rng = np.random.default_rng(3)
+        pts = rng.random((30, 4))
+        self.assertEqual(toroidal_separation(pts),
+                         toroidal_separation(pts, np.empty((0, 4))))
+
+    def test_a_batch_on_top_of_an_anchor_scores_zero(self):
+        """The failure the metric exists to catch."""
+        from torann.metrics import toroidal_separation
+        anchors = np.array([[0.25, 0.25], [0.75, 0.75]])
+        batch = np.array([[0.25, 0.25], [0.10, 0.90]])
+        self.assertAlmostEqual(toroidal_separation(batch, anchors), 0.0)
+
+    def test_anchor_shape_is_checked(self):
+        from torann.metrics import toroidal_separation
+        with self.assertRaises(ValueError):
+            toroidal_separation(np.zeros((4, 3)), np.zeros((4, 2)))
+
+    def test_keeps_its_margin_up_to_d32(self):
+        """The property the module docstring rests on, asserted.
+
+        A design confined to a tenth of each axis is unambiguously worse
+        spread than a uniform one, and separation has to say so *at d=32* —
+        which is where Clark-Evans, coverage radius and the discrepancies
+        stop resolving. The bar is a 5x margin, far outside seed noise;
+        coverage radius on the ESS-vs-LHS comparison manages 0.02% there.
+        """
+        from torann.metrics import toroidal_separation
+        rng = np.random.default_rng(2)
+        for d in (2, 8, 32):
+            n = 512
+            spread = toroidal_separation(rng.random((n, d)))
+            clumped = toroidal_separation(rng.random((n, d)) * 0.1)
+            self.assertGreater(spread, 5.0 * clumped, msg=f"d={d}")
+
+
 def _parametrize(base):
     """One subclass per installed native backend (python runs in the base)."""
     for name in BACKENDS:

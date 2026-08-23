@@ -43,7 +43,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from torann import ToroidalNN  # noqa: E402
-# CE lives here, not in ess.utils, which no longer exports it.
+# The shared design metric; see `torann.metrics` for what it replaced.
 from benchmark import quality  # noqa: E402
 
 try:
@@ -59,8 +59,8 @@ CASES = ((2, 256), (8, 512), (32, 2000))
 
 
 def metrics(points):
-    return (float(quality(points)[0]),
-            float(ess.utils.toroidal_separation(points)))
+    """The shared metric; see `torann.metrics`."""
+    return float(quality(points))
 
 
 def one_round(acc, dim, n, seed):
@@ -90,21 +90,19 @@ def run_iterative(dim, n, rounds, seed):
     for r in range(rounds):
         pts, info = one_round(acc, dim, n, seed + r)
         acc = np.vstack([acc, pts])
-        ce, sep = metrics(acc)
+        sep = metrics(acc)
         out.append({"round": r + 1, "static_in": acc.shape[0] - n,
-                    "total": acc.shape[0], "clark_evans": ce,
-                    "separation": sep, **info})
+                    "total": acc.shape[0], "separation": sep, **info})
         print(f"  [d={dim} round {r + 1}/{rounds}: {acc.shape[0]} pts, "
-              f"{info['wall_s']:.2f}s, CE {ce:.4f}]", flush=True)
+              f"{info['wall_s']:.2f}s, sep {sep:.4f}]", flush=True)
     return out, acc
 
 
 def run_one_shot(dim, total, seed):
     """A single call for the same final point count."""
     pts, info = one_round(np.empty((0, dim)), dim, total, seed)
-    ce, sep = metrics(pts)
-    return {"round": 0, "static_in": 0, "total": total, "clark_evans": ce,
-            "separation": sep, **info}
+    return {"round": 0, "static_in": 0, "total": total,
+            "separation": metrics(pts), **info}
 
 
 def report(rows):
@@ -114,7 +112,7 @@ def report(rows):
         os_ = [r for r in sub if r["variant"] == "one-shot"]
         print(f"\nd={dim}")
         head = ("round", "static in", "total", "mode", "L", "wall",
-                "setup", "query", "epochs", "CE", "separation")
+                "setup", "query", "epochs", "separation")
         print("| " + " | ".join(head) + " |")
         print("|" + "---|" * len(head))
         for r in it:
@@ -122,22 +120,20 @@ def report(rows):
                   f"| {r['mode']} | {r['tables']} | {r['wall_s']:.2f}s "
                   f"| {100 * r['setup_s'] / max(r['wall_s'], 1e-9):.0f}% "
                   f"| {100 * r['query_s'] / max(r['wall_s'], 1e-9):.0f}% "
-                  f"| {r['epochs']} | {r['clark_evans']:.4f} "
-                  f"| {r['separation']:.4f} |")
+                  f"| {r['epochs']} | {r['separation']:.4f} |")
         for r in os_:
             print(f"| one-shot | 0 | {r['total']} | {r['mode']} "
                   f"| {r['tables']} | {r['wall_s']:.2f}s "
                   f"| {100 * r['setup_s'] / max(r['wall_s'], 1e-9):.0f}% "
                   f"| {100 * r['query_s'] / max(r['wall_s'], 1e-9):.0f}% "
-                  f"| {r['epochs']} | {r['clark_evans']:.4f} "
-                  f"| {r['separation']:.4f} |")
+                  f"| {r['epochs']} | {r['separation']:.4f} |")
         if it and os_:
             tot = sum(r["wall_s"] for r in it)
             print(f"\n  iterative total {tot:.2f}s vs one-shot "
                   f"{os_[0]['wall_s']:.2f}s "
                   f"({tot / max(os_[0]['wall_s'], 1e-9):.2f}x) — "
-                  f"final CE {it[-1]['clark_evans']:.4f} vs "
-                  f"{os_[0]['clark_evans']:.4f}")
+                  f"final separation {it[-1]['separation']:.4f} vs "
+                  f"{os_[0]['separation']:.4f}")
 
 
 if __name__ == "__main__":
@@ -160,7 +156,7 @@ if __name__ == "__main__":
         shot = run_one_shot(dim, n * args.rounds, args.seed)
         rows.append({"dim": dim, "per_round": n, "variant": "one-shot", **shot})
         print(f"  [d={dim} one-shot {n * args.rounds} pts: "
-              f"{shot['wall_s']:.2f}s, CE {shot['clark_evans']:.4f}]",
+              f"{shot['wall_s']:.2f}s, sep {shot['separation']:.4f}]",
               flush=True)
 
     report(rows)

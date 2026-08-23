@@ -57,7 +57,7 @@ def aggregate(rows):
     for shape, arms in by.items():
         out[shape] = {}
         for arm, rs in arms.items():
-            ce = np.array([r["clark_evans"] for r in rs])
+            ce = np.array([r["separation"] for r in rs])
             out[shape][arm] = {
                 "ce": float(ce.mean()),
                 "ce_sd": float(ce.std(ddof=1)) if len(ce) > 1 else 0.0,
@@ -93,7 +93,7 @@ def bars(shape_stats, key, null_value):
     # allows — a percentage times a length, which it does not, is the easy
     # way to get a silently unplaced rule here.
     out = [f'<div class="plot" style="--null:{null_pct / 100:.4f}">',
-           f'<div class="nullrule" aria-hidden="true"></div>']
+           '<div class="nullrule" aria-hidden="true"></div>']
     for arm in ARM_ORDER:
         if arm not in shape_stats:
             continue

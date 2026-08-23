@@ -49,6 +49,14 @@ selects between. Grouped by what you are doing:
     `ToroidalNN.candidates` and `ToroidalNN.dimensions` for the contents; and
     `available_backends` for which implementations this install can reach.
 
+**Score a design**
+    `toroidal_separation` — the shortest toroidal-L1 distance between any
+    two points, i.e. the maximin criterion. It lives here rather than in a
+    caller because it is one exact k-NN scan, and because a shared
+    definition is the only way two projects agree on what "better" means;
+    `torann.metrics` records which competing metrics were measured and why
+    they were rejected.
+
 Implementations
 ---------------
 Three interchangeable backends behind one contract
@@ -91,6 +99,7 @@ try:
 except importlib.metadata.PackageNotFoundError:  # pragma: no cover
     __version__ = "0.0.0.dev0"
 
+from .metrics import toroidal_separation
 from .wrapper import ToroidalNN, available_backends
 
-__all__ = ["ToroidalNN", "available_backends"]
+__all__ = ["ToroidalNN", "available_backends", "toroidal_separation"]
