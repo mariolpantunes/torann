@@ -1,13 +1,30 @@
 # Local builds use the same ISA floor the published x86-64 wheels do, so a
-# number measured here is a number a user gets. `target-cpu=native` was the
-# previous setting and is not worth restoring: measured on the reference
-# shape (n=50k, d=32, k=5), native and this floor are 404 ms and 406 ms —
-# the native build really does emit AVX-512, and it buys nothing over AVX2.
-# Baseline x86-64 is 542 ms, because `wide::f32x8` has no 256-bit register to
-# lower to and falls back to two `f32x4`.
+# number measured here is a number a user gets.
+#
+# The floor is worth having and worth *only* having. Measured on the
+# reference shape (n=50k+50k, d=32, k=5, self-join) with the current
+# scalar/algebraic kernel:
+#
+#   -C target-cpu=x86-64          408 ms
+#   -C target-feature=+avx2,+fma  340 ms   <- this file
+#   -C target-cpu=native          326 ms
+#
+# Baseline -> AVX2 is 17%: the auto-vectorizer has no 256-bit register to
+# lower the distance loop to without it. AVX2 -> native is a further 4% and
+# is *not* worth taking, because it is not uniform — at d=8 the same native
+# build is 227 ms against AVX2's 124 ms, where a 512-bit vector is simply
+# the wrong shape for a one-vector distance.
+#
+# Note this retires an older conclusion recorded in OPTIMIZE.md, that
+# AVX-512 "buys nothing over AVX2". That was true of the `wide::f32x8`
+# kernel, and true *because* of it: an f32x8 has nothing wider to lower to,
+# so the AVX-512 build emitted %zmm elsewhere and left the hot loop at 256
+# bits. Now that LLVM picks the width, the wider target does move the
+# number — just not in the same direction at every d.
 #
 # Building on a pre-AVX2 CPU: override with
-#   RUSTFLAGS="-C target-cpu=native" cargo build --release
-# (the environment variable replaces this section wholesale).
+#   RUSTFLAGS="-C target-cpu=x86-64" cargo build --release
+# (the environment variable replaces this section wholesale). The result is
+# still ~13% faster than the pre-1.98 kernel was at the same baseline.
 [target.'cfg(any(target_arch = "x86_64", target_arch = "x86"))']
 rustflags = ["-C", "target-feature=+avx2,+fma"]

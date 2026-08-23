@@ -6,13 +6,20 @@ tables, equivalent results — at 25–75× the speed. It is a native
 :class:`torann.base.BaseIndex` instead of inheriting.
 
 **Published x86-64 wheels require AVX2 and FMA.** That is not a portability
-oversight, it is worth 25%: `wide::f32x8` has no 256-bit register to lower to
-without AVX, so it falls back to two `f32x4` and the query kernel goes from
-406 ms to 542 ms on the reference shape. AVX2 is Haswell
-(2013) and Excavator (2015) onward; AVX-512 buys nothing further and is not
-required. `_cpu_supports_avx2` gates the import so a pre-AVX2 machine falls
-back to the pure-Python backend instead of taking SIGILL on the first packed
+oversight, it is worth 17%: the distance kernel is a plain scalar loop that
+LLVM auto-vectorizes, and without AVX there is no 256-bit register for it to
+lower to — the query goes from 340 ms to 408 ms on the reference shape.
+AVX2 is Haswell (2013) and Excavator (2015) onward. AVX-512 is *not*
+required and not wanted: it is a further 4% at d=32 but nearly 2x worse at
+d=8, where a 512-bit vector is the wrong shape for a one-vector distance.
+`_cpu_supports_avx2` gates the import so a pre-AVX2 machine falls back to
+the pure-Python backend instead of taking SIGILL on the first packed
 instruction — a slow index beats a crash with no traceback.
+
+The floor is a property of how the wheel is *built*, not of the source: the
+kernel names no vector type and no intrinsic, so a source build on a
+pre-AVX2 machine (`RUSTFLAGS="-C target-cpu=x86-64"`) is correct and still
+~13% faster than the hand-vectorized kernel this replaced.
 """
 
 from __future__ import annotations

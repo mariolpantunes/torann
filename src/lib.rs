@@ -21,18 +21,24 @@
 //! through per-chunk buffers with no per-point allocation, and a batch of
 //! queries is answered by a **bucket-centric join** (`query_block`) that
 //! loads each bucket once per block instead of once per query. Refinement
-//! runs on eight f32 accumulators, four tile rows at a time.
+//! scores four tile rows at a time (`ROWS`) through a plain `s +=` loop
+//! that LLVM vectorizes, given the reassociation freedom of the Rust 1.98
+//! algebraic float methods (see [`l1`]).
 //!
-//! Two things about this file are load-bearing and easy to undo by
+//! Three things about this file are load-bearing and easy to undo by
 //! accident. The kernel is bound by **dependency-chain latency, not
 //! instruction count** — reducing instructions made it measurably worse,
 //! and the fix was ILP (`ROWS = 4`), so a "simplification" that shortens
-//! the code is likely to cost time. And the index is **execution-bound,
-//! not memory-bound**, so optimisations justified by fewer memory loads do
-//! not convert: two attempts to raise bucket reuse (bucket-major work
+//! the code is likely to cost time. The index is **execution-bound, not
+//! memory-bound**, so optimisations justified by fewer memory loads do not
+//! convert: two attempts to raise bucket reuse (bucket-major work
 //! partitioning, and reordering queries by hash key) each reduced traffic
 //! as designed and moved the clock by nothing or less. A proposal here
-//! needs a cycle argument, not a traffic argument.
+//! needs a cycle argument, not a traffic argument. And the distance kernel
+//! is **written scalar on purpose** — `algebraic_add` is what makes that
+//! fast, and hand-vectorizing it back (as this file did with
+//! `wide::f32x8` until 1.98) costs 8-50%, most of it at the dimensions
+//! where a hand-picked eight lanes are the wrong shape.
 
 // The kernels index with `for i in 0..n` on purpose: most loops write to
 // several arrays at once and were profile-tuned in this exact shape. The
@@ -46,7 +52,6 @@ use numpy::{
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
-use wide::f32x8;
 
 /// Lower bound: first index whose value is >= v.
 #[inline]
@@ -67,93 +72,115 @@ fn wrap_unit(s: f64) -> f64 {
     s - s.floor()
 }
 
-/// Toroidal L1 in f32, on eight parallel accumulators.
+/// Toroidal L1 in f32 of one pair, `D` dimensions (`D = 0`: use `d`).
 ///
-/// f32 addition is not associative, so the eight independent lanes are what
-/// makes the loop vectorizable at all — a plain `s +=` chain cannot be. The
-/// lanes are also what pins the summation order, and therefore the results:
-/// eight is not a tuning knob, it is the contract (`chunks_exact(8)` into
-/// `acc[j]`, tail into `s`, then `s + acc.sum()`).
+/// `algebraic_add`/`algebraic_sub` (Rust 1.98) hand LLVM the reassociation
+/// freedom that plain f32 `+` withholds, and that freedom is what lets this
+/// be a plain `s +=` chain at all: the auto-vectorizer splits it into as
+/// many independent accumulators as the target has registers, at the
+/// target's *native* width, and folds them with a tree at the end. The
+/// `wide::f32x8` kernel this replaced had to spell all of that out by hand
+/// and was pinned to eight lanes on every target — which cost it the
+/// dimensions below one full vector (`d < 8` never vectorized at all) and
+/// the vector width above it.
 ///
-/// The eight lanes are one `wide::f32x8` because **LLVM does not vectorize
-/// the scalar form**: written with slices, or with the chunks re-typed to
-/// `&[f32; 8]`, the query loop disassembles to `vsubss`/`vminss` with not a
-/// single packed op, and the query runs 1.55× slower. `wide` is a safe,
-/// stable-Rust SIMD wrapper — no `unsafe` here, no nightly `std::simd` —
-/// that lowers to AVX2 where the target has it and to SSE where it does
-/// not, keeping the lane mapping either way.
+/// `D` is the dimensionality when the caller knows it at compile time.
+/// It is not a micro-optimisation: with a runtime trip count LLVM must
+/// guard the vector loop and emit a scalar epilogue, and at one, two or
+/// three vectors' worth of dimensions that scaffolding costs more than
+/// the arithmetic it guards. Const `D` deletes both. `score_tile`'s
+/// dispatch says which values earn it and why not more.
 ///
-/// **Which is why the build pins an AVX2 floor.** Without it there is no
-/// 256-bit register to lower to, `f32x8` becomes two `f32x4`, and the
-/// query goes 406 ms -> 542 ms on the reference shape. See
-/// `.cargo/config.toml` and `torann/rust.py`.
+/// **What this gives up.** Reassociation means the summation order is the
+/// compiler's to choose, so it is no longer part of the contract the way
+/// the old kernel's eight fixed lanes were. These are compile-time
+/// freedoms rather than runtime ones — a given machine instruction always
+/// does the same thing — but the standard library is explicit that the
+/// same source may be optimized differently at different call sites, so
+/// bit-identity is not promised even within one binary, let alone across
+/// builds or LLVM versions. Here that means the `D`-specialized
+/// instantiations and the runtime-`d` one may fold the same `d` terms in
+/// different orders.
+///
+/// The error that admits is a few ulp on a sum of `d` non-negative terms
+/// each in `[0, 0.5]` — orders of magnitude inside the `atol=1e-5` the
+/// cross-backend conformance test holds every backend to, and far too
+/// small to move a distance a caller can observe. What it can do, rarely,
+/// is reorder two candidates already within an ulp of each other, which is
+/// why that test allows ids to differ on ties (it requires 99.5%
+/// agreement).
+///
+/// That was measured rather than assumed, on fixed indexes so that no
+/// converging loop could confound it: against the pre-1.98 kernel, recall
+/// is *identical to five decimals* and the returned neighbour ids are
+/// identical at d = 2, 8, 16, 24, 32 (k=5 and k=64) and 64, with distances
+/// agreeing to ~1e-7 relative. The per-query and batched paths — which now
+/// reach different instantiations of this function — still agree exactly
+/// on all six shapes of the ESS suite.
+///
+/// The hash keys are untouched by any of this. They are computed in f64
+/// with plain operators (see `point_key`), and *they* are the byte-identical
+/// contract against `lsh.py` — reassociating them was measured too, and
+/// bought nothing (OPTIMIZE.md), so it was not done.
+#[inline(always)]
+fn l1<const D: usize>(a: &[f32], b: &[f32], d: usize) -> f32 {
+    let n = if D == 0 { d } else { D };
+    let mut s = 0.0f32;
+    for j in 0..n {
+        let t = a[j].algebraic_sub(b[j]).abs();
+        let w = 1.0f32.algebraic_sub(t);
+        s = s.algebraic_add(if t < w { t } else { w });
+    }
+    s
+}
+
+/// Toroidal L1 in f32, dimensionality known only at run time.
 #[inline]
 fn dist_l1_32(a: &[f32], b: &[f32]) -> f32 {
-    let n = a.len().min(b.len());
-    let nc = n / 8;
-    let ones = f32x8::splat(1.0);
-    let mut acc = f32x8::ZERO;
-    for c in 0..nc {
-        let o = c * 8;
-        let va = f32x8::new(a[o..o + 8].try_into().unwrap());
-        let vb = f32x8::new(b[o..o + 8].try_into().unwrap());
-        let t = (va - vb).abs();
-        acc += t.fast_min(ones - t);
-    }
-    let mut s = 0.0f32;
-    for j in nc * 8..n {
-        let t = (a[j] - b[j]).abs();
-        let w = 1.0f32 - t;
-        s += if t < w { t } else { w };
-    }
-    s + acc.to_array().iter().sum::<f32>()
+    l1::<0>(a, b, a.len().min(b.len()))
 }
 
 /// Tile rows scored per call of [`dist_l1_rows`].
+///
+/// The kernel is bound by dependency-chain latency, not instruction count,
+/// so what matters is having several independent accumulator chains in
+/// flight; `ROWS` rows give `ROWS` of them, and the query chunk is loaded
+/// once for all of them. Four was profile-tuned and eight measured worse.
 const ROWS: usize = 4;
 
 /// Toroidal L1 of one query against `ROWS` consecutive tile rows.
-///
-/// Bit-identical to calling [`dist_l1_32`] on each row — same lanes, same
-/// order — but it exists because the single-row kernel is **latency** bound,
-/// not throughput bound. Per pair, that one has a serial `vaddps` chain over
-/// the chunks and then a serial 8-lane horizontal reduction (the
-/// shuffle/`vaddss` ladder), ~30 cycles of dependent work with nothing to
-/// overlap it with; measured 90 cycles/pair single-threaded on d=32 for ~66
-/// instructions. `ROWS` rows give `ROWS` independent accumulator chains and
-/// `ROWS` independent reductions, which interleave, and the query chunk is
-/// loaded once for all of them.
-#[inline]
-fn dist_l1_rows(q: &[f32], tile: &[f32], d: usize) -> [f32; ROWS] {
-    let nc = d / 8;
-    let ones = f32x8::splat(1.0);
-    let mut acc = [f32x8::ZERO; ROWS];
-    for c in 0..nc {
-        let o = c * 8;
-        let vq = f32x8::new(q[o..o + 8].try_into().unwrap());
-        for r in 0..ROWS {
-            let b = r * d + o;
-            let t = (vq - f32x8::new(tile[b..b + 8].try_into().unwrap())).abs();
-            acc[r] += t.fast_min(ones - t);
-        }
-    }
+#[inline(always)]
+fn dist_l1_rows<const D: usize>(q: &[f32], tile: &[f32], d: usize) -> [f32; ROWS] {
+    let n = if D == 0 { d } else { D };
     let mut out = [0.0f32; ROWS];
     for r in 0..ROWS {
-        let mut s = 0.0f32;
-        for j in nc * 8..d {
-            let t = (q[j] - tile[r * d + j]).abs();
-            let w = 1.0f32 - t;
-            s += if t < w { t } else { w };
-        }
-        out[r] = s + acc[r].to_array().iter().sum::<f32>();
+        out[r] = l1::<D>(q, &tile[r * n..(r + 1) * n], n);
     }
     out
 }
 
 /// Hint the cache that an address is about to be read (gather and refine
 /// walk effectively random locations, so the hardware prefetcher cannot
-/// help). No-op off x86_64. Safety: prefetch never faults, and every call
-/// site passes an in-bounds reference anyway.
+/// help). No-op off x86_64.
+///
+/// **The only `unsafe` left in this crate**, and worth being precise about
+/// what kind it is. `_mm_prefetch` cannot fault, cannot alias and cannot
+/// race — it is a hint that the hardware is free to ignore, and it is
+/// `unsafe` only because every `core::arch` intrinsic is (they are gated on
+/// target features rather than on any memory property). Since
+/// `AtomicI64::from_mut_slice` retired the raw-pointer `SendPtr` in
+/// `compute_keys`, no unchecked aliasing, lifetime or thread-safety claim
+/// remains anywhere in the file. Every call site here passes an in-bounds
+/// reference regardless.
+///
+/// It stays because it is paid for and there is no safe stable
+/// substitute. Deleting it costs **+4.1% at d=2 and +3.3% at d=64** (and
+/// is free at d=8 and d=32, where it does nothing). Writing it in safe
+/// Rust as a discarded real load — `black_box(*r)` — is *worse than
+/// either*, +3.1% at d=32 and +6.2% at d=2, because a load occupies a load
+/// port and can stall, which is the one thing a non-blocking hint will not
+/// do. `std::intrinsics::prefetch_read_data` is the safe-ish spelling and
+/// is nightly-only, so it is not an option for a published wheel.
 #[inline(always)]
 fn prefetch<T>(r: &T) {
     #[cfg(target_arch = "x86_64")]
@@ -490,17 +517,33 @@ impl RustLshIndex {
 
     /// keys\[t * n + i\] for point rows [row0, row0 + n).
     fn compute_keys(&self, row0: usize, n: usize) -> Vec<i64> {
+        use std::sync::atomic::{AtomicI64, Ordering::Relaxed};
         let mut keys = vec![0i64; self.l * n];
         // Parallel over point chunks; each chunk fills a small t-major
         // buffer (point row stays in L1 across all tables), then lands in
-        // the shared array with one contiguous copy per table. Chunk
-        // writes are disjoint by construction. Chunk size shrinks with n
-        // so small tiers (the per-epoch update) still fan out over all
-        // workers.
+        // the shared array one contiguous run per table. Chunk writes are
+        // disjoint by construction — but *by construction* is an argument,
+        // not a proof the compiler can check, and the shape (each worker
+        // scattering into `l` separate runs of one shared buffer) is not
+        // one `par_chunks_mut` can express. It used to be spelled with a
+        // raw pointer behind a hand-written `unsafe impl Sync`, which
+        // silences the checker for the whole buffer, not just for the
+        // disjointness being claimed.
+        //
+        // `AtomicI64::from_mut_slice` (Rust 1.98) buys the same sharing
+        // with none of that: it reborrows the `&mut [i64]` we already own
+        // exclusively as `&[AtomicI64]`, which is `Sync` on its own terms,
+        // so rayon takes it with no `unsafe` and no unchecked claim. The
+        // stores are `Relaxed` and disjoint, and the borrow ends before
+        // `keys` is returned, so there is no ordering to reason about and
+        // no atomic left in the result. On x86-64 a relaxed 64-bit store
+        // is a plain `mov` — see OPTIMIZE.md for what it costs (nothing
+        // measurable) against the memcpy it replaced.
+        //
+        // Chunk size shrinks with n so small tiers (the per-epoch update)
+        // still fan out over all workers.
         let chunk = (n.div_ceil(4 * rayon::current_num_threads())).clamp(16, 1024);
-        struct SendPtr(*mut i64);
-        unsafe impl Sync for SendPtr {}
-        let out = SendPtr(keys.as_mut_ptr());
+        let out: &[AtomicI64] = AtomicI64::from_mut_slice(&mut keys);
         (0..n.div_ceil(chunk)).into_par_iter().for_each(|c| {
             let base = c * chunk;
             let len = chunk.min(n - base);
@@ -512,14 +555,10 @@ impl RustLshIndex {
                     buf[t * len + i] = self.point_key(x, t);
                 }
             }
-            let p = &out;
             for t in 0..self.l {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        buf.as_ptr().add(t * len),
-                        p.0.add(t * n + base),
-                        len,
-                    );
+                let dst = &out[t * n + base..t * n + base + len];
+                for (slot, &v) in dst.iter().zip(&buf[t * len..(t + 1) * len]) {
+                    slot.store(v, Relaxed);
                 }
             }
         });
@@ -834,7 +873,7 @@ impl RustLshIndex {
     /// held in a register across the tile.
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn score_tile(
+    fn score_tile<const D: usize>(
         &self,
         group: &[(i64, u32)],
         tile: &[f32],
@@ -856,7 +895,7 @@ impl RustLshIndex {
             let mut worst = if len == k { h[0] } else { WORST };
             let mut i = 0;
             while i + ROWS <= nt {
-                let ds = dist_l1_rows(qrow, &tile[i * d..(i + ROWS) * d], d);
+                let ds = dist_l1_rows::<D>(qrow, &tile[i * d..(i + ROWS) * d], d);
                 for r in 0..ROWS {
                     let (bits, id) = (ds[r].to_bits(), tids[i + r]);
                     if hless((bits, id), worst) && id != ex {
@@ -867,7 +906,7 @@ impl RustLshIndex {
                 i += ROWS;
             }
             while i < nt {
-                let bits = dist_l1_32(qrow, &tile[i * d..(i + 1) * d]).to_bits();
+                let bits = l1::<D>(qrow, &tile[i * d..(i + 1) * d], d).to_bits();
                 let id = tids[i];
                 if hless((bits, id), worst) && id != ex {
                     heap_offer(h, &mut len, bits, id);
@@ -990,7 +1029,27 @@ impl RustLshIndex {
                         tids[j] = id;
                     }
                     let n = chunk.len();
-                    self.score_tile(group, &tile[..n * d], &tids[..n], q32, exq, heaps, hlen, k);
+                    let (tl, ti) = (&tile[..n * d], &tids[..n]);
+                    // Dispatch the dimensionality into the kernel's type,
+                    // once per tile (a few hundred pairs), so the match is
+                    // free. **Only 8, 16 and 24 are specialized, and
+                    // widening that list makes it slower.** Those three are
+                    // the one-, two- and three-vector cases, where the
+                    // vector loop's guard and scalar epilogue cost more
+                    // than the arithmetic they guard: const `D` deletes
+                    // both and is worth 20-25%. From `d = 32` up the loop amortises
+                    // the guards on its own and a constant trip count
+                    // instead invites LLVM to *fully unroll*, which is
+                    // 41% (d=32) to 73% (d=64) slower than the vectorized
+                    // loop the runtime-`d` instantiation gets. Below 8
+                    // there is no vector loop to guard and const `D` costs
+                    // 20% as well. Measured, all of it — see OPTIMIZE.md.
+                    match d {
+                        8 => self.score_tile::<8>(group, tl, ti, q32, exq, heaps, hlen, k),
+                        16 => self.score_tile::<16>(group, tl, ti, q32, exq, heaps, hlen, k),
+                        24 => self.score_tile::<24>(group, tl, ti, q32, exq, heaps, hlen, k),
+                        _ => self.score_tile::<0>(group, tl, ti, q32, exq, heaps, hlen, k),
+                    }
                 }
             }
         }
