@@ -50,6 +50,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from torann import ToroidalNN  # noqa: E402
+# CE lives here, not in ess.utils, which no longer exports it.
+from benchmark import quality  # noqa: E402
 from torann.brute import exact_knn, pairwise_l1  # noqa: E402
 
 try:
@@ -276,7 +278,7 @@ if __name__ == "__main__":
                 rows.append({
                     "dim": dim, "anchors": anchors, "candidates": cands,
                     "arm": arm, "seed": seed, **info,
-                    "clark_evans": float(ess.utils.toroidal_clark_evans(pts)),
+                    "clark_evans": float(quality(pts)[0]),
                     "separation": float(ess.utils.toroidal_separation(pts)),
                 })
                 print(f"  [d={dim} {arm} seed={seed}: "

@@ -138,7 +138,7 @@ def run(dim, anchors, candidates, block, seed=0):
         "total_s": total,
         **{p: stats.get(p, 0.0) for p in PHASES},
         "epochs": stats.get("epochs_total"),
-        "clark_evans": ess.utils.toroidal_clark_evans(pts),
+        "separation": ess.utils.toroidal_separation(pts),
         "mode": "lsh" if index.is_approximate else "brute",
         "backend": index.backend_name or "brute",
         "tables": index.n_tables,
@@ -155,7 +155,7 @@ def run(dim, anchors, candidates, block, seed=0):
 def table(rows, ref=None):
     """Print one row per shape; with `ref`, add the A/B comparison."""
     head = ["d", "anchors", "cands", "mode", "L", "total", "query",
-            "setup", "epochs", "CE", "recall"]
+            "setup", "epochs", "sep", "recall"]
     if ref:
         head += ["speed-up", "query x", "same?"]
     print("| " + " | ".join(head) + " |")
@@ -166,7 +166,7 @@ def table(rows, ref=None):
             str(r["tables"]), f"{r['total_s']:.2f}s",
             f"{r['query_s']:.2f}s ({100 * r['query_s'] / r['total_s']:.0f}%)",
             f"{100 * r['setup_s'] / r['total_s']:.0f}%",
-            str(r["epochs"]), f"{r['clark_evans']:.4f}",
+            str(r["epochs"]), f"{r['separation']:.4f}",
             "exact" if np.isnan(r["recall"]) else f"{r['recall']:.3f}",
         ]
         if ref:

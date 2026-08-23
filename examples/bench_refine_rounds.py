@@ -43,6 +43,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from torann import ToroidalNN  # noqa: E402
+# CE lives here, not in ess.utils, which no longer exports it.
+from benchmark import quality  # noqa: E402
 
 try:
     import ess
@@ -57,7 +59,7 @@ CASES = ((2, 256), (8, 512), (32, 2000))
 
 
 def metrics(points):
-    return (float(ess.utils.toroidal_clark_evans(points)),
+    return (float(quality(points)[0]),
             float(ess.utils.toroidal_separation(points)))
 
 

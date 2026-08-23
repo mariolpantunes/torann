@@ -132,7 +132,10 @@ def quality(points: np.ndarray) -> tuple[float, float]:
     sep = float(nn.min())
     if HAVE_ESS and not _CHECKED:        # the two copies must agree
         _CHECKED.append(True)
-        assert abs(ce - ess.utils.toroidal_clark_evans(pts)) < 1e-9, "CE drift"
+        # ESS dropped `toroidal_clark_evans`; separation is the metric the
+        # two projects still share, so it is the only one to cross-check.
+        # This module keeps the CE definition (`expected_nn`), and the other
+        # example scripts import it from here rather than from `ess.utils`.
         assert abs(sep - ess.utils.toroidal_separation(pts)) < 1e-12
     return ce, sep
 
