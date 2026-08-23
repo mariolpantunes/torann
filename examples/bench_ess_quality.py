@@ -6,12 +6,12 @@ that recall is **0.69** (from an empty anchor tier) and **0.86** (with
 anchors) — well short of 1.0. Recall is a property of the index; it is not
 what ESS is for. This script asks the question that matters instead:
 
-1. **Does the result still disperse?** Every shape is scored with the
-   metrics that hold at every dimension — toroidal Clark-Evans (1.0 =
-   uniform, higher = more regular) and separation, both in toroidal L1 —
-   against two baselines on the same points: Latin-hypercube and uniform
-   random. See `metrics` for why coverage and fill distance are not in
-   the panel. If ESS at recall 0.69 does not beat LHS, the index is not
+1. **Does the result still disperse?** Every shape is scored with
+   toroidal separation — the shared definition in `torann.metrics`, higher
+   is better — against two baselines on the same points: Latin-hypercube
+   and uniform random. See `metrics` for why coverage, fill distance and
+   Clark-Evans are not in the panel. If ESS at recall 0.69 does not beat
+   LHS, the index is not
    delivering exploration, whatever its timings say.
 2. **Is recall the thing holding quality back?** The d=32 shapes are re-run
    with the index forced to a higher-recall configuration (more tables,
@@ -67,13 +67,18 @@ HIGH_RECALL = {"num_tables": 48, "probes": 8}
 
 
 def metrics(points, dim):
-    """The two metrics worth reporting, both in toroidal L1.
+    """The one metric worth reporting here: toroidal separation.
 
-    Toroidal Clark-Evans (1.0 = uniform at every d, since the null is the
-    exact fixed-n expectation rather than the Poisson asymptotic) and
-    separation, the minimum pairwise distance.
+    The minimum pairwise distance in toroidal L1, from the shared
+    definition in `torann.metrics` — one definition for this project and
+    ESS, so a rename in either cannot leave the other reporting a metric it
+    no longer computes.
 
-    Grid coverage and the fill distance are deliberately absent. Coverage
+    Clark-Evans, grid coverage and the fill distance are deliberately
+    absent. CE only resolves designs to about d=16: above that,
+    concentration of measure flattens the nearest-neighbour *mean* and
+    every design scores alike (separation is a minimum over the same
+    distances and survives). Coverage
     saturates and then inverts at d=8 (measured: LHS 0.988 > ESS 0.981 =
     uniform 0.981) and cannot be built at all past d~20, since 2 cells per
     dimension is already 2^d cells. The fill distance is the metric that
@@ -81,7 +86,7 @@ def metrics(points, dim):
     d — it moves +46% on a set with a ball emptied out of it, where CE
     moves -3% — but at d=32 with n=4000 no design can cover the torus and
     it goes flat (ESS 5.708 vs uniform 5.750, 0.7%), while separation still
-    shows a 40% margin. Two metrics that hold at every dimension beat four
+    shows a 40% margin. One metric that holds at every dimension beats four
     that each hold at some.
 
     Args:
@@ -89,7 +94,7 @@ def metrics(points, dim):
         dim (int): Dimensionality (unused; kept for call-site symmetry).
 
     Returns:
-        dict: Clark-Evans and separation, both toroidal L1.
+        dict: The toroidal-L1 separation, under key ``"separation"``.
     """
     return {
         "separation": float(ess.utils.toroidal_separation(points)),

@@ -230,7 +230,7 @@ def render(sweep, abl_rows):
 
     def pct(shape, arm):
         s = stats[shape]
-        return 100 * (s[arm]["ce"] - s["exact"]["ce"]) / s["exact"]["ce"]
+        return 100 * (s[arm]["sep"] - s["exact"]["sep"]) / s["exact"]["sep"]
 
     empty32 = next(s for s in shapes if s[0] == 32 and s[1] == 0)
     fill32 = next((s for s in shapes if s[0] == 32 and s[1] > 0), None)
@@ -243,7 +243,7 @@ def render(sweep, abl_rows):
         facets.append(
             f'<div class="facet"><h3>d = {dim} <span>&nbsp;·&nbsp; {start}'
             f'&nbsp;·&nbsp; {anchors}+{cands}</span></h3>'
-            f'{bars(stats[shape], "ce", stats[shape]["uniform"]["ce"])}</div>')
+            f'{bars(stats[shape], "sep", stats[shape]["uniform"]["sep"])}</div>')
 
     abl_tables = "".join(
         f'<section><h3>d = {d} &nbsp;·&nbsp; '
@@ -297,11 +297,11 @@ def render(sweep, abl_rows):
 <section>
   {tiles([
       (f"{abs(pct(empty32, 'top2k')):.2f}%",
-       ("CE cost of halving recall at d=32, empty start — the slack the "
-       "index can spend"), False),
+       ("separation cost of halving recall at d=32, empty start — the "
+       "slack the index can spend"), False),
       (f"{abs(pct(empty32, 'rank1-4k')):.0f}%",
-       ("CE cost of losing all true neighbours, though substitutes are only "
-       "5% further away"), True),
+       ("separation cost of losing all true neighbours, though substitutes "
+       "are only 5% further away"), True),
       ("86%",
        ("how hard the 64th neighbour pushes relative to the 1st at d=32 — "
        "the force law cannot discriminate"), True),
@@ -356,8 +356,8 @@ def render(sweep, abl_rows):
     <div class="verdict">
       <p class="eyebrow">Answer</p>
       <p><strong>Recall has a floor, not a price.</strong> Half the true
-      neighbours can go almost free — {abs(pct(empty32, 'top2k')):.2f}% CE at
-      d=32{"" if not fill32 else
+      neighbours can go almost free — {abs(pct(empty32, 'top2k')):.2f}%
+      separation at d=32{"" if not fill32 else
       f", {abs(pct(fill32, 'top2k')):.2f}% from the filled start"} — but
       losing all of them collapses the result to the uniform null, even
       when the substitutes are only 5% further away. A distance
@@ -504,7 +504,7 @@ def render(sweep, abl_rows):
   <div class="prose stack">
     <div class="verdict warn">
       <p class="eyebrow">The contradiction worth resolving first</p>
-      <p>Imposed recall 0.5 costs <strong>0.45%</strong> CE. But cutting
+      <p>Imposed recall 0.5 costs <strong>0.45%</strong> separation. But cutting
       tables to L=12 costs <strong>4.3%</strong> and L=8 costs
       <strong>7.3%</strong>. Those cannot both describe "less recall", so
       cutting tables must be doing something else.</p>

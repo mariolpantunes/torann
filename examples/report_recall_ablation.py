@@ -57,11 +57,14 @@ def aggregate(rows):
     for shape, arms in by.items():
         out[shape] = {}
         for arm, rs in arms.items():
-            ce = np.array([r["separation"] for r in rs])
+            # One track, named for what it holds. This carried a `ce`
+            # column beside `sep` after Clark-Evans was retired, both fed
+            # from `separation` -- the same number twice, one of them under
+            # the name of a metric that no longer exists.
+            sep = np.array([r["separation"] for r in rs])
             out[shape][arm] = {
-                "ce": float(ce.mean()),
-                "ce_sd": float(ce.std(ddof=1)) if len(ce) > 1 else 0.0,
-                "sep": float(np.mean([r["separation"] for r in rs])),
+                "sep": float(sep.mean()),
+                "sep_sd": float(sep.std(ddof=1)) if len(sep) > 1 else 0.0,
                 "recall": float(np.mean([r["recall"] for r in rs])),
                 "ratio": float(np.mean([r["mean_ratio"] for r in rs])),
                 "epochs": float(np.mean([r["epochs"] for r in rs])),
@@ -80,7 +83,7 @@ def bars(shape_stats, key, null_value):
 
     Args:
         shape_stats (dict): ``{arm: stats}`` for one shape.
-        key (str): ``"ce"`` or ``"sep"``.
+        key (str): the stats key to plot, e.g. ``"sep"``.
         null_value (float): The uniform arm's value, drawn as the rule.
 
     Returns:
@@ -114,9 +117,9 @@ def bars(shape_stats, key, null_value):
 
 def table(shape_stats):
     """The full numeric record for one shape — every column, no rounding games."""
-    head = ("arm", "recall", "mean ratio", "Clark-Evans", "vs exact",
-            "separation", "epochs")
-    base = shape_stats["exact"]["ce"] if "exact" in shape_stats else None
+    head = ("arm", "recall", "mean ratio", "separation", "vs exact",
+            "epochs")
+    base = shape_stats["exact"]["sep"] if "exact" in shape_stats else None
     rows = ["<div class=\"tablewrap\"><table><thead><tr>"
             + "".join(f"<th>{h}</th>" for h in head) + "</tr></thead><tbody>"]
     for arm in ARM_ORDER:
@@ -124,14 +127,14 @@ def table(shape_stats):
             continue
         s = shape_stats[arm]
         delta = ("—" if base is None or arm == "exact"
-                 else f"{100 * (s['ce'] - base) / base:+.2f}%")
-        sd = f" <span class=\"sd\">±{s['ce_sd']:.4f}</span>" if s["seeds"] > 1 else ""
+                 else f"{100 * (s['sep'] - base) / base:+.2f}%")
+        sd = f" <span class=\"sd\">±{s['sep_sd']:.4f}</span>" if s["seeds"] > 1 else ""
         rows.append(
             f"<tr{' class=\"ctl\"' if arm == 'exact' else ''}>"
             f"<td class=\"arm\">{html.escape(arm)}</td>"
             f"<td>{s['recall']:.3f}</td><td>{s['ratio']:.2f}</td>"
-            f"<td>{s['ce']:.4f}{sd}</td><td>{delta}</td>"
-            f"<td>{s['sep']:.4f}</td><td>{s['epochs']:.0f}</td></tr>")
+            f"<td>{s['sep']:.4f}{sd}</td><td>{delta}</td>"
+            f"<td>{s['epochs']:.0f}</td></tr>")
     rows.append("</tbody></table></div>")
     return "\n".join(rows)
 
@@ -270,17 +273,14 @@ def render(rows, source):
     shapes = sorted(stats, key=lambda s: (-s[0], s[1]))
     seeds = max(v["seeds"] for s in stats.values() for v in s.values())
 
-    facets_ce, facets_sep = [], []
+    facets_sep = []
     for shape in shapes:
         dim, anchors, cands = shape
         s = stats[shape]
-        null_ce = s["uniform"]["ce"]
         null_sep = s["uniform"]["sep"]
         start = "filled start" if anchors else "empty start"
         label = (f'<h3>d = {dim} <span>&nbsp;·&nbsp; {start} &nbsp;·&nbsp; '
                  f'{anchors}+{cands}</span></h3>')
-        facets_ce.append(f'<div class="facet">{label}'
-                         f'{bars(s, "ce", null_ce)}</div>')
         facets_sep.append(f'<div class="facet">{label}'
                           f'{bars(s, "sep", null_sep)}</div>')
 
@@ -309,11 +309,9 @@ def render(rows, source):
     # the other.
     def pct(shape, arm):
         s = stats[shape]
-        return 100 * (s[arm]["ce"] - s["exact"]["ce"]) / s["exact"]["ce"]
-
-    def sep_pct(shape, arm):
-        s = stats[shape]
         return 100 * (s[arm]["sep"] - s["exact"]["sep"]) / s["exact"]["sep"]
+
+    sep_pct = pct   # kept as a name; the two tracks are one metric now
 
     # Never quote an empty-start number beside a filled-start one as though
     # they were the same experiment: they are different jobs, and the filled
@@ -378,8 +376,8 @@ def render(rows, source):
 <section class="prose">
   <h2>Why the earlier evidence looked ambiguous</h2>
   <p>Two measurements pointed opposite ways. Recall 0.69 at d=32 costs only
-  1.28% CE against perfect recall, which suggests recall is cheap to give
-  up. But cutting LSH tables to lower recall costs 4.3% CE, which suggests
+  1.28% separation against perfect recall, which suggests recall is cheap
+  to give up. But cutting LSH tables to lower recall costs 4.3%, which suggests
   it is not. Both can be true, because fewer tables degrades recall
   <em>and</em> locality together — the experiment confounds them.</p>
   <p>This ablation separates the two. The index is exact throughout, so
@@ -399,14 +397,6 @@ def render(rows, source):
   <p>Ordered by how local the selection is. Only the first two arms contain
   true neighbours at all.</p></div>
   <div class="ladder">{ladder}</div>
-</section>
-
-<section>
-  <div class="prose"><h2>Clark-Evans regularity</h2>
-  <p>1.0 is the uniform null at every dimension. Higher is more regular —
-  the thing ESS exists to produce.</p></div>
-  {legend}
-  <div class="facets">{"".join(facets_ce)}</div>
 </section>
 
 <section>
@@ -430,12 +420,12 @@ def render(rows, source):
   {abs(sep_pct(hi, 'rank1-4k')):.0f}% at d={d_hi}.</p>
   <p>The severity is strongly dimension-dependent, and this is the part
   worth not over-reading. At d={d_lo} a near-miss neighbour list is
-  <em>worse than random</em> — CE {stats[lo]['rank1-4k']['ce']:.4f} against a
-  null of {stats[lo]['uniform']['ce']:.4f} — because it actively holds points
+  <em>worse than random</em> — separation {stats[lo]['rank1-4k']['sep']:.4f}
+  against a null of {stats[lo]['uniform']['sep']:.4f} — because it holds points
   together while pushing on the wrong pairs, where random neighbours at
   least apply an isotropic mean-field pressure. At d={d_hi} that gap nearly
-  vanishes ({stats[hi]['rank1-4k']['ce']:.4f} against
-  {stats[hi]['uniform']['ce']:.4f}): once recall is zero, every arm lands on
+  vanishes ({stats[hi]['rank1-4k']['sep']:.4f} against
+  {stats[hi]['uniform']['sep']:.4f}): once recall is zero, every arm lands on
   the null and how local the substitutes were stops mattering.</p>
   <p>The arm as originally specified confirms why it needed replacing. At
   d={d_hi}, <code>ratio2x</code> and <code>uniform</code> agree to four
@@ -456,8 +446,10 @@ def render(rows, source):
   <p>Generated by <code>examples/report_recall_ablation.py</code> from
   <code>{html.escape(source)}</code>. Reproduce with
   <code>python examples/bench_recall_ablation.py --seeds {seeds}</code>.
-  Clark-Evans and separation are both toroidal L1; the CE null is the exact
-  fixed-n expectation, not the Poisson asymptotic.</p>
+  Separation is the shared metric from <code>torann.metrics</code>: the
+  minimum pairwise toroidal-L1 distance, higher is better. A Clark-Evans
+  column used to sit beside it and was removed — it stops resolving designs
+  above d~16.</p>
 </footer>
 </div>
 """
