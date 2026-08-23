@@ -40,7 +40,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from torann import ToroidalNN  # noqa: E402
+from torann import ToroidalNN
 
 try:
     import ess

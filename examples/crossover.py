@@ -20,8 +20,10 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from torann import ToroidalNN  # noqa: E402
-from torann import available_backends  # noqa: E402
+from torann import (
+    ToroidalNN,
+    available_backends,
+)
 
 N_LIST = [500, 1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000]
 M_Q = 1_000

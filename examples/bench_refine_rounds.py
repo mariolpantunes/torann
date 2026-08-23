@@ -42,9 +42,10 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from torann import ToroidalNN  # noqa: E402
 # The shared design metric; see `torann.metrics` for what it replaced.
-from benchmark import quality  # noqa: E402
+from benchmark import quality
+
+from torann import ToroidalNN
 
 try:
     import ess

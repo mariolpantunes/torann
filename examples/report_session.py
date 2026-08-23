@@ -21,8 +21,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from report_recall_ablation import (CSS, aggregate,  # noqa: E402
-                                    bars, table)
+from report_recall_ablation import CSS, aggregate, bars, table
 
 OUT = os.path.join(os.path.dirname(__file__), "out")
 
@@ -139,8 +138,8 @@ def grouped_bars(cats, series_names, values, ymax, unit="%", width=760,
     ns, nc = len(series_names), len(cats)
     group_w = plot_w / nc
     bar_w = min(26, (group_w - 12) / ns)
-    svg = [f'<svg viewBox="0 0 {width} {height}" role="img" '
-           f'aria-label="grouped bar chart">']
+    svg = [(f'<svg viewBox="0 0 {width} {height}" role="img" '
+           f'aria-label="grouped bar chart">')]
     for frac in (0, 0.25, 0.5, 0.75, 1.0):
         y = top + plot_h * (1 - frac)
         svg.append(f'<line class="gridline" x1="{left}" y1="{y:.1f}" '
@@ -177,8 +176,8 @@ def line_chart(xs, ys, xlabels, ymax=100, width=760, height=240,
     n = len(xs)
     px = [left + (plot_w * i / max(n - 1, 1)) for i in range(n)]
     py = [top + plot_h * (1 - y / ymax) for y in ys]
-    svg = [f'<svg viewBox="0 0 {width} {height}" role="img" '
-           f'aria-label="retrieval curve">']
+    svg = [(f'<svg viewBox="0 0 {width} {height}" role="img" '
+           f'aria-label="retrieval curve">')]
     for frac in (0, 0.25, 0.5, 0.75, 1.0):
         y = top + plot_h * (1 - frac)
         svg.append(f'<line class="gridline" x1="{left}" y1="{y:.1f}" '
@@ -298,14 +297,14 @@ def render(sweep, abl_rows):
 <section>
   {tiles([
       (f"{abs(pct(empty32, 'top2k')):.2f}%",
-       "CE cost of halving recall at d=32, empty start — the slack the "
-       "index can spend", False),
+       ("CE cost of halving recall at d=32, empty start — the slack the "
+       "index can spend"), False),
       (f"{abs(pct(empty32, 'rank1-4k')):.0f}%",
-       "CE cost of losing all true neighbours, though substitutes are only "
-       "5% further away", True),
+       ("CE cost of losing all true neighbours, though substitutes are only "
+       "5% further away"), True),
       ("86%",
-       "how hard the 64th neighbour pushes relative to the 1st at d=32 — "
-       "the force law cannot discriminate", True),
+       ("how hard the 64th neighbour pushes relative to the 1st at d=32 — "
+       "the force law cannot discriminate"), True),
       ("93.2%",
        "ceiling on L^0.5 recall from the L1 hash, at any retrieval width", True),
   ])}
@@ -598,7 +597,10 @@ if __name__ == "__main__":
 
     with open(args.sweep) as fh:
         sweep = json.load(fh)
-    abl = [r for p in args.ablation for r in json.load(open(p))]
+    abl = []
+    for path in args.ablation:
+        with open(path, encoding="utf-8") as fh:
+            abl.extend(json.load(fh))
 
     os.makedirs(OUT, exist_ok=True)
     with open(args.out, "w") as fh:

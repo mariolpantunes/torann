@@ -18,7 +18,7 @@ import os
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt                     # noqa: E402
+import matplotlib.pyplot as plt
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "assets")
 

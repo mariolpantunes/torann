@@ -20,15 +20,15 @@ Run from the repository root:  python examples/figures.py
 import os
 import sys
 
-import numpy as np
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt                     # noqa: E402
-from matplotlib import animation                    # noqa: E402
+import matplotlib.pyplot as plt
+from matplotlib import animation
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from torann.brute import exact_knn                  # noqa: E402
+from torann.brute import exact_knn
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "assets")
 

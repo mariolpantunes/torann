@@ -14,8 +14,7 @@ import unittest.mock
 
 import numpy as np
 
-import torann.rust as rust
-from torann import ToroidalNN, available_backends
+from torann import ToroidalNN, available_backends, rust
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -635,6 +634,12 @@ class TestMetrics(unittest.TestCase):
         anchors = np.array([[0.25, 0.25], [0.75, 0.75]])
         batch = np.array([[0.25, 0.25], [0.10, 0.90]])
         self.assertAlmostEqual(toroidal_separation(batch, anchors), 0.0)
+
+    def test_empty_batch_against_anchors(self):
+        """No new points means no pair to score."""
+        from torann.metrics import toroidal_separation
+        self.assertEqual(
+            toroidal_separation(np.zeros((0, 2)), np.ones((3, 2)) * 0.5), 0.0)
 
     def test_anchor_shape_is_checked(self):
         from torann.metrics import toroidal_separation

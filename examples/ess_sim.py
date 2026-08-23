@@ -41,8 +41,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from torann import ToroidalNN                      # noqa: E402
-from torann.brute import exact_knn                 # noqa: E402
+from torann import ToroidalNN
+from torann.brute import exact_knn
 
 try:
     import faiss
@@ -217,9 +217,16 @@ def main():
     out_dir = os.path.join(os.path.dirname(__file__), "out")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "ess_sim.json")
-    rows = json.load(open(path)) if os.path.exists(path) else []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            rows = json.load(fh)
+    else:
+        rows = []
     rows.append(row)
-    json.dump(rows, open(path, "w"), indent=1)
+    # Context-managed: the previous form left the handle to the refcounter,
+    # so the write was not deterministically flushed.
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(rows, fh, indent=1)
     print(json.dumps(row, indent=1))
 
 

@@ -33,6 +33,23 @@ dependencies = [
     "numpy>=1.26.4",
 ]
 
+[project.optional-dependencies]
+# The gate's toolchain, pinned in one place so `pre-commit` and
+# `.github/workflows` cannot run different versions of it. They used to
+# disagree: CI pinned ruff 0.16.1 while a developer machine had 0.15.16, and
+# `language: system` hooks -- which is what these are, deliberately -- run
+# whatever is installed. A commit could pass locally and fail CI on a rule
+# the local ruff did not have yet.
+#
+# Install with: pip install -e ".[dev]"
+dev = [
+    "ruff==0.16.1",
+    "basedpyright==1.39.8",
+    "vulture==2.16",
+    "coverage==7.14.2",
+    "pre-commit",
+]
+
 [project.urls]
 Homepage = "https://github.com/mariolpantunes/torann"
 Documentation = "https://mariolpantunes.github.io/torann/"
@@ -52,6 +69,25 @@ include = [
 
 [tool.ruff]
 line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+# `test/` and `examples/` are linted (they are where the rot happens), but
+# two rules are noise outside the package and are not worth contorting them
+# for:
+#
+#   B023  a closure over a loop variable. Every occurrence here is a
+#         benchmark harness handing a lambda straight to the function that
+#         calls it, in the same iteration -- the deferred-execution bug the
+#         rule exists for cannot arise. Binding each one as a default
+#         argument would obscure what the benchmarks read like.
+#   RUF059 an unused unpacked variable, from `idx, dst = nn.query(...)` where
+#         only one half is asserted on. Naming the other `_dst` costs
+#         readability in a test whose point is what `query` returns.
+#
+# Everything else applies, including the correctness rules: SIM115 caught a
+# real unflushed-write in `examples/ess_sim.py` the first time this ran.
+"test/**" = ["B023", "RUF059"]
+"examples/**" = ["B023", "RUF059"]
 
 [tool.basedpyright]
 typeCheckingMode = "standard"

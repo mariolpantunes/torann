@@ -49,13 +49,10 @@ selects between. Grouped by what you are doing:
     `ToroidalNN.candidates` and `ToroidalNN.dimensions` for the contents; and
     `available_backends` for which implementations this install can reach.
 
-**Score a design**
-    `toroidal_separation` — the shortest toroidal-L1 distance between any
-    two points, i.e. the maximin criterion. It lives here rather than in a
-    caller because it is one exact k-NN scan, and because a shared
-    definition is the only way two projects agree on what "better" means;
-    `torann.metrics` records which competing metrics were measured and why
-    they were rejected.
+**Measure a point set**
+    `toroidal_separation` — the shortest toroidal-L1 distance from a point
+    to any other, i.e. the maximin criterion. See the scope note below for
+    why a *definition* lives here and a *methodology* does not.
 
 Implementations
 ---------------
@@ -72,6 +69,37 @@ the caller:
 * `torann.rust` — the compiled core (`torann._native`, PyO3 + rayon), 25-75x
   faster and byte-identical. Published x86-64 wheels need AVX2; a CPU
   without it falls back to `torann.lsh` rather than crashing.
+
+What this library is responsible for
+------------------------------------
+torann answers *geometric* questions about points on the torus: which points
+are near which, and how far apart they are. That is the index, and it is also
+`torann.metrics` — a metric like `toroidal_separation` is one exact k-NN scan,
+so it belongs beside the scan rather than in whichever caller needed it first.
+
+**torann does not decide what a "good" point set is.** Ranking one design
+against another is a question about the *purpose* the points serve — a
+design of experiments, a space-filling sample, an optimiser's population —
+and the answer depends on that purpose, not on the geometry. That judgement
+belongs to the caller. `torann.metrics` documents which competing metrics
+were measured and how each behaves, so a caller can choose with numbers in
+front of it; it does not choose.
+
+The distinction is not pedantic, it is the fix for a real failure. When the
+definition of a metric lived in one project and the *choice* of metric lived
+in another, a rename in one silently outlived the other: benchmark scripts
+kept asking for keys that no longer existed and died in their reporting
+after completing every run, and one kept printing a lower-is-better number
+under a higher-is-better heading for weeks without ever failing. Definitions
+here, choices in the caller, and neither guessing about the other.
+
+The immediate consumer is `ess` (Empty Space Search), which generates
+space-filling designs on the torus and uses this library both as its
+neighbour engine and as the source of that definition. It ranks its designs
+on discrepancies rather than on any point metric — deliberately, because its
+own objective is a toroidal-L1 repulsion and grading an optimiser with its
+own loss proves nothing. That reasoning is `ess`'s to make, and it lives
+there.
 
 Notes
 -----

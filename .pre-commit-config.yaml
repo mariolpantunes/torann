@@ -53,8 +53,8 @@ repos:
   - repo: local
     hooks:
       - id: ruff
-        name: ruff (torann)
-        entry: ruff check torann
+        name: ruff (torann, test, examples)
+        entry: ruff check torann test examples
         language: system
         files: '(\.py$|^pyproject\.toml$)'
         pass_filenames: false
@@ -76,6 +76,19 @@ repos:
       - id: unittest
         name: unittest
         entry: python -m unittest discover -s test
+        language: system
+        files: '(\.py$|^pyproject\.toml$)'
+        pass_filenames: false
+
+      - id: coverage
+        name: coverage (unittest, --fail-under)
+        # The same run as the `unittest` hook, measured. Kept as a separate
+        # hook so a coverage drop reads as a coverage failure rather than a
+        # test failure. The floor ratchets: raise it when the number rises,
+        # never lower it to make a commit pass.
+        entry: >-
+          bash -c 'python -m coverage run --source=torann -m unittest
+          discover -s test -q && python -m coverage report --fail-under=90'
         language: system
         files: '(\.py$|^pyproject\.toml$)'
         pass_filenames: false

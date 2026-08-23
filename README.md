@@ -164,6 +164,34 @@ and every gathered candidate is refined with the exact toroidal L1 before
 the top-k. Full details: `torann/lsh.py` — the reference implementation,
 normative for the L1 hash.
 
+## Scope: what torann answers, and what it does not
+
+torann answers **geometric** questions about points on the torus — which
+points are near which, and how far apart they are. That is the index, and it
+is also `torann.metrics`: a metric like `toroidal_separation` is one exact
+k-NN scan, so it belongs beside the scan.
+
+```python
+from torann import toroidal_separation
+
+toroidal_separation(design)            # maximin separation of a point set
+toroidal_separation(batch, anchors)    # ...of a batch added to existing points
+```
+
+**torann does not decide what a "good" point set is.** Ranking one design
+against another depends on the purpose the points serve, not on the geometry,
+so that judgement belongs to the caller. `torann/metrics.py` documents which
+competing metrics were measured and how each behaves — including the ones
+that stop discriminating in high dimension — so a caller can choose with
+numbers in front of it. It does not choose.
+
+That line is drawn deliberately. When a metric's *definition* lived in one
+project and the *choice* of metric in another, a rename in one silently
+outlived the other: scripts asked for keys that no longer existed and died in
+their reporting after completing every run, and one printed a lower-is-better
+number under a higher-is-better heading for weeks without ever failing.
+Definitions here, choices in the caller.
+
 ## Benchmarks
 
 Measured on an AMD Ryzen AI 7 PRO 350 (16 threads), d=16, k=32, on a build

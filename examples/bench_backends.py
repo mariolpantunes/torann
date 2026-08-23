@@ -28,8 +28,10 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from torann import ToroidalNN  # noqa: E402
-from torann import available_backends  # noqa: E402
+from torann import (
+    ToroidalNN,
+    available_backends,
+)
 
 BATCH = 3_000
 SIGMA = 0.01
