@@ -16,7 +16,24 @@ from .base import BaseIndex
 __all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1"]
 
 # Element budget for the temporary (queries x points) distance blocks.
-_BUDGET = 1 << 24
+#
+# `pairwise_l1` keeps about ten (m, n) buffers live at once -- eight lane
+# accumulators, a temp and the wall -- so the working set is roughly 80 bytes
+# per element of the block, not 8. At 1 << 24 that is well past any L3 and the
+# loop runs at main-memory speed. Measured over the shapes ESS and OBLESA give
+# this path, 1 << 22 is faster at every one of them and by 6-11% at most:
+#
+#   M/Q/d          1<<20    1<<22    1<<24
+#   400/200/100    22.27    20.56    22.12
+#   400/2048/32    83.52    91.93   102.15
+#   960/512/100   155.66   142.37   154.67
+#   200/4096/100  216.15   189.74   214.30
+#   3840/512/100  567.06   483.76   515.68
+#
+# Blocking cannot change the result -- each row's distances are accumulated
+# the same way whatever the block -- and that was verified rather than assumed
+# at every budget in the table.
+_BUDGET = 1 << 22
 
 # NumPy reduces a contiguous axis with *pairwise* summation: eight lane
 # accumulators, a fixed tree over them, then the tail — and past a 128-element
