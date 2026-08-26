@@ -86,11 +86,15 @@ if _cpu_supports_avx2():
     try:
         # Compiled by maturin; absent from a source checkout, which is
         # exactly what the ImportError below handles.
-        from ._native import RustLshIndex  # type: ignore[reportMissingImports]
+        from ._native import (  # type: ignore[reportMissingImports]
+            RustLshIndex,
+            brute_knn,
+        )
         BaseIndex.register(RustLshIndex)
         AVAILABLE = True
     except ImportError:  # pure-Python install: wrapper falls back to lsh.py
         RustLshIndex = None
+        brute_knn = None
         AVAILABLE = False
 else:
     logger.warning(
@@ -99,6 +103,7 @@ else:
         "Build from the sdist to get a native module tuned for this CPU."
     )
     RustLshIndex = None
+    brute_knn = None
     AVAILABLE = False
 
-__all__ = ["AVAILABLE", "RustLshIndex"]
+__all__ = ["AVAILABLE", "RustLshIndex", "brute_knn"]

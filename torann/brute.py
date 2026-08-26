@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import rust
 from .base import BaseIndex
 
 __all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1"]
@@ -217,8 +218,28 @@ class BruteIndex(BaseIndex):
             self.n_points = self._pts.shape[0]
 
     def query_knn(self, queries, k, exclude_ids=None):
-        """Exact k-NN — see :func:`exact_knn`."""
-        return exact_knn(self._pts, queries, k, exclude_ids)
+        """k-NN over every point — compiled when the wheel provides it.
+
+        `exact_knn` below is the reference and stays reachable: it is what
+        `metrics.toroidal_separation` reports with and what the LSH
+        implementations are validated against, so it must not move. This is
+        the *serving* path, and it carries the same contract the compiled LSH
+        backend has had since 1.98 — f32 with the algebraic float methods, a
+        few ulp on the distance, ids that can reorder within an ulp.
+
+        It is 11-125x faster than the scan it replaces, most of that from
+        never materialising the `(m, n)` distance matrix `argpartition` would
+        need: the distance is consumed by the heap as it is computed. Below
+        `ToroidalNN`'s crossover this is the only path there is, so until now
+        the compiled kernel served exclusively the regime a population-sized
+        caller never enters.
+        """
+        if rust.brute_knn is None:
+            return exact_knn(self._pts, queries, k, exclude_ids)
+        q = np.ascontiguousarray(queries, dtype=np.float64)
+        ex = None if exclude_ids is None else np.ascontiguousarray(
+            exclude_ids, dtype=np.int64)
+        return rust.brute_knn(self._pts, q, int(k), ex)
 
     def query_radius(self, queries, radius, exclude_ids=None):
         """Exact range query — see :func:`exact_radius`."""

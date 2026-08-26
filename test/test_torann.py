@@ -15,6 +15,7 @@ import unittest.mock
 import numpy as np
 
 from torann import ToroidalNN, available_backends, rust
+from torann.brute import exact_knn
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -680,3 +681,57 @@ _parametrize(TestRangeQueries)
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRustBruteKernel(unittest.TestCase):
+    """The compiled scan against the NumPy one it serves in place of.
+
+    Skipped on a pure-Python install, where `BruteIndex` still runs the NumPy
+    path and there is nothing to compare.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if rust.brute_knn is None:
+            raise unittest.SkipTest("compiled backend not available")
+
+    def _case(self, n, m, d, k, seed=0):
+        rng = np.random.default_rng(seed)
+        return rng.random((n, d)), rng.random((m, d)), k
+
+    def test_it_agrees_with_the_reference_scan(self):
+        """Ids exactly, distances to f64 ulp -- not to f32, which is why the
+        kernel is f64 despite the LSH path being f32."""
+        for n, m, d, k in ((60, 30, 100, 8), (400, 200, 100, 8),
+                           (300, 300, 32, 16), (200, 100, 8, 8)):
+            with self.subTest(n=n, m=m, d=d, k=k):
+                pts, q, k = self._case(n, m, d, k)
+                i_np, d_np = exact_knn(pts, q, k)
+                i_rs, d_rs = rust.brute_knn(pts, q, k, None)
+                np.testing.assert_array_equal(i_np, i_rs)
+                np.testing.assert_allclose(d_np, d_rs, atol=1e-12)
+
+    def test_fewer_points_than_k_pads_rather_than_fails(self):
+        pts, q, _ = self._case(3, 5, 4, 8)
+        idx, dst = rust.brute_knn(pts, q, 8, None)
+        self.assertEqual(idx.shape, (5, 8))
+        np.testing.assert_array_equal(idx[:, 3:], -1)
+        self.assertTrue(np.isinf(dst[:, 3:]).all())
+
+    def test_an_excluded_id_is_never_returned(self):
+        """The self-join contract: a query may not find its own point."""
+        pts, _, _ = self._case(40, 1, 6, 5)
+        ex = np.arange(40, dtype=np.int64)
+        idx, _ = rust.brute_knn(pts, pts, 5, ex)
+        self.assertFalse((idx == ex[:, None]).any())
+
+    def test_mismatched_widths_are_refused(self):
+        pts, _, _ = self._case(10, 1, 4, 3)
+        with self.assertRaises(ValueError):
+            rust.brute_knn(pts, np.zeros((2, 5)), 3, None)
+
+    def test_it_wraps_like_the_reference(self):
+        pts = np.array([[0.99], [0.50]])
+        idx, dst = rust.brute_knn(pts, np.array([[0.01]]), 1, None)
+        self.assertEqual(int(idx[0, 0]), 0)
+        self.assertAlmostEqual(float(dst[0, 0]), 0.02, places=9)

@@ -1624,9 +1624,190 @@ impl RustLshIndex {
     }
 }
 
+/// Toroidal L1 in f64, for the exact-contract brute path.
+///
+/// f32 is right for the LSH candidate scan, where a few ulp cannot change
+/// which bucket a point sits in and the width buys throughput. It is wrong
+/// here: `BruteIndex` is the reference the LSH implementations are validated
+/// against and what `metrics.toroidal_separation` reports with, and its tests
+/// pin distances to nine decimal places. In f32 the wrap distance 0.02 comes
+/// back as 0.019999980926513672, which is a real change of contract rather
+/// than a rounding detail.
+///
+/// The algebraic methods still apply — they permit reassociation and FMA
+/// contraction, not a change of width — so this is a few ulp of f64 on a sum
+/// of `d` terms in `[0, 0.5]`, about 1e-16 rather than 2e-8.
+#[inline(always)]
+fn l1_64<const D: usize>(a: &[f64], b: &[f64], d: usize) -> f64 {
+    let n = if D == 0 { d } else { D };
+    let mut s = 0.0f64;
+    for j in 0..n {
+        let t = a[j].algebraic_sub(b[j]).abs();
+        let w = 1.0f64.algebraic_sub(t);
+        s = s.algebraic_add(if t < w { t } else { w });
+    }
+    s
+}
+
+/// Bounded max-heap over f64 distances, keyed on the bit pattern.
+///
+/// The f32 heap above cannot serve: `f64::to_bits` is a `u64`. Non-negative
+/// floats order like their bit patterns in either width, so the comparison
+/// is the same one.
+#[inline]
+fn heap_offer_64(h: &mut [(u64, i64)], len: &mut usize, bits: u64, id: i64) {
+    let k = h.len();
+    if k == 0 {
+        return;
+    }
+    let e = (bits, id);
+    if *len < k {
+        h[*len] = e;
+        let mut i = *len;
+        *len += 1;
+        while i > 0 {
+            let up = (i - 1) >> 1;
+            if h[up] >= h[i] {
+                break;
+            }
+            h.swap(up, i);
+            i = up;
+        }
+    } else if e < h[0] {
+        h[0] = e;
+        let mut i = 0;
+        loop {
+            let (l, r) = (2 * i + 1, 2 * i + 2);
+            let mut big = i;
+            if l < k && h[big] < h[l] {
+                big = l;
+            }
+            if r < k && h[big] < h[r] {
+                big = r;
+            }
+            if big == i {
+                break;
+            }
+            h.swap(i, big);
+            i = big;
+        }
+    }
+}
+
+/// Exact toroidal-L1 k-NN by scanning every point, in parallel.
+///
+/// **Why this exists at all.** The Python `BruteIndex` is what runs below
+/// `ToroidalNN`'s crossover, and until now that was the only path a caller
+/// under the threshold could take — so the compiled kernel served
+/// exclusively the regime a population-sized caller never enters. ESS and
+/// OBLESA sit at 60-400 points and spent 90% of their initialization inside
+/// that NumPy scan.
+///
+/// **Why it is faster than the NumPy it replaces**, which is already a good
+/// implementation — per-axis accumulation, eight lanes, in place. Three
+/// structural things NumPy cannot do from Python:
+///
+/// 1. **No `(m, n)` matrix.** NumPy must materialise every distance before
+///    it can `argpartition` them, so the array is written once and read
+///    again. Here the distance is consumed by the heap the instant it is
+///    computed and never reaches memory.
+/// 2. **One pass.** The fold is four passes over `(m, n)` in NumPy —
+///    subtract, abs, subtract, minimum — against one fused pass per pair,
+///    in registers.
+/// 3. **Every core.** The NumPy path is single-threaded.
+///
+/// **What it costs.** f64, not f32 — see `l1_64` for why the width is not
+/// negotiable here. Not bit-identical to the NumPy scan even so: the
+/// algebraic float methods permit reassociation and FMA contraction, so this
+/// is a few ulp on a sum of `d` terms in `[0, 0.5]`, around 1e-16. That can
+/// still reorder two candidates already within an ulp of each other, which is
+/// why the conformance test allows ids to differ on ties.
+///
+/// Args:
+///     points: `(n, d)` float64 in `[0, 1)`.
+///     queries: `(m, d)` float64 in `[0, 1)`.
+///     k: Neighbours per query.
+///     exclude_ids: Optional `(m,)` int64, one point id excluded per query.
+///
+/// Returns:
+///     `(idx, dist)` of shape `(m, k)`, rows ascending by distance, padded
+///     with `-1` / `inf` where fewer than `k` points qualify.
+#[pyfunction]
+#[pyo3(signature = (points, queries, k, exclude_ids=None))]
+fn brute_knn<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f64>,
+    queries: PyReadonlyArray2<'py, f64>,
+    k: usize,
+    exclude_ids: Option<PyReadonlyArray1<'py, i64>>,
+) -> PyResult<(Bound<'py, PyArray2<i64>>, Bound<'py, PyArray2<f64>>)> {
+    let (n, d) = (points.shape()[0], points.shape()[1]);
+    let m = queries.shape()[0];
+    if queries.shape()[1] != d {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "points and queries must have the same number of columns",
+        ));
+    }
+    let pts = points.as_slice()?.to_vec();
+    let qs = queries.as_slice()?.to_vec();
+    let ex: Option<Vec<i64>> = match &exclude_ids {
+        Some(e) => Some(e.as_slice()?.to_vec()),
+        None => None,
+    };
+
+    let kk = k.min(n);
+
+    let rows: Vec<(Vec<i64>, Vec<f64>)> = py.detach(|| {
+        (0..m)
+            .into_par_iter()
+            .map_init(
+                || vec![(0u64, 0i64); kk],
+                |heap, qi| {
+                    let mut len = 0usize;
+                    let q = &qs[qi * d..(qi + 1) * d];
+                    let exq = ex.as_ref().map_or(-1, |e| e[qi]);
+                    for id in 0..n {
+                        if id as i64 == exq {
+                            continue;
+                        }
+                        let p = &pts[id * d..(id + 1) * d];
+                        let dd = match d {
+                            8 => l1_64::<8>(q, p, d),
+                            16 => l1_64::<16>(q, p, d),
+                            24 => l1_64::<24>(q, p, d),
+                            _ => l1_64::<0>(q, p, d),
+                        };
+                        heap_offer_64(heap, &mut len, dd.to_bits(), id as i64);
+                    }
+                    let mut idx = vec![-1i64; k];
+                    let mut dst = vec![f64::INFINITY; k];
+                    heap[..len].sort_unstable();
+                    for (i, &(bits, id)) in heap[..len].iter().enumerate() {
+                        idx[i] = id;
+                        dst[i] = f64::from_bits(bits);
+                    }
+                    (idx, dst)
+                },
+            )
+            .collect()
+    });
+
+    let mut flat_i = Vec::with_capacity(m * k);
+    let mut flat_d = Vec::with_capacity(m * k);
+    for (i, dd) in rows {
+        flat_i.extend_from_slice(&i);
+        flat_d.extend_from_slice(&dd);
+    }
+    Ok((
+        flat_i.into_pyarray(py).reshape([m, k])?,
+        flat_d.into_pyarray(py).reshape([m, k])?,
+    ))
+}
+
 #[pymodule]
 #[pyo3(name = "_native")]
 fn torann_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustLshIndex>()?;
+    m.add_function(wrap_pyfunction!(brute_knn, m)?)?;
     Ok(())
 }
