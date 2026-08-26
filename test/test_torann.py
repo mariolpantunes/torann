@@ -165,7 +165,13 @@ class TestLSHMode(unittest.TestCase):
         self.cand_ids = np.arange(7000, 8000)
 
     def make(self, **kw):
+        # These classes test LSH behaviour, so they select LSH rather than
+        # inheriting whichever crossover `_BRUTE_DEFAULTS` currently holds.
+        # They used to rely on 7000 points clearing a threshold of 512; when
+        # the compiled brute kernel moved that threshold to 8192 they
+        # silently became brute-mode tests and ten of them failed.
         kw.setdefault("seed", 0)
+        kw.setdefault("brute_threshold", 1)
         return ToroidalNN(backend=self.BACKEND, **kw)
 
     def test_is_approximate(self):
@@ -272,7 +278,13 @@ class TestLifecycle(unittest.TestCase):
         self.cands = rng.random((800, self.D))
 
     def make(self, **kw):
+        # These classes test LSH behaviour, so they select LSH rather than
+        # inheriting whichever crossover `_BRUTE_DEFAULTS` currently holds.
+        # They used to rely on 7000 points clearing a threshold of 512; when
+        # the compiled brute kernel moved that threshold to 8192 they
+        # silently became brute-mode tests and ten of them failed.
         kw.setdefault("seed", 0)
+        kw.setdefault("brute_threshold", 1)
         return ToroidalNN(backend=self.BACKEND, **kw)
 
     def _reference(self, nn, k):
@@ -378,7 +390,13 @@ class TestRangeQueries(unittest.TestCase):
         self.radius = 0.3
 
     def make(self, **kw):
+        # These classes test LSH behaviour, so they select LSH rather than
+        # inheriting whichever crossover `_BRUTE_DEFAULTS` currently holds.
+        # They used to rely on 7000 points clearing a threshold of 512; when
+        # the compiled brute kernel moved that threshold to 8192 they
+        # silently became brute-mode tests and ten of them failed.
         kw.setdefault("seed", 0)
+        kw.setdefault("brute_threshold", 1)
         return ToroidalNN(backend=self.BACKEND, **kw)
 
     def _exact_sets(self):
@@ -534,7 +552,11 @@ class TestBackendEquivalence(unittest.TestCase):
 
     def _run_lifecycle(self, backend):
         rng = np.random.default_rng(11)
-        nn = ToroidalNN(seed=4, backend=backend).fit(
+        # LSH on both sides: this compares the tables, and the two backends
+        # no longer share a crossover -- python switches at 4096, rust at
+        # 8192 now that its brute path is compiled -- so 6800 points would
+        # put one on LSH and the other on brute.
+        nn = ToroidalNN(seed=4, backend=backend, brute_threshold=1).fit(
             rng.random((6000, self.D)), rng.random((800, self.D)), k=16)
         results = [nn.query()]
         for _ in range(3):

@@ -153,7 +153,31 @@ class ToroidalNN:
     # brute path stays competitive to ~4-8k points against the python
     # LSH, while the native implementation wins from the smallest sizes
     # tested.
-    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = {"python": 4096, "rust": 512}
+    #: Exact search below this many points, per backend.
+    #:
+    #: The rust entry was 512, calibrated when the brute path was NumPy. It
+    #: is compiled now, 13-73x faster, and 512 left the new kernel serving
+    #: only the regime below it -- the same mistake in the other direction.
+    #:
+    #: Recalibrated by break-even: LSH costs a tuning pass of
+    #: `O(256 * min(n, 8192) * d)` once, and has to recover it from cheaper
+    #: queries. Batches of 512 queries needed before it does:
+    #:
+    #: ======  ========  =========
+    #: d       n=4096    n=16384
+    #: ======  ========  =========
+    #: 8       1398      27
+    #: 32      84        13
+    #: 100     220       27
+    #: 200     187       23
+    #: ======  ========  =========
+    #:
+    #: An ESS relaxation queries its index once per epoch, so N is in the
+    #: low hundreds: at 4096 points brute wins on every dimension measured,
+    #: at 16384 LSH wins on all of them. 8192 sits between, and the python
+    #: entry is unchanged because that path has no compiled kernel to have
+    #: shifted its crossover.
+    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = {"python": 4096, "rust": 8192}
 
     def __init__(
         self,
@@ -357,14 +381,32 @@ class ToroidalNN:
             q = self._arena[self._rng.choice(n, min(_TUNE_QUERIES, n), replace=False)]
             ref = self._arena[self._rng.choice(
                 n, min(_TUNE_REFERENCE, n), replace=False)]
-            # The metric lives in `brute`, not here. This was the (m, n, d)
-            # block form that `pairwise_l1` exists to avoid, and tuning runs
-            # once per fit: 1.3-2.9x faster on the shapes this samples, and
-            # bit-identical, since `pairwise_l1` reproduces the same
-            # summation rather than approximating it.
-            D = pairwise_l1(q, ref)
+            # This is a k-NN query, so it is served by the k-NN kernel.
+            #
+            # It used to compute the full (256 x 8192) distance block in
+            # NumPy and partition it, and that was **95% of an LSH fit** --
+            # 1.975 s of 2.078 s at n=16384, d=100, against 31 ms for the
+            # Rust index build it exists to configure. The LSH machinery was
+            # never the slow part; choosing its radius was.
+            #
+            # `r_hat` is quantised because the two paths must agree exactly.
+            # `brute_knn` reassociates (the algebraic float methods) where
+            # `pairwise_l1` reproduces NumPy's summation, so they differ in
+            # the last bits -- and `r_hat` feeds `round(0.3 / delta)`, where
+            # a boundary case would pick a different `B` and build entirely
+            # different tables. A wheel with the compiled kernel would then
+            # disagree with a pure-Python install, which is the one contract
+            # this file cannot break. Twelve digits is far below anything a
+            # radius estimated from a random sample can resolve and far above
+            # where the two paths part.
             kk = min(k, ref.shape[0] - 1)
-            r_hat = float(np.median(np.partition(D, kk, axis=1)[:, kk]))
+            knn = getattr(rust, "brute_knn", None)
+            if knn is not None:
+                nth = knn(ref, q, kk + 1, None)[1][:, kk]
+            else:
+                D = pairwise_l1(q, ref)
+                nth = np.partition(D, kk, axis=1)[:, kk]
+            r_hat = float(f"{float(np.median(nth)):.12e}")
         delta = max(1e-9, r_hat / d)  # mean per-dimension neighbour distance
 
         # B: want per-dim collision 1-B*delta comfortably positive; high-d
