@@ -32,8 +32,19 @@ permissions:
 # ships whatever toolchain its image was built with — without this the
 # wheel build can fail on `algebraic_add` with no obvious cause.
 #
-# The interpreter list matches `requires-python = ">=3.12"`. Building 3.10
-# and 3.11 wheels produced artifacts pip would refuse to install.
+# **One wheel per platform, not one per interpreter.** `Cargo.toml` builds
+# against the stable ABI (`abi3-py311`), so a single `cp311-abi3` wheel is
+# installable on every CPython from 3.11 up -- including versions that did
+# not exist when it was built. `--interpreter 3.12` names the interpreter
+# maturin builds *with*, not the ones the artifact serves; passing a list
+# here produced three identical wheels and implied a per-version matrix that
+# no longer exists. `requires-python = ">=3.12"` is what actually sets the
+# floor pip enforces, and it is deliberately one above the abi3 tag: the
+# wheel *could* serve 3.11, the project chooses not to support it.
+#
+# This is also what removes the toolchain requirement from the deployment
+# target. The SLURM cluster has no cargo, and a source build there is not
+# possible; one published wheel installs on its Python 3.14 unchanged.
 
 jobs:
   wheels-linux:
@@ -48,14 +59,14 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter 3.12 3.13 3.14
+          args: --release --out dist --interpreter 3.12
           manylinux: auto
           rust-toolchain: stable
       # The bug this replaced was a wheel that silently lost its AVX2 floor,
       # so assert the floor is in the artifact rather than trusting the
-      # config to have been picked up through maturin's container. Every
-      # wheel is checked, not just one: `dist/*.whl` is one wheel per
-      # interpreter, and they are separate builds.
+      # config to have been picked up through maturin's container. The loop
+      # over `dist/*.whl` stays even though abi3 makes that a single wheel --
+      # it costs nothing and it is the check, not the count, that matters.
       - name: Verify the x86-64 wheels carry the AVX2 floor
         if: matrix.target == 'x86_64'
         run: |
@@ -89,7 +100,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter 3.12 3.13 3.14
+          args: --release --out dist --interpreter 3.12
           rust-toolchain: stable
       - uses: actions/upload-artifact@v7
         with:
@@ -104,7 +115,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x64
-          args: --release --out dist --interpreter 3.12 3.13 3.14
+          args: --release --out dist --interpreter 3.12
           rust-toolchain: stable
       - uses: actions/upload-artifact@v7
         with:
