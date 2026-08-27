@@ -1694,6 +1694,71 @@ fn heap_offer_64(h: &mut [(u64, i64)], len: &mut usize, bits: u64, id: i64) {
     }
 }
 
+/// `l1_64` with the width chosen at run time.
+///
+/// The const-generic specializations exist so LLVM can fully unroll the
+/// widths this workload actually sees; picking between them is the only part
+/// that has to know which ones are worth specializing, so both brute kernels
+/// share this one copy of the decision rather than each carrying a `match`.
+#[inline(always)]
+fn l1_64_dyn(a: &[f64], b: &[f64], d: usize) -> f64 {
+    match d {
+        8 => l1_64::<8>(a, b, d),
+        16 => l1_64::<16>(a, b, d),
+        24 => l1_64::<24>(a, b, d),
+        _ => l1_64::<0>(a, b, d),
+    }
+}
+
+/// The arrays a brute kernel scans, copied out of NumPy once.
+///
+/// Both kernels release the GIL for the scan, so they cannot hold a
+/// `PyReadonlyArray` across it and the data has to be owned. The copy and
+/// the shape checks are identical either way, so they live here once.
+struct BruteInputs {
+    pts: Vec<f64>,
+    qs: Vec<f64>,
+    ex: Option<Vec<i64>>,
+    n: usize,
+    m: usize,
+    d: usize,
+}
+
+fn brute_inputs(
+    points: &PyReadonlyArray2<'_, f64>,
+    queries: &PyReadonlyArray2<'_, f64>,
+    exclude_ids: &Option<PyReadonlyArray1<'_, i64>>,
+) -> PyResult<BruteInputs> {
+    let (n, d) = (points.shape()[0], points.shape()[1]);
+    let m = queries.shape()[0];
+    if queries.shape()[1] != d {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "points and queries must have the same number of columns",
+        ));
+    }
+    // Checked rather than left to index into the slice: the scan runs inside
+    // rayon with the GIL released, where an out-of-range id would surface as
+    // a panic unwinding through the pool instead of as a Python error.
+    if let Some(e) = exclude_ids {
+        if e.shape()[0] != m {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "exclude_ids must have one id per query",
+            ));
+        }
+    }
+    Ok(BruteInputs {
+        pts: points.as_slice()?.to_vec(),
+        qs: queries.as_slice()?.to_vec(),
+        ex: match exclude_ids {
+            Some(e) => Some(e.as_slice()?.to_vec()),
+            None => None,
+        },
+        n,
+        m,
+        d,
+    })
+}
+
 /// Exact toroidal-L1 k-NN by scanning every point, in parallel.
 ///
 /// **Why this exists at all.** The Python `BruteIndex` is what runs below
@@ -1741,19 +1806,14 @@ fn brute_knn<'py>(
     k: usize,
     exclude_ids: Option<PyReadonlyArray1<'py, i64>>,
 ) -> PyResult<(Bound<'py, PyArray2<i64>>, Bound<'py, PyArray2<f64>>)> {
-    let (n, d) = (points.shape()[0], points.shape()[1]);
-    let m = queries.shape()[0];
-    if queries.shape()[1] != d {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "points and queries must have the same number of columns",
-        ));
-    }
-    let pts = points.as_slice()?.to_vec();
-    let qs = queries.as_slice()?.to_vec();
-    let ex: Option<Vec<i64>> = match &exclude_ids {
-        Some(e) => Some(e.as_slice()?.to_vec()),
-        None => None,
-    };
+    let BruteInputs {
+        pts,
+        qs,
+        ex,
+        n,
+        m,
+        d,
+    } = brute_inputs(&points, &queries, &exclude_ids)?;
 
     let kk = k.min(n);
 
@@ -1771,12 +1831,7 @@ fn brute_knn<'py>(
                             continue;
                         }
                         let p = &pts[id * d..(id + 1) * d];
-                        let dd = match d {
-                            8 => l1_64::<8>(q, p, d),
-                            16 => l1_64::<16>(q, p, d),
-                            24 => l1_64::<24>(q, p, d),
-                            _ => l1_64::<0>(q, p, d),
-                        };
+                        let dd = l1_64_dyn(q, p, d);
                         heap_offer_64(heap, &mut len, dd.to_bits(), id as i64);
                     }
                     let mut idx = vec![-1i64; k];
@@ -1804,10 +1859,126 @@ fn brute_knn<'py>(
     ))
 }
 
+/// Every point within `radius` of each query, exactly, in parallel.
+///
+/// The range counterpart of `brute_knn`, and it exists for the same reason:
+/// `exact_radius` in NumPy has to materialise the `(m, n)` distance matrix
+/// before it can threshold it, and that matrix *is* the cost -- 96-100% of
+/// the call, measured by timing the block loop alone against the whole
+/// function. Here the distance is compared against `radius` in the register
+/// that produced it and is written only if it survives, so the matrix never
+/// exists. On the shapes ESS and OBLESA give this path that is 50-70x, which
+/// is the same factor `brute_knn` found and for the same three reasons: no
+/// intermediate matrix, one fused pass instead of four, every core.
+///
+/// **Why f64, emphatically.** `brute_knn` takes f64 because `BruteIndex` is
+/// the reference the LSH implementations are validated against and its tests
+/// pin distances to nine decimals. A range query raises the stakes: `<=` is a
+/// *threshold*, so an f32 error of ~2e-8 near the boundary does not merely
+/// reorder two neighbours, it adds or drops one. The returned set would
+/// change, not just its order. The algebraic float methods still apply --
+/// they permit reassociation and FMA contraction, not a change of width.
+///
+/// So this is a few ulp of f64 away from `exact_radius`, about 1e-16 on a sum
+/// of `d` terms in `[0, 0.5]`. A point sitting within 1e-16 of the cutoff can
+/// still fall on either side of it; the conformance test allows exactly that
+/// and nothing wider.
+///
+/// **Memory.** The output is the only large allocation, and it is inherent to
+/// the CSR contract: a radius that matches everything returns `m * n` pairs.
+/// That exposure is the caller's to manage and is unchanged from the NumPy
+/// path, which additionally held the distance matrix.
+///
+/// Args:
+///     points: `(n, d)` float64 in `[0, 1)`.
+///     queries: `(m, d)` float64 in `[0, 1)`.
+///     radius: Inclusive toroidal-L1 cutoff.
+///     exclude_ids: Optional `(m,)` int64, one point id excluded per query.
+///
+/// Returns:
+///     `(indptr, ids, dists)` in CSR form: query `i` owns
+///     `ids[indptr[i]:indptr[i + 1]]`, ascending by distance, ties by id.
+#[pyfunction]
+#[pyo3(signature = (points, queries, radius, exclude_ids=None))]
+fn brute_radius<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f64>,
+    queries: PyReadonlyArray2<'py, f64>,
+    radius: f64,
+    exclude_ids: Option<PyReadonlyArray1<'py, i64>>,
+) -> PyResult<(
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
+    let BruteInputs {
+        pts,
+        qs,
+        ex,
+        n,
+        m,
+        d,
+    } = brute_inputs(&points, &queries, &exclude_ids)?;
+
+    // One `Vec` per query rather than a reusable scratch buffer: a hit list
+    // is variable-length and has to outlive the closure to be assembled, so
+    // a reused buffer would have to be cloned out and would allocate anyway.
+    //
+    // Keyed on the bit pattern like the k-NN heap, for the same reason --
+    // non-negative floats order like their bits -- which also makes the sort
+    // a plain tuple sort: ascending distance, then ascending id. That is the
+    // order `exact_radius` produces, where a stable argsort over a row breaks
+    // ties by original position, which is the id.
+    let rows: Vec<Vec<(u64, i64)>> = py.detach(|| {
+        (0..m)
+            .into_par_iter()
+            .map(|qi| {
+                let q = &qs[qi * d..(qi + 1) * d];
+                let exq = ex.as_ref().map_or(-1, |e| e[qi]);
+                let mut hits: Vec<(u64, i64)> = Vec::new();
+                for id in 0..n {
+                    if id as i64 == exq {
+                        continue;
+                    }
+                    let p = &pts[id * d..(id + 1) * d];
+                    let dd = l1_64_dyn(q, p, d);
+                    if dd <= radius {
+                        hits.push((dd.to_bits(), id as i64));
+                    }
+                }
+                hits.sort_unstable();
+                hits
+            })
+            .collect()
+    });
+
+    let mut indptr = Vec::with_capacity(m + 1);
+    let mut total = 0i64;
+    indptr.push(total);
+    for r in &rows {
+        total += r.len() as i64;
+        indptr.push(total);
+    }
+    let mut ids = Vec::with_capacity(total as usize);
+    let mut dst = Vec::with_capacity(total as usize);
+    for r in rows {
+        for (bits, id) in r {
+            ids.push(id);
+            dst.push(f64::from_bits(bits));
+        }
+    }
+    Ok((
+        indptr.into_pyarray(py),
+        ids.into_pyarray(py),
+        dst.into_pyarray(py),
+    ))
+}
+
 #[pymodule]
 #[pyo3(name = "_native")]
 fn torann_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustLshIndex>()?;
     m.add_function(wrap_pyfunction!(brute_knn, m)?)?;
+    m.add_function(wrap_pyfunction!(brute_radius, m)?)?;
     Ok(())
 }

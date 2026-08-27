@@ -89,12 +89,14 @@ if _cpu_supports_avx2():
         from ._native import (  # type: ignore[reportMissingImports]
             RustLshIndex,
             brute_knn,
+            brute_radius,
         )
         BaseIndex.register(RustLshIndex)
         AVAILABLE = True
     except ImportError:  # pure-Python install: wrapper falls back to lsh.py
         RustLshIndex = None
         brute_knn = None
+        brute_radius = None
         AVAILABLE = False
 else:
     logger.warning(
@@ -104,6 +106,7 @@ else:
     )
     RustLshIndex = None
     brute_knn = None
+    brute_radius = None
     AVAILABLE = False
 
-__all__ = ["AVAILABLE", "RustLshIndex", "brute_knn"]
+__all__ = ["AVAILABLE", "RustLshIndex", "brute_knn", "brute_radius"]

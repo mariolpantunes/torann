@@ -55,7 +55,8 @@ from typing import Any, ClassVar
 import numpy as np
 
 from . import rust
-from .brute import BruteIndex, exact_radius, pairwise_l1
+from .base import csr_to_padded
+from .brute import BruteIndex, pairwise_l1, radius_scan
 from .lsh import PythonLshIndex
 
 logger = logging.getLogger(__name__)
@@ -345,26 +346,45 @@ class ToroidalNN:
         radius: float,
         queries: np.ndarray | None = None,
         exact: bool = False,
-    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        pad: bool = False,
+    ) -> list[tuple[np.ndarray, np.ndarray]] | tuple[np.ndarray, np.ndarray]:
         """Batch range query: indexed points within toroidal L1 ``radius``.
 
         In LSH mode this is a post-filter on the hash candidate set (recall
         falls off for radii beyond the probe reach ~2/B per dimension);
         ``exact=True`` forces the exact path.
 
+        Args:
+            radius: Inclusive toroidal-L1 cutoff.
+            queries: Optional (m, d) explicit queries; default is the
+                candidate tier.
+            exact: Force the exact scan even in LSH mode.
+            pad: Return the dense ``(m, width)`` form instead of a list —
+                ``-1`` / ``inf`` padded, exactly what :meth:`query` returns,
+                so a caller can switch between k-NN and radius without
+                reshaping anything. Prefer it: the list costs a Python pass
+                over ``m`` to build and almost always a second one to
+                consume, and against the compiled kernel those two passes are
+                a third of the call.
+
         Returns:
-            One ``(ids, distances)`` pair per query, sorted by distance. The
-            querying candidate itself is excluded for the default self-join.
+            With ``pad``: ``(ids, distances)`` of shape ``(m, width)``.
+            Otherwise one ``(ids, distances)`` pair per query, sorted by
+            distance. The querying candidate itself is excluded for the
+            default self-join.
         """
         self._check_fitted()
         Q, ex = self._resolve_queries(queries, None)
         if exact and self._use_lsh:
-            indptr, ids, dst = exact_radius(self._arena, Q, float(radius), ex)
+            indptr, ids, dst = radius_scan(self._arena, Q, float(radius), ex)
         else:
             indptr, ids, dst = self._impl.query_radius(
                 np.ascontiguousarray(Q), float(radius), ex)
+        m = Q.shape[0]
+        if pad:
+            return csr_to_padded(indptr, ids, dst, m)
         return [(ids[indptr[i]:indptr[i + 1]], dst[indptr[i]:indptr[i + 1]])
-                for i in range(Q.shape[0])]
+                for i in range(m)]
 
     # ------------------------------------------------------------------ #
     # Tuning and implementation selection

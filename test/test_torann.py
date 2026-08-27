@@ -15,7 +15,7 @@ import unittest.mock
 import numpy as np
 
 from torann import ToroidalNN, available_backends, rust
-from torann.brute import exact_knn
+from torann.brute import exact_knn, exact_radius
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -701,10 +701,6 @@ _parametrize(TestLifecycle)
 _parametrize(TestRangeQueries)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestRustBruteKernel(unittest.TestCase):
     """The compiled scan against the NumPy one it serves in place of.
 
@@ -757,3 +753,126 @@ class TestRustBruteKernel(unittest.TestCase):
         idx, dst = rust.brute_knn(pts, np.array([[0.01]]), 1, None)
         self.assertEqual(int(idx[0, 0]), 0)
         self.assertAlmostEqual(float(dst[0, 0]), 0.02, places=9)
+
+
+class TestRustRadiusKernel(unittest.TestCase):
+    """The compiled range scan against `exact_radius`, which it serves in
+    place of below the crossover.
+
+    A range query is checked more strictly than the k-NN one in a way the
+    tolerance cannot express: `<=` is a threshold, so the two paths must
+    agree on *membership*, and the sets are compared exactly. Distances are
+    then compared on those members to f64 ulp.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if rust.brute_radius is None:
+            raise unittest.SkipTest("compiled backend not available")
+
+    @staticmethod
+    def _case(n, m, d, seed=0):
+        rng = np.random.default_rng(seed)
+        pts = np.ascontiguousarray(rng.random((n, d)))
+        q = np.ascontiguousarray(rng.random((m, d)))
+        # A radius that admits roughly eight neighbours, which is the regime
+        # ESS queries in -- not a round number that would admit none at d=100
+        # or everything at d=2.
+        kk = min(9, n)
+        r = float(np.median(rust.brute_knn(pts, q, kk, None)[1][:, kk - 1]))
+        return pts, q, r
+
+    def test_it_agrees_with_the_reference_scan(self):
+        for n, m, d in ((60, 30, 100), (400, 200, 100), (200, 100, 8),
+                        (50, 50, 2), (300, 64, 1000)):
+            with self.subTest(n=n, m=m, d=d):
+                pts, q, r = self._case(n, m, d)
+                a = exact_radius(pts, q, r, None)
+                b = rust.brute_radius(pts, q, r, None)
+                np.testing.assert_array_equal(a[0], b[0])
+                np.testing.assert_array_equal(a[1], b[1])
+                np.testing.assert_allclose(a[2], b[2], atol=1e-12)
+
+    def test_an_excluded_id_is_never_returned(self):
+        pts, _, r = self._case(80, 1, 6)
+        ex = np.arange(80, dtype=np.int64)
+        indptr, ids, _ = rust.brute_radius(pts, pts, r, ex)
+        for i in range(80):
+            self.assertNotIn(i, ids[indptr[i]:indptr[i + 1]])
+
+    def test_rows_are_sorted_by_distance(self):
+        pts, q, r = self._case(300, 50, 10)
+        indptr, _, dst = rust.brute_radius(pts, q, r, None)
+        for i in range(50):
+            row = dst[indptr[i]:indptr[i + 1]]
+            self.assertTrue((np.diff(row) >= 0).all())
+
+    def test_degenerate_radii_match_the_reference(self):
+        """Nothing, and everything. Both are legal and neither may differ."""
+        pts, q, _ = self._case(40, 8, 5)
+        for r in (0.0, -1.0, 1e9):
+            with self.subTest(radius=r):
+                a = exact_radius(pts, q, r, None)
+                b = rust.brute_radius(pts, q, float(r), None)
+                np.testing.assert_array_equal(a[0], b[0])
+                np.testing.assert_array_equal(a[1], b[1])
+
+    def test_mismatched_widths_are_refused(self):
+        pts, _, _ = self._case(10, 1, 4)
+        with self.assertRaises(ValueError):
+            rust.brute_radius(pts, np.zeros((2, 5)), 1.0, None)
+
+    def test_a_short_exclude_list_is_refused(self):
+        """Checked in Rust rather than left to index a slice: the scan runs
+        with the GIL released, where the overrun would surface as a panic
+        unwinding through rayon instead of as a Python error."""
+        pts, q, r = self._case(20, 6, 4)
+        with self.assertRaises(ValueError):
+            rust.brute_radius(pts, q, r, np.zeros(3, dtype=np.int64))
+
+    def test_it_wraps_like_the_reference(self):
+        pts = np.array([[0.99], [0.50]])
+        indptr, ids, dst = rust.brute_radius(pts, np.array([[0.01]]), 0.05, None)
+        np.testing.assert_array_equal(ids, [0])
+        self.assertAlmostEqual(float(dst[0]), 0.02, places=9)
+
+
+class TestPaddedRangeResults(unittest.TestCase):
+    """`pad=True` against the list form it replaces.
+
+    The list is what ESS consumed until it had to loop over it a second time
+    to pad it; this asserts the vectorised path produces exactly that, so the
+    two passes could be deleted rather than merely bypassed.
+    """
+
+    def _index(self):
+        rng = np.random.default_rng(11)
+        pts = rng.random((400, 20))
+        return (ToroidalNN(seed=0).fit(pts[:200], pts[200:]), 200)
+
+    def test_padded_matches_the_list_form(self):
+        nn, m = self._index()
+        r = float(np.median(nn.query(k=9)[1][:, 8]))
+        rows = nn.query_radius(r)
+        ids, dst = nn.query_radius(r, pad=True)
+        width = max(1, max(len(i) for i, _ in rows))
+        self.assertEqual(ids.shape, (m, width))
+        for i, (row_ids, row_dst) in enumerate(rows):
+            n = len(row_ids)
+            np.testing.assert_array_equal(ids[i, :n], row_ids)
+            np.testing.assert_array_equal(dst[i, :n], row_dst)
+            np.testing.assert_array_equal(ids[i, n:], -1)
+            self.assertTrue(np.isinf(dst[i, n:]).all())
+
+    def test_an_all_empty_result_still_has_a_usable_shape(self):
+        """Width floors at 1: a downstream kernel indexing `[:, 0]` must not
+        meet a zero-width array on the epoch where the radius found nothing."""
+        nn, m = self._index()
+        ids, dst = nn.query_radius(0.0, pad=True)
+        self.assertEqual(ids.shape, (m, 1))
+        np.testing.assert_array_equal(ids, -1)
+        self.assertTrue(np.isinf(dst).all())
+
+
+if __name__ == "__main__":
+    unittest.main()

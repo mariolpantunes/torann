@@ -29,3 +29,8 @@ docs_build/
 .goose/
 .goosehints
 .agy/
+
+# Coverage database: rewritten by every test run, so tracking it makes
+# each commit carry an unrelated binary diff -- and the pre-commit coverage
+# hook rewrites it *after* staging, which fails the commit outright.
+.coverage

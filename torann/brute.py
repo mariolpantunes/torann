@@ -14,7 +14,8 @@ import numpy as np
 from . import rust
 from .base import BaseIndex
 
-__all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1"]
+__all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1",
+           "radius_scan"]
 
 # Element budget for the temporary (queries x points) distance blocks.
 #
@@ -192,6 +193,34 @@ def exact_radius(pts, Q, radius, exclude_ids=None):
             np.concatenate(all_dst) if all_dst else np.empty(0))
 
 
+def radius_scan(pts, Q, radius, exclude_ids=None):
+    """The *serving* exact range scan: compiled when the wheel provides it.
+
+    The same split `BruteIndex.query_knn` makes — `exact_radius` above stays
+    the reference and stays reachable — with the dispatch factored out here
+    because two callers need it: `BruteIndex` below, and the wrapper's
+    ``query_radius(exact=True)``, which scans the arena directly and would
+    otherwise be the one path the kernel never reached.
+
+    It carries the compiled contract: f64 with the algebraic float methods,
+    so a few ulp on the distance. One consequence the k-NN path does not
+    have — ``<=`` is a threshold, so a point within an ulp of `radius` can
+    fall on either side of it, and the returned *set* can differ by that
+    point rather than merely its order.
+
+    50-70x on the shapes ESS and OBLESA give this path.
+
+    Args, Returns:
+        As :func:`exact_radius`.
+    """
+    if rust.brute_radius is None:
+        return exact_radius(pts, Q, radius, exclude_ids)
+    q = np.ascontiguousarray(Q, dtype=np.float64)
+    ex = None if exclude_ids is None else np.ascontiguousarray(
+        exclude_ids, dtype=np.int64)
+    return rust.brute_radius(pts, q, float(radius), ex)
+
+
 class BruteIndex(BaseIndex):
     """The exact implementation of the index contract."""
 
@@ -242,5 +271,5 @@ class BruteIndex(BaseIndex):
         return rust.brute_knn(self._pts, q, int(k), ex)
 
     def query_radius(self, queries, radius, exclude_ids=None):
-        """Exact range query — see :func:`exact_radius`."""
-        return exact_radius(self._pts, queries, radius, exclude_ids)
+        """Exact range query — see :func:`radius_scan`."""
+        return radius_scan(self._pts, queries, radius, exclude_ids)
