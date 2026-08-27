@@ -114,9 +114,14 @@ if _cpu_supports_avx2():
         AVAILABLE = False
 else:
     logger.warning(
-        "torann: CPU lacks AVX2; the compiled backend is not loaded and the "
-        "pure-Python implementation will be used instead (25-75x slower). "
-        "Build from the sdist to get a native module tuned for this CPU."
+        "torann: CPU lacks AVX2, so the published wheel cannot run here and "
+        "the pure-Python backend will be used instead (25-75x slower). This "
+        "is a last resort, not the only option: a baseline build is still "
+        "30-41x faster than the NumPy path, because the win is structural "
+        "(no intermediate matrix, one fused pass, every core) and AVX2 only "
+        "adds 1.6-1.8x on top. Get one with\n"
+        "    RUSTFLAGS='-C target-cpu=x86-64' "
+        "pip install --no-binary torann torann"
     )
     RustLshIndex = None
     brute_knn = None

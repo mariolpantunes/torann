@@ -27,11 +27,29 @@
 # without. The algebraic float methods license the contraction; AVX2/FMA is
 # what gives LLVM something to contract into.
 #
-# On the earlier reference shape, AVX2 -> `target-cpu=native` was a further
-# 4% and is *not* worth taking, because it is not uniform — at d=8 the
-# native build was 227 ms against AVX2's 124 ms, where a 512-bit vector is
-# simply the wrong shape for a one-vector distance. The objdump confirms the
-# published wheel holds that line: 5732 %ymm and zero %zmm.
+# **AVX-512 is not the next step up, it is a step down.** Measured directly
+# this time (`+avx512f,+avx512bw,+avx512dq,+avx512vl` against `+avx2,+fma`)
+# rather than inferred from `target-cpu=native`, which conflates AVX-512
+# with every other native feature. LLVM genuinely used it -- 2618 %zmm
+# against 1825 %ymm in that build -- and it was *worse in 12 of 14 shapes*:
+#
+#   brute_knn     n=400   d=8    -45.0%      <- worst case
+#   lsh_query   n=16384   d=8    -36.3%
+#   brute_radius  n=400   d=100  -17.3%
+#   lsh_query   n=16384   d=100  -16.4%
+#   brute_radius n=4096   d=100   -9.3%
+#   brute_knn    n=4096   d=100   -4.2%
+#   wdirs        n=4096   d=100   +5.2%      <- one of two wins
+#   lsh_query   n=16384   d=32    +2.0%
+#
+# On Zen 5, which has a true 512-bit datapath rather than Zen 4's
+# double-pumped 256 -- so this is the most favourable hardware the wider
+# vector could ask for. The d=8 collapse says why: eight f64 is exactly one
+# 512-bit vector, so no loop survives to amortise the mask and extract
+# overhead. At d=100 the tail handling costs more than the wider body saves.
+#
+# The objdump confirms the published wheel holds the AVX2 line: 5732 %ymm
+# and zero %zmm.
 #
 # None of this is hand-written. There is no assembly and no intrinsic in
 # this crate — `#![forbid(unsafe_code)]` would reject both. The vector code
