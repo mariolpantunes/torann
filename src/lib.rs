@@ -44,6 +44,14 @@
 // several arrays at once and were profile-tuned in this exact shape. The
 // introspection API also returns a few unavoidably wide tuple types.
 #![allow(clippy::needless_range_loop, clippy::type_complexity)]
+// Enforced, not asserted. The crate had exactly one `unsafe` block -- an
+// `_mm_prefetch` hint, which cannot fault, alias or race and was `unsafe`
+// only because `core::arch` intrinsics are gated on target features. It was
+// still the one thing keeping "this code is safe" a claim a reader had to
+// audit rather than one the compiler checks, so it was measured and dropped:
+// ~10% on the LSH query path, and nothing at all on the brute kernels, which
+// is where a population-sized caller spends every cycle. See `refine_topk`.
+#![forbid(unsafe_code)]
 
 use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
@@ -157,43 +165,6 @@ fn dist_l1_rows<const D: usize>(q: &[f32], tile: &[f32], d: usize) -> [f32; ROWS
         out[r] = l1::<D>(q, &tile[r * n..(r + 1) * n], n);
     }
     out
-}
-
-/// Hint the cache that an address is about to be read (gather and refine
-/// walk effectively random locations, so the hardware prefetcher cannot
-/// help). No-op off x86_64.
-///
-/// **The only `unsafe` left in this crate**, and worth being precise about
-/// what kind it is. `_mm_prefetch` cannot fault, cannot alias and cannot
-/// race — it is a hint that the hardware is free to ignore, and it is
-/// `unsafe` only because every `core::arch` intrinsic is (they are gated on
-/// target features rather than on any memory property). Since
-/// `AtomicI64::from_mut_slice` retired the raw-pointer `SendPtr` in
-/// `compute_keys`, no unchecked aliasing, lifetime or thread-safety claim
-/// remains anywhere in the file. Every call site here passes an in-bounds
-/// reference regardless.
-///
-/// It stays because it is paid for and there is no safe stable
-/// substitute. Deleting it costs **+4.1% at d=2 and +3.3% at d=64** (and
-/// is free at d=8 and d=32, where it does nothing). Writing it in safe
-/// Rust as a discarded real load — `black_box(*r)` — is *worse than
-/// either*, +3.1% at d=32 and +6.2% at d=2, because a load occupies a load
-/// port and can stall, which is the one thing a non-blocking hint will not
-/// do. `std::intrinsics::prefetch_read_data` is the safe-ish spelling and
-/// is nightly-only, so it is not an option for a published wheel.
-#[inline(always)]
-fn prefetch<T>(r: &T) {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::x86_64::_mm_prefetch(
-            r as *const T as *const i8,
-            core::arch::x86_64::_MM_HINT_T0,
-        );
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = r;
-    }
 }
 
 /// The canonical k-NN order: distance first, id as the tie-break. f32 bit
@@ -768,12 +739,21 @@ impl RustLshIndex {
         }
     }
 
+    // Candidate ids are effectively random, so the hardware prefetcher
+    // cannot help and a software hint used to run eight rows ahead here. It
+    // was the crate's only `unsafe` -- `_mm_prefetch` is an intrinsic, so it
+    // is `unsafe` on target-feature grounds even though the hint itself
+    // cannot fault, alias or race. Re-measured, it was worth 3-5% at d=64
+    // and at n=32768/d=100, nothing at d=8, 32 and 100, and slightly
+    // *negative* at d=2. That is not enough to keep the one construct
+    // standing between this crate and `#![forbid(unsafe_code)]`, which is a
+    // guarantee a compiler checks rather than one a comment asserts.
+    //
+    // `#[target_feature(enable = "sse")]` is not a way to keep it: it does
+    // not remove the `unsafe` at the call site, and it cannot be combined
+    // with `#[inline(always)]`, so the hint would cost a real function call.
     fn refine_topk(&self, ws: &Ws, top: &mut TopK, ex: i64) {
-        const PF: usize = 8; // prefetch distance, rows ahead
-        for (i, &id) in ws.cand.iter().enumerate() {
-            if let Some(&nid) = ws.cand.get(i + PF) {
-                prefetch(&self.pts32[nid as usize * self.d]);
-            }
+        for &id in ws.cand.iter() {
             if id == ex {
                 continue;
             }
@@ -1011,18 +991,13 @@ impl RustLshIndex {
                 pairs += (gids.len() * group.len()) as u64;
 
                 for chunk in gids.chunks(TILE) {
-                    // Issue every row's misses before touching the data:
-                    // the ids are scattered, so this is the one place the
-                    // tile pays for random access — once per block, not
-                    // once per query.
-                    for &id in chunk {
-                        let base = id as usize * d;
-                        let mut o = 0;
-                        while o < d {
-                            prefetch(&self.pts32[base + o]);
-                            o += 16;
-                        }
-                    }
+                    // Gather the scattered rows into one contiguous tile.
+                    // This is where the block pays for random access, and it
+                    // pays once per block rather than once per query, which
+                    // is the whole reason the batched path tiles at all. A
+                    // software prefetch used to run ahead of this copy; it
+                    // was the crate's only `unsafe` and did not survive
+                    // re-measurement (see `refine_topk`).
                     for (j, &id) in chunk.iter().enumerate() {
                         let base = id as usize * d;
                         tile[j * d..(j + 1) * d].copy_from_slice(&self.pts32[base..base + d]);
