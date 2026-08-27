@@ -1,19 +1,42 @@
 # Local builds use the same ISA floor the published x86-64 wheels do, so a
 # number measured here is a number a user gets.
 #
-# The floor is worth having and worth *only* having. Measured on the
-# reference shape (n=50k+50k, d=32, k=5, self-join) with the current
-# scalar/algebraic kernel:
+# The floor is worth having and worth *only* having.
 #
-#   -C target-cpu=x86-64          408 ms
-#   -C target-feature=+avx2,+fma  340 ms   <- this file
-#   -C target-cpu=native          326 ms
+# **How much it is worth, per kernel** — two builds interleaved in one
+# session, because measured across time this machine drifts 20-29% under
+# sustained benchmarking and swamps the effect:
 #
-# Baseline -> AVX2 is 17%: the auto-vectorizer has no 256-bit register to
-# lower the distance loop to without it. AVX2 -> native is a further 4% and
-# is *not* worth taking, because it is not uniform — at d=8 the same native
-# build is 227 ms against AVX2's 124 ms, where a 512-bit vector is simply
-# the wrong shape for a one-vector distance.
+#   kernel                 n     d    AVX2   baseline   AVX2 buys
+#   brute_knn            400   100   0.423      0.673       37.2%
+#   brute_knn           4096   100   8.585     15.002       42.8%
+#   brute_radius        4096   100   9.711     16.965       42.8%
+#   weighted_directions  400   100   1.230      3.064       59.9%
+#   weighted_directions 4096   100   2.362      7.082       66.7%
+#   lsh_query          16384    32  20.897     27.033       22.7%
+#   lsh_query          16384   100  41.414     54.730       24.3%
+#
+# So 1.6-3x on the kernels a population-sized caller runs, not the 17% this
+# note used to claim. That figure was measured on the f32 LSH reference
+# shape before any of the brute kernels existed, and it understated the
+# floor by two to four times.
+#
+# `weighted_directions` gains most because the baseline build emits **zero
+# FMA instructions**: its inner loop is `acc += coef * sign` over `d`
+# elements, which is one instruction with FMA and two plus an extra rounding
+# without. The algebraic float methods license the contraction; AVX2/FMA is
+# what gives LLVM something to contract into.
+#
+# On the earlier reference shape, AVX2 -> `target-cpu=native` was a further
+# 4% and is *not* worth taking, because it is not uniform — at d=8 the
+# native build was 227 ms against AVX2's 124 ms, where a 512-bit vector is
+# simply the wrong shape for a one-vector distance. The objdump confirms the
+# published wheel holds that line: 5732 %ymm and zero %zmm.
+#
+# None of this is hand-written. There is no assembly and no intrinsic in
+# this crate — `#![forbid(unsafe_code)]` would reject both. The vector code
+# is LLVM auto-vectorizing scalar loops that the algebraic methods have
+# given it permission to reorder.
 #
 # Note this retires an older conclusion recorded in OPTIMIZE.md, that
 # AVX-512 "buys nothing over AVX2". That was true of the `wide::f32x8`
