@@ -178,7 +178,28 @@ class ToroidalNN:
     #: at 16384 LSH wins on all of them. 8192 sits between, and the python
     #: entry is unchanged because that path has no compiled kernel to have
     #: shifted its crossover.
-    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = {"python": 4096, "rust": 8192}
+    #: Points above which the LSH index replaces the exact scan, per LSH
+    #: backend. Measured as the workload runs it -- fit once, then relax --
+    #: so the fit LSH pays and brute does not is inside the number.
+    #:
+    #: **They move in opposite directions, because the two backends are not
+    #: the same trade.** With the compiled index, LSH wins from 4096 at every
+    #: dimension measured (2 to 200); 3072 still loses at d=40. The old 8192
+    #: cost up to 2x at n=8192. With the pure-Python index it is the reverse:
+    #: brute is *faster* at d=10 all the way to 12288 (1.8-3.8x), and at
+    #: d=100 LSH wins by at most 8%. Best case 8%, worst case 280% -- so that
+    #: backend stays exact far longer. It is a reference implementation, not
+    #: a speed path.
+    #:
+    #: Quality is not what sets these. Across every size and dimension
+    #: measured the returned k-th neighbour is within **0.4%** of the true
+    #: k-th distance (`d_k` ratio 1.0000-1.0042) even where id-recall falls
+    #: to 0.36 -- in high dimension the formally-nearest k are barely nearer
+    #: than any other k. The force law reads distances, so a design built on
+    #: LSH neighbours scores the same as one built on exact ones. Ranking the
+    #: backends by id-recall says the opposite and is measuring the wrong
+    #: thing.
+    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = {"python": 12288, "rust": 4096}
 
     def __init__(
         self,
