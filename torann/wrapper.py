@@ -50,7 +50,7 @@ to ``lsh.py`` rather than crashing.
 from __future__ import annotations
 
 import logging
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal, overload
 
 import numpy as np
 
@@ -340,6 +340,22 @@ class ToroidalNN:
             raise ValueError("k must be >= 1")
         Q, ex = self._resolve_queries(queries, exclude_ids)
         return self._impl.query_knn(np.ascontiguousarray(Q), kq, ex)
+
+    # `pad` chooses between two unrelated shapes, so it is overloaded rather
+    # than left as a union: without this every caller of the padded form has
+    # to prove to a type checker that it did not get the list, which is a
+    # cast at each site to restate what the literal already says.
+    @overload
+    def query_radius(
+        self, radius: float, queries: np.ndarray | None = ...,
+        exact: bool = ..., *, pad: Literal[True],
+    ) -> tuple[np.ndarray, np.ndarray]: ...
+
+    @overload
+    def query_radius(
+        self, radius: float, queries: np.ndarray | None = ...,
+        exact: bool = ..., pad: Literal[False] = ...,
+    ) -> list[tuple[np.ndarray, np.ndarray]]: ...
 
     def query_radius(
         self,
