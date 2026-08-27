@@ -874,5 +874,100 @@ class TestPaddedRangeResults(unittest.TestCase):
         self.assertTrue(np.isinf(dst).all())
 
 
+class TestWeightedDirections(unittest.TestCase):
+    """The weighted toroidal direction sum, against the NumPy expression it
+    replaces -- which is lifted verbatim from ESS's force kernel, so this is
+    a conformance test against the caller, not a restatement of the kernel."""
+
+    @classmethod
+    def setUpClass(cls):
+        if rust.weighted_directions is None:
+            raise unittest.SkipTest("compiled backend not available")
+
+    @staticmethod
+    def _ref(pts, q, ids, w):
+        valid = ids >= 0
+        safe = np.where(valid, ids, 0)
+        disp = q[:, None, :] - pts[safe]
+        disp -= np.round(disp)
+        grad = np.sign(disp)
+        norms = np.abs(grad).sum(axis=2, keepdims=True)
+        dirs = grad / np.maximum(norms, 1e-9)
+        out = []
+        for t in range(w.shape[0]):
+            ww = np.where(valid, w[t], 0.0)
+            out.append(np.sum(dirs * ww[..., None], axis=1))
+        return np.stack(out)
+
+    @staticmethod
+    def _case(n, m, d, k, nw=1, seed=0):
+        rng = np.random.default_rng(seed)
+        return (np.ascontiguousarray(rng.random((n, d))),
+                np.ascontiguousarray(rng.random((m, d))),
+                rng.integers(-1, n, (m, k)).astype(np.int64),
+                rng.standard_normal((nw, m, k)))
+
+    def test_it_agrees_with_the_reference_expression(self):
+        for n, m, d, k, nw in ((400, 200, 100, 8, 1), (400, 200, 100, 64, 2),
+                               (120, 60, 10, 5, 1), (200, 100, 3, 4, 2),
+                               (300, 64, 200, 32, 2)):
+            with self.subTest(n=n, m=m, d=d, k=k, nw=nw):
+                pts, q, ids, w = self._case(n, m, d, k, nw)
+                np.testing.assert_allclose(
+                    self._ref(pts, q, ids, w),
+                    rust.weighted_directions(pts, q, ids, w), atol=1e-12)
+
+    def test_the_wrap_rounds_half_to_even(self):
+        """NumPy rounds half to even; Rust's `f64::round` rounds half away
+        from zero. An exact half is where they part, and every axis of every
+        pair goes through that rounding."""
+        pts = np.array([[0.25], [0.75]])
+        q = np.array([[0.75]])
+        ids = np.array([[0, 1]], dtype=np.int64)
+        w = np.ones((1, 1, 2))
+        np.testing.assert_array_equal(
+            self._ref(pts, q, ids, w), rust.weighted_directions(pts, q, ids, w))
+
+    def test_a_shared_axis_contributes_no_direction(self):
+        """`np.sign(0) == 0`, where Rust's `signum` is +/-1 -- which would
+        invent a unit step on every axis the two points agree on."""
+        pts = np.array([[0.3, 0.9]])
+        q = np.array([[0.3, 0.1]])
+        ids = np.array([[0]], dtype=np.int64)
+        out = rust.weighted_directions(pts, q, ids, np.ones((1, 1, 1)))
+        self.assertEqual(float(out[0, 0, 0]), 0.0)
+
+    def test_coincident_points_give_a_zero_vector(self):
+        pts = np.array([[0.3, 0.4]])
+        out = rust.weighted_directions(
+            pts, pts.copy(), np.array([[0]], dtype=np.int64),
+            np.full((1, 1, 1), 2.0))
+        np.testing.assert_array_equal(out, 0.0)
+
+    def test_missing_neighbours_contribute_nothing(self):
+        pts, q, _, _ = self._case(20, 5, 4, 3)
+        ids = np.full((5, 3), -1, dtype=np.int64)
+        out = rust.weighted_directions(pts, q, ids, np.ones((1, 5, 3)))
+        np.testing.assert_array_equal(out, 0.0)
+
+    def test_weightings_share_one_geometry(self):
+        """Two weightings in one call must equal two separate calls -- that
+        equivalence is the whole reason the shared form is safe to use."""
+        pts, q, ids, w = self._case(300, 100, 40, 16, 2)
+        both = rust.weighted_directions(pts, q, ids, w)
+        for t in range(2):
+            single = rust.weighted_directions(pts, q, ids, w[t:t + 1])
+            np.testing.assert_array_equal(both[t], single[0])
+
+    def test_malformed_shapes_are_refused(self):
+        pts, q, ids, w = self._case(40, 10, 6, 4)
+        with self.assertRaises(ValueError):
+            rust.weighted_directions(pts, np.zeros((10, 7)), ids, w)
+        with self.assertRaises(ValueError):
+            rust.weighted_directions(pts, q, ids, np.ones((1, 10, 5)))
+        with self.assertRaises(ValueError):
+            rust.weighted_directions(pts, np.zeros((9, 6)), ids, w)
+
+
 if __name__ == "__main__":
     unittest.main()

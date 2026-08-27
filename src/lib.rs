@@ -46,8 +46,8 @@
 #![allow(clippy::needless_range_loop, clippy::type_complexity)]
 
 use numpy::{
-    IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
-    PyUntypedArrayMethods,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
+    PyReadonlyArray3, PyUntypedArrayMethods,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -1974,11 +1974,178 @@ fn brute_radius<'py>(
     ))
 }
 
+/// Weighted sum of unit toroidal directions, per query.
+///
+/// $$\mathrm{out}_i = \sum_j w_{ij}\,
+///   \frac{\mathrm{sign}(\mathrm{wrap}(q_i - p_{\mathrm{ids}[i,j]}))}
+///        {\lVert \mathrm{sign}(\cdot) \rVert_1}$$
+///
+/// **Why this is torann's and not the caller's.** It is the toroidal
+/// displacement and its L1 normalization -- the metric's own definition,
+/// applied per axis. What multiplies it is the caller's: `weights` arrives
+/// already evaluated on an `(m, k)` array, so a force law stays an ordinary
+/// Python callable and never enters this crate. That split is not a
+/// convenience, it is what lets ESS keep a pure-Python wheel and a
+/// user-supplied `metric` at the same time.
+///
+/// **Why it exists.** Profiled on ESS's force kernel at `d = 100`, the
+/// `(rows, k, D)` tensor was **99.4%** of the call and the force law 0.6%.
+/// At `k = 128` that tensor is 20.5 MB and four of them are live at once --
+/// `disp`, `grad`, `norms`, `directions` -- so ~80 MB per block, well past
+/// any L3, which is why doubling the neighbourhood cost 5x rather than 2x.
+/// Here the direction is consumed into the accumulator as it is computed and
+/// the tensor never exists: `O(m * D)` of working memory instead of
+/// `O(m * k * D)`.
+///
+/// **Two semantics copied deliberately, not approximated.** NumPy rounds
+/// half to *even*, so the wrap uses `round_ties_even` and not `round`, which
+/// rounds half away from zero and would disagree on every exact half. And
+/// `np.sign(±0.0)` is `0.0`, where Rust's `signum` returns `±1.0` -- so the
+/// sign is written out rather than called. Either one would be a silent
+/// per-axis error, not a crash.
+///
+/// **Accuracy.** Each term is `±w / nnz` with `nnz` a small integer count,
+/// so the terms themselves are exactly rounded. The sum over `j` is
+/// reassociated by the algebraic float methods where NumPy sums pairwise,
+/// which is the only source of difference: a few ulp on a sum of `k` terms
+/// of similar magnitude, with no cancellation to amplify it.
+///
+/// It happens to come out bit-identical to the NumPy expression on every
+/// shape ESS runs, and that must not be relied on. The algebraic methods are
+/// documented as *non-deterministic* -- the same source may fold differently
+/// under a different compiler or target -- so the contract here is a few ulp
+/// and the agreement is a courtesy, not a guarantee. Anything that needs
+/// reproducibility across builds has to pin the wheel, not the source.
+///
+/// A negative id marks a missing neighbour and contributes nothing, which is
+/// what the caller's `-1` padding means. Coincident points are *not* handled
+/// here: a zero displacement yields a zero direction, and a caller that
+/// wants to perturb those must do it itself, where its own RNG lives.
+///
+/// Args:
+///     points: `(n, d)` float64 in `[0, 1)`.
+///     queries: `(m, d)` float64 in `[0, 1)`.
+///     ids: `(m, k)` int64 neighbour ids; negative means missing.
+///     weights: `(w, m, k)` float64 multipliers -- `w` independent
+///         weightings over one shared geometry. Every one of them reuses the
+///         same wrap and the same per-axis signs, which is the point: a
+///         caller with two force terms over one neighbour list (ESS has
+///         exactly two, repulsion and attraction) would otherwise pay for
+///         the displacement twice, and the displacement is 99% of the work.
+///
+/// Returns:
+///     `(w, m, d)` float64.
+#[pyfunction]
+#[pyo3(signature = (points, queries, ids, weights))]
+fn weighted_directions<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f64>,
+    queries: PyReadonlyArray2<'py, f64>,
+    ids: PyReadonlyArray2<'py, i64>,
+    weights: PyReadonlyArray3<'py, f64>,
+) -> PyResult<Bound<'py, PyArray3<f64>>> {
+    let (n, d) = (points.shape()[0], points.shape()[1]);
+    let (m, k) = (ids.shape()[0], ids.shape()[1]);
+    if queries.shape()[1] != d {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "points and queries must have the same number of columns",
+        ));
+    }
+    if queries.shape()[0] != m {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ids must have one row per query",
+        ));
+    }
+    let nw = weights.shape()[0];
+    if weights.shape()[1] != m || weights.shape()[2] != k {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "weights must be (w, m, k) with (m, k) matching ids",
+        ));
+    }
+    let pts = points.as_slice()?.to_vec();
+    let qs = queries.as_slice()?.to_vec();
+    let idv = ids.as_slice()?.to_vec();
+    let wv = weights.as_slice()?.to_vec();
+
+    let out: Vec<f64> = py.detach(|| {
+        (0..m)
+            .into_par_iter()
+            // The per-axis signs of one pair, so the wrap is computed once
+            // and not again for the accumulation pass. `d` doubles, not
+            // `k * d`.
+            .map_init(
+                || vec![0.0f64; d],
+                |sign: &mut Vec<f64>, i| {
+                    // Row `i` of every weighting, laid out `(w, d)`.
+                    let mut acc = vec![0.0f64; nw * d];
+                    let q = &qs[i * d..(i + 1) * d];
+                    for j in 0..k {
+                        let id = idv[i * k + j];
+                        if id < 0 || (id as usize) >= n {
+                            continue;
+                        }
+                        // The wrap is the expensive part, so it is skipped
+                        // only when *every* weighting is zero on this pair.
+                        let base = i * k + j;
+                        if (0..nw).all(|t| wv[t * m * k + base] == 0.0) {
+                            continue;
+                        }
+                        let p = &pts[id as usize * d..(id as usize + 1) * d];
+                        let mut nnz = 0.0f64;
+                        for l in 0..d {
+                            let t = q[l].algebraic_sub(p[l]);
+                            let t = t.algebraic_sub(t.round_ties_even());
+                            // `np.sign`, which is 0 at both zeros --
+                            // `f64::signum` is +/-1 there and would put a
+                            // spurious unit step on every flat axis.
+                            sign[l] = if t > 0.0 {
+                                1.0
+                            } else if t < 0.0 {
+                                -1.0
+                            } else {
+                                0.0
+                            };
+                            nnz += sign[l].abs();
+                        }
+                        // `np.maximum(norms, 1e-9)`: an all-zero direction
+                        // divides by the floor and stays zero either way.
+                        let inv = 1.0f64.algebraic_div(if nnz > 1e-9 { nnz } else { 1e-9 });
+                        for t in 0..nw {
+                            let coef = wv[t * m * k + base].algebraic_mul(inv);
+                            if coef == 0.0 {
+                                continue;
+                            }
+                            let row = &mut acc[t * d..(t + 1) * d];
+                            for l in 0..d {
+                                row[l] = row[l].algebraic_add(coef.algebraic_mul(sign[l]));
+                            }
+                        }
+                    }
+                    acc
+                },
+            )
+            .flatten()
+            .collect()
+    });
+
+    // `(m, w, d)` came out of the row-parallel loop; the caller asked for
+    // `(w, m, d)`, so the two leading axes swap.
+    let mut swapped = vec![0.0f64; nw * m * d];
+    for i in 0..m {
+        for t in 0..nw {
+            swapped[(t * m + i) * d..(t * m + i + 1) * d]
+                .copy_from_slice(&out[(i * nw + t) * d..(i * nw + t + 1) * d]);
+        }
+    }
+    swapped.into_pyarray(py).reshape([nw, m, d])
+}
+
 #[pymodule]
 #[pyo3(name = "_native")]
 fn torann_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustLshIndex>()?;
     m.add_function(wrap_pyfunction!(brute_knn, m)?)?;
     m.add_function(wrap_pyfunction!(brute_radius, m)?)?;
+    m.add_function(wrap_pyfunction!(weighted_directions, m)?)?;
     Ok(())
 }

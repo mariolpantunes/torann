@@ -26,10 +26,22 @@ from __future__ import annotations
 
 import logging
 import platform
+from collections.abc import Callable
+from typing import Any
 
 from .base import BaseIndex
 
 logger = logging.getLogger(__name__)
+
+# Declared before they are bound, because `._native` ships no stub: a type
+# checker sees only the `= None` assignments in the fallback branches and
+# concludes the names *are* None, so every call through them is an error and
+# every unpacking of a result is "Never is not iterable". The annotation says
+# what the try branch actually binds.
+RustLshIndex: Any
+brute_knn: Callable[..., Any] | None
+brute_radius: Callable[..., Any] | None
+weighted_directions: Callable[..., Any] | None
 
 _X86 = frozenset({"x86_64", "amd64", "i386", "i686", "x86"})
 
@@ -90,6 +102,7 @@ if _cpu_supports_avx2():
             RustLshIndex,
             brute_knn,
             brute_radius,
+            weighted_directions,
         )
         BaseIndex.register(RustLshIndex)
         AVAILABLE = True
@@ -97,6 +110,7 @@ if _cpu_supports_avx2():
         RustLshIndex = None
         brute_knn = None
         brute_radius = None
+        weighted_directions = None
         AVAILABLE = False
 else:
     logger.warning(
@@ -107,6 +121,8 @@ else:
     RustLshIndex = None
     brute_knn = None
     brute_radius = None
+    weighted_directions = None
     AVAILABLE = False
 
-__all__ = ["AVAILABLE", "RustLshIndex", "brute_knn", "brute_radius"]
+__all__ = ["AVAILABLE", "RustLshIndex", "brute_knn", "brute_radius",
+           "weighted_directions"]
