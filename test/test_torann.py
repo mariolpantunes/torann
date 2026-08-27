@@ -15,6 +15,7 @@ import unittest.mock
 import numpy as np
 
 from torann import ToroidalNN, available_backends, rust
+from torann.brute import exact_knn, exact_radius
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -164,7 +165,13 @@ class TestLSHMode(unittest.TestCase):
         self.cand_ids = np.arange(7000, 8000)
 
     def make(self, **kw):
+        # These classes test LSH behaviour, so they select LSH rather than
+        # inheriting whichever crossover `_BRUTE_DEFAULTS` currently holds.
+        # They used to rely on 7000 points clearing a threshold of 512; when
+        # the compiled brute kernel moved that threshold to 8192 they
+        # silently became brute-mode tests and ten of them failed.
         kw.setdefault("seed", 0)
+        kw.setdefault("brute_threshold", 1)
         return ToroidalNN(backend=self.BACKEND, **kw)
 
     def test_is_approximate(self):
@@ -271,7 +278,13 @@ class TestLifecycle(unittest.TestCase):
         self.cands = rng.random((800, self.D))
 
     def make(self, **kw):
+        # These classes test LSH behaviour, so they select LSH rather than
+        # inheriting whichever crossover `_BRUTE_DEFAULTS` currently holds.
+        # They used to rely on 7000 points clearing a threshold of 512; when
+        # the compiled brute kernel moved that threshold to 8192 they
+        # silently became brute-mode tests and ten of them failed.
         kw.setdefault("seed", 0)
+        kw.setdefault("brute_threshold", 1)
         return ToroidalNN(backend=self.BACKEND, **kw)
 
     def _reference(self, nn, k):
@@ -377,7 +390,13 @@ class TestRangeQueries(unittest.TestCase):
         self.radius = 0.3
 
     def make(self, **kw):
+        # These classes test LSH behaviour, so they select LSH rather than
+        # inheriting whichever crossover `_BRUTE_DEFAULTS` currently holds.
+        # They used to rely on 7000 points clearing a threshold of 512; when
+        # the compiled brute kernel moved that threshold to 8192 they
+        # silently became brute-mode tests and ten of them failed.
         kw.setdefault("seed", 0)
+        kw.setdefault("brute_threshold", 1)
         return ToroidalNN(backend=self.BACKEND, **kw)
 
     def _exact_sets(self):
@@ -533,7 +552,11 @@ class TestBackendEquivalence(unittest.TestCase):
 
     def _run_lifecycle(self, backend):
         rng = np.random.default_rng(11)
-        nn = ToroidalNN(seed=4, backend=backend).fit(
+        # LSH on both sides: this compares the tables, and the two backends
+        # no longer share a crossover -- python switches at 4096, rust at
+        # 8192 now that its brute path is compiled -- so 6800 points would
+        # put one on LSH and the other on brute.
+        nn = ToroidalNN(seed=4, backend=backend, brute_threshold=1).fit(
             rng.random((6000, self.D)), rng.random((800, self.D)), k=16)
         results = [nn.query()]
         for _ in range(3):
@@ -676,6 +699,274 @@ def _parametrize(base):
 _parametrize(TestLSHMode)
 _parametrize(TestLifecycle)
 _parametrize(TestRangeQueries)
+
+
+class TestRustBruteKernel(unittest.TestCase):
+    """The compiled scan against the NumPy one it serves in place of.
+
+    Skipped on a pure-Python install, where `BruteIndex` still runs the NumPy
+    path and there is nothing to compare.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if rust.brute_knn is None:
+            raise unittest.SkipTest("compiled backend not available")
+
+    def _case(self, n, m, d, k, seed=0):
+        rng = np.random.default_rng(seed)
+        return rng.random((n, d)), rng.random((m, d)), k
+
+    def test_it_agrees_with_the_reference_scan(self):
+        """Ids exactly, distances to f64 ulp -- not to f32, which is why the
+        kernel is f64 despite the LSH path being f32."""
+        for n, m, d, k in ((60, 30, 100, 8), (400, 200, 100, 8),
+                           (300, 300, 32, 16), (200, 100, 8, 8)):
+            with self.subTest(n=n, m=m, d=d, k=k):
+                pts, q, k = self._case(n, m, d, k)
+                i_np, d_np = exact_knn(pts, q, k)
+                i_rs, d_rs = rust.brute_knn(pts, q, k, None)
+                np.testing.assert_array_equal(i_np, i_rs)
+                np.testing.assert_allclose(d_np, d_rs, atol=1e-12)
+
+    def test_fewer_points_than_k_pads_rather_than_fails(self):
+        pts, q, _ = self._case(3, 5, 4, 8)
+        idx, dst = rust.brute_knn(pts, q, 8, None)
+        self.assertEqual(idx.shape, (5, 8))
+        np.testing.assert_array_equal(idx[:, 3:], -1)
+        self.assertTrue(np.isinf(dst[:, 3:]).all())
+
+    def test_an_excluded_id_is_never_returned(self):
+        """The self-join contract: a query may not find its own point."""
+        pts, _, _ = self._case(40, 1, 6, 5)
+        ex = np.arange(40, dtype=np.int64)
+        idx, _ = rust.brute_knn(pts, pts, 5, ex)
+        self.assertFalse((idx == ex[:, None]).any())
+
+    def test_mismatched_widths_are_refused(self):
+        pts, _, _ = self._case(10, 1, 4, 3)
+        with self.assertRaises(ValueError):
+            rust.brute_knn(pts, np.zeros((2, 5)), 3, None)
+
+    def test_it_wraps_like_the_reference(self):
+        pts = np.array([[0.99], [0.50]])
+        idx, dst = rust.brute_knn(pts, np.array([[0.01]]), 1, None)
+        self.assertEqual(int(idx[0, 0]), 0)
+        self.assertAlmostEqual(float(dst[0, 0]), 0.02, places=9)
+
+
+class TestRustRadiusKernel(unittest.TestCase):
+    """The compiled range scan against `exact_radius`, which it serves in
+    place of below the crossover.
+
+    A range query is checked more strictly than the k-NN one in a way the
+    tolerance cannot express: `<=` is a threshold, so the two paths must
+    agree on *membership*, and the sets are compared exactly. Distances are
+    then compared on those members to f64 ulp.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if rust.brute_radius is None:
+            raise unittest.SkipTest("compiled backend not available")
+
+    @staticmethod
+    def _case(n, m, d, seed=0):
+        rng = np.random.default_rng(seed)
+        pts = np.ascontiguousarray(rng.random((n, d)))
+        q = np.ascontiguousarray(rng.random((m, d)))
+        # A radius that admits roughly eight neighbours, which is the regime
+        # ESS queries in -- not a round number that would admit none at d=100
+        # or everything at d=2.
+        kk = min(9, n)
+        r = float(np.median(rust.brute_knn(pts, q, kk, None)[1][:, kk - 1]))
+        return pts, q, r
+
+    def test_it_agrees_with_the_reference_scan(self):
+        for n, m, d in ((60, 30, 100), (400, 200, 100), (200, 100, 8),
+                        (50, 50, 2), (300, 64, 1000)):
+            with self.subTest(n=n, m=m, d=d):
+                pts, q, r = self._case(n, m, d)
+                a = exact_radius(pts, q, r, None)
+                b = rust.brute_radius(pts, q, r, None)
+                np.testing.assert_array_equal(a[0], b[0])
+                np.testing.assert_array_equal(a[1], b[1])
+                np.testing.assert_allclose(a[2], b[2], atol=1e-12)
+
+    def test_an_excluded_id_is_never_returned(self):
+        pts, _, r = self._case(80, 1, 6)
+        ex = np.arange(80, dtype=np.int64)
+        indptr, ids, _ = rust.brute_radius(pts, pts, r, ex)
+        for i in range(80):
+            self.assertNotIn(i, ids[indptr[i]:indptr[i + 1]])
+
+    def test_rows_are_sorted_by_distance(self):
+        pts, q, r = self._case(300, 50, 10)
+        indptr, _, dst = rust.brute_radius(pts, q, r, None)
+        for i in range(50):
+            row = dst[indptr[i]:indptr[i + 1]]
+            self.assertTrue((np.diff(row) >= 0).all())
+
+    def test_degenerate_radii_match_the_reference(self):
+        """Nothing, and everything. Both are legal and neither may differ."""
+        pts, q, _ = self._case(40, 8, 5)
+        for r in (0.0, -1.0, 1e9):
+            with self.subTest(radius=r):
+                a = exact_radius(pts, q, r, None)
+                b = rust.brute_radius(pts, q, float(r), None)
+                np.testing.assert_array_equal(a[0], b[0])
+                np.testing.assert_array_equal(a[1], b[1])
+
+    def test_mismatched_widths_are_refused(self):
+        pts, _, _ = self._case(10, 1, 4)
+        with self.assertRaises(ValueError):
+            rust.brute_radius(pts, np.zeros((2, 5)), 1.0, None)
+
+    def test_a_short_exclude_list_is_refused(self):
+        """Checked in Rust rather than left to index a slice: the scan runs
+        with the GIL released, where the overrun would surface as a panic
+        unwinding through rayon instead of as a Python error."""
+        pts, q, r = self._case(20, 6, 4)
+        with self.assertRaises(ValueError):
+            rust.brute_radius(pts, q, r, np.zeros(3, dtype=np.int64))
+
+    def test_it_wraps_like_the_reference(self):
+        pts = np.array([[0.99], [0.50]])
+        indptr, ids, dst = rust.brute_radius(pts, np.array([[0.01]]), 0.05, None)
+        np.testing.assert_array_equal(ids, [0])
+        self.assertAlmostEqual(float(dst[0]), 0.02, places=9)
+
+
+class TestPaddedRangeResults(unittest.TestCase):
+    """`pad=True` against the list form it replaces.
+
+    The list is what ESS consumed until it had to loop over it a second time
+    to pad it; this asserts the vectorised path produces exactly that, so the
+    two passes could be deleted rather than merely bypassed.
+    """
+
+    def _index(self):
+        rng = np.random.default_rng(11)
+        pts = rng.random((400, 20))
+        return (ToroidalNN(seed=0).fit(pts[:200], pts[200:]), 200)
+
+    def test_padded_matches_the_list_form(self):
+        nn, m = self._index()
+        r = float(np.median(nn.query(k=9)[1][:, 8]))
+        rows = nn.query_radius(r)
+        ids, dst = nn.query_radius(r, pad=True)
+        width = max(1, max(len(i) for i, _ in rows))
+        self.assertEqual(ids.shape, (m, width))
+        for i, (row_ids, row_dst) in enumerate(rows):
+            n = len(row_ids)
+            np.testing.assert_array_equal(ids[i, :n], row_ids)
+            np.testing.assert_array_equal(dst[i, :n], row_dst)
+            np.testing.assert_array_equal(ids[i, n:], -1)
+            self.assertTrue(np.isinf(dst[i, n:]).all())
+
+    def test_an_all_empty_result_still_has_a_usable_shape(self):
+        """Width floors at 1: a downstream kernel indexing `[:, 0]` must not
+        meet a zero-width array on the epoch where the radius found nothing."""
+        nn, m = self._index()
+        ids, dst = nn.query_radius(0.0, pad=True)
+        self.assertEqual(ids.shape, (m, 1))
+        np.testing.assert_array_equal(ids, -1)
+        self.assertTrue(np.isinf(dst).all())
+
+
+class TestWeightedDirections(unittest.TestCase):
+    """The weighted toroidal direction sum, against the NumPy expression it
+    replaces -- which is lifted verbatim from ESS's force kernel, so this is
+    a conformance test against the caller, not a restatement of the kernel."""
+
+    @classmethod
+    def setUpClass(cls):
+        if rust.weighted_directions is None:
+            raise unittest.SkipTest("compiled backend not available")
+
+    @staticmethod
+    def _ref(pts, q, ids, w):
+        valid = ids >= 0
+        safe = np.where(valid, ids, 0)
+        disp = q[:, None, :] - pts[safe]
+        disp -= np.round(disp)
+        grad = np.sign(disp)
+        norms = np.abs(grad).sum(axis=2, keepdims=True)
+        dirs = grad / np.maximum(norms, 1e-9)
+        out = []
+        for t in range(w.shape[0]):
+            ww = np.where(valid, w[t], 0.0)
+            out.append(np.sum(dirs * ww[..., None], axis=1))
+        return np.stack(out)
+
+    @staticmethod
+    def _case(n, m, d, k, nw=1, seed=0):
+        rng = np.random.default_rng(seed)
+        return (np.ascontiguousarray(rng.random((n, d))),
+                np.ascontiguousarray(rng.random((m, d))),
+                rng.integers(-1, n, (m, k)).astype(np.int64),
+                rng.standard_normal((nw, m, k)))
+
+    def test_it_agrees_with_the_reference_expression(self):
+        for n, m, d, k, nw in ((400, 200, 100, 8, 1), (400, 200, 100, 64, 2),
+                               (120, 60, 10, 5, 1), (200, 100, 3, 4, 2),
+                               (300, 64, 200, 32, 2)):
+            with self.subTest(n=n, m=m, d=d, k=k, nw=nw):
+                pts, q, ids, w = self._case(n, m, d, k, nw)
+                np.testing.assert_allclose(
+                    self._ref(pts, q, ids, w),
+                    rust.weighted_directions(pts, q, ids, w), atol=1e-12)
+
+    def test_the_wrap_rounds_half_to_even(self):
+        """NumPy rounds half to even; Rust's `f64::round` rounds half away
+        from zero. An exact half is where they part, and every axis of every
+        pair goes through that rounding."""
+        pts = np.array([[0.25], [0.75]])
+        q = np.array([[0.75]])
+        ids = np.array([[0, 1]], dtype=np.int64)
+        w = np.ones((1, 1, 2))
+        np.testing.assert_array_equal(
+            self._ref(pts, q, ids, w), rust.weighted_directions(pts, q, ids, w))
+
+    def test_a_shared_axis_contributes_no_direction(self):
+        """`np.sign(0) == 0`, where Rust's `signum` is +/-1 -- which would
+        invent a unit step on every axis the two points agree on."""
+        pts = np.array([[0.3, 0.9]])
+        q = np.array([[0.3, 0.1]])
+        ids = np.array([[0]], dtype=np.int64)
+        out = rust.weighted_directions(pts, q, ids, np.ones((1, 1, 1)))
+        self.assertEqual(float(out[0, 0, 0]), 0.0)
+
+    def test_coincident_points_give_a_zero_vector(self):
+        pts = np.array([[0.3, 0.4]])
+        out = rust.weighted_directions(
+            pts, pts.copy(), np.array([[0]], dtype=np.int64),
+            np.full((1, 1, 1), 2.0))
+        np.testing.assert_array_equal(out, 0.0)
+
+    def test_missing_neighbours_contribute_nothing(self):
+        pts, q, _, _ = self._case(20, 5, 4, 3)
+        ids = np.full((5, 3), -1, dtype=np.int64)
+        out = rust.weighted_directions(pts, q, ids, np.ones((1, 5, 3)))
+        np.testing.assert_array_equal(out, 0.0)
+
+    def test_weightings_share_one_geometry(self):
+        """Two weightings in one call must equal two separate calls -- that
+        equivalence is the whole reason the shared form is safe to use."""
+        pts, q, ids, w = self._case(300, 100, 40, 16, 2)
+        both = rust.weighted_directions(pts, q, ids, w)
+        for t in range(2):
+            single = rust.weighted_directions(pts, q, ids, w[t:t + 1])
+            np.testing.assert_array_equal(both[t], single[0])
+
+    def test_malformed_shapes_are_refused(self):
+        pts, q, ids, w = self._case(40, 10, 6, 4)
+        with self.assertRaises(ValueError):
+            rust.weighted_directions(pts, np.zeros((10, 7)), ids, w)
+        with self.assertRaises(ValueError):
+            rust.weighted_directions(pts, q, ids, np.ones((1, 10, 5)))
+        with self.assertRaises(ValueError):
+            rust.weighted_directions(pts, np.zeros((9, 6)), ids, w)
 
 
 if __name__ == "__main__":

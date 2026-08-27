@@ -1,6 +1,6 @@
 [package]
 name = "torann"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 # The distance kernel uses the algebraic float methods stabilized in 1.98.
 rust-version = "1.98"
@@ -11,7 +11,7 @@ name = "torann"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.29", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311"] }
 numpy = "0.29"
 rayon = "1.12"
 

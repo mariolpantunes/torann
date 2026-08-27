@@ -50,12 +50,13 @@ to ``lsh.py`` rather than crashing.
 from __future__ import annotations
 
 import logging
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal, overload
 
 import numpy as np
 
 from . import rust
-from .brute import BruteIndex, exact_radius
+from .base import csr_to_padded
+from .brute import BruteIndex, pairwise_l1, radius_scan
 from .lsh import PythonLshIndex
 
 logger = logging.getLogger(__name__)
@@ -153,7 +154,31 @@ class ToroidalNN:
     # brute path stays competitive to ~4-8k points against the python
     # LSH, while the native implementation wins from the smallest sizes
     # tested.
-    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = {"python": 4096, "rust": 512}
+    #: Exact search below this many points, per backend.
+    #:
+    #: The rust entry was 512, calibrated when the brute path was NumPy. It
+    #: is compiled now, 13-73x faster, and 512 left the new kernel serving
+    #: only the regime below it -- the same mistake in the other direction.
+    #:
+    #: Recalibrated by break-even: LSH costs a tuning pass of
+    #: `O(256 * min(n, 8192) * d)` once, and has to recover it from cheaper
+    #: queries. Batches of 512 queries needed before it does:
+    #:
+    #: ======  ========  =========
+    #: d       n=4096    n=16384
+    #: ======  ========  =========
+    #: 8       1398      27
+    #: 32      84        13
+    #: 100     220       27
+    #: 200     187       23
+    #: ======  ========  =========
+    #:
+    #: An ESS relaxation queries its index once per epoch, so N is in the
+    #: low hundreds: at 4096 points brute wins on every dimension measured,
+    #: at 16384 LSH wins on all of them. 8192 sits between, and the python
+    #: entry is unchanged because that path has no compiled kernel to have
+    #: shifted its crossover.
+    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = {"python": 4096, "rust": 8192}
 
     def __init__(
         self,
@@ -316,31 +341,66 @@ class ToroidalNN:
         Q, ex = self._resolve_queries(queries, exclude_ids)
         return self._impl.query_knn(np.ascontiguousarray(Q), kq, ex)
 
+    # `pad` chooses between two unrelated shapes, so it is overloaded rather
+    # than left as a union: without this every caller of the padded form has
+    # to prove to a type checker that it did not get the list, which is a
+    # cast at each site to restate what the literal already says.
+    @overload
+    def query_radius(
+        self, radius: float, queries: np.ndarray | None = ...,
+        exact: bool = ..., *, pad: Literal[True],
+    ) -> tuple[np.ndarray, np.ndarray]: ...
+
+    @overload
+    def query_radius(
+        self, radius: float, queries: np.ndarray | None = ...,
+        exact: bool = ..., pad: Literal[False] = ...,
+    ) -> list[tuple[np.ndarray, np.ndarray]]: ...
+
     def query_radius(
         self,
         radius: float,
         queries: np.ndarray | None = None,
         exact: bool = False,
-    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        pad: bool = False,
+    ) -> list[tuple[np.ndarray, np.ndarray]] | tuple[np.ndarray, np.ndarray]:
         """Batch range query: indexed points within toroidal L1 ``radius``.
 
         In LSH mode this is a post-filter on the hash candidate set (recall
         falls off for radii beyond the probe reach ~2/B per dimension);
         ``exact=True`` forces the exact path.
 
+        Args:
+            radius: Inclusive toroidal-L1 cutoff.
+            queries: Optional (m, d) explicit queries; default is the
+                candidate tier.
+            exact: Force the exact scan even in LSH mode.
+            pad: Return the dense ``(m, width)`` form instead of a list —
+                ``-1`` / ``inf`` padded, exactly what :meth:`query` returns,
+                so a caller can switch between k-NN and radius without
+                reshaping anything. Prefer it: the list costs a Python pass
+                over ``m`` to build and almost always a second one to
+                consume, and against the compiled kernel those two passes are
+                a third of the call.
+
         Returns:
-            One ``(ids, distances)`` pair per query, sorted by distance. The
-            querying candidate itself is excluded for the default self-join.
+            With ``pad``: ``(ids, distances)`` of shape ``(m, width)``.
+            Otherwise one ``(ids, distances)`` pair per query, sorted by
+            distance. The querying candidate itself is excluded for the
+            default self-join.
         """
         self._check_fitted()
         Q, ex = self._resolve_queries(queries, None)
         if exact and self._use_lsh:
-            indptr, ids, dst = exact_radius(self._arena, Q, float(radius), ex)
+            indptr, ids, dst = radius_scan(self._arena, Q, float(radius), ex)
         else:
             indptr, ids, dst = self._impl.query_radius(
                 np.ascontiguousarray(Q), float(radius), ex)
+        m = Q.shape[0]
+        if pad:
+            return csr_to_padded(indptr, ids, dst, m)
         return [(ids[indptr[i]:indptr[i + 1]], dst[indptr[i]:indptr[i + 1]])
-                for i in range(Q.shape[0])]
+                for i in range(m)]
 
     # ------------------------------------------------------------------ #
     # Tuning and implementation selection
@@ -357,10 +417,32 @@ class ToroidalNN:
             q = self._arena[self._rng.choice(n, min(_TUNE_QUERIES, n), replace=False)]
             ref = self._arena[self._rng.choice(
                 n, min(_TUNE_REFERENCE, n), replace=False)]
-            diff = np.abs(q[:, None, :] - ref[None, :, :])
-            D = np.minimum(diff, 1.0 - diff).sum(-1)
+            # This is a k-NN query, so it is served by the k-NN kernel.
+            #
+            # It used to compute the full (256 x 8192) distance block in
+            # NumPy and partition it, and that was **95% of an LSH fit** --
+            # 1.975 s of 2.078 s at n=16384, d=100, against 31 ms for the
+            # Rust index build it exists to configure. The LSH machinery was
+            # never the slow part; choosing its radius was.
+            #
+            # `r_hat` is quantised because the two paths must agree exactly.
+            # `brute_knn` reassociates (the algebraic float methods) where
+            # `pairwise_l1` reproduces NumPy's summation, so they differ in
+            # the last bits -- and `r_hat` feeds `round(0.3 / delta)`, where
+            # a boundary case would pick a different `B` and build entirely
+            # different tables. A wheel with the compiled kernel would then
+            # disagree with a pure-Python install, which is the one contract
+            # this file cannot break. Twelve digits is far below anything a
+            # radius estimated from a random sample can resolve and far above
+            # where the two paths part.
             kk = min(k, ref.shape[0] - 1)
-            r_hat = float(np.median(np.partition(D, kk, axis=1)[:, kk]))
+            knn = getattr(rust, "brute_knn", None)
+            if knn is not None:
+                nth = knn(ref, q, kk + 1, None)[1][:, kk]
+            else:
+                D = pairwise_l1(q, ref)
+                nth = np.partition(D, kk, axis=1)[:, kk]
+            r_hat = float(f"{float(np.median(nth)):.12e}")
         delta = max(1e-9, r_hat / d)  # mean per-dimension neighbour distance
 
         # B: want per-dim collision 1-B*delta comfortably positive; high-d

@@ -26,10 +26,22 @@ from __future__ import annotations
 
 import logging
 import platform
+from collections.abc import Callable
+from typing import Any
 
 from .base import BaseIndex
 
 logger = logging.getLogger(__name__)
+
+# Declared before they are bound, because `._native` ships no stub: a type
+# checker sees only the `= None` assignments in the fallback branches and
+# concludes the names *are* None, so every call through them is an error and
+# every unpacking of a result is "Never is not iterable". The annotation says
+# what the try branch actually binds.
+RustLshIndex: Any
+brute_knn: Callable[..., Any] | None
+brute_radius: Callable[..., Any] | None
+weighted_directions: Callable[..., Any] | None
 
 _X86 = frozenset({"x86_64", "amd64", "i386", "i686", "x86"})
 
@@ -86,19 +98,36 @@ if _cpu_supports_avx2():
     try:
         # Compiled by maturin; absent from a source checkout, which is
         # exactly what the ImportError below handles.
-        from ._native import RustLshIndex  # type: ignore[reportMissingImports]
+        from ._native import (  # type: ignore[reportMissingImports]
+            RustLshIndex,
+            brute_knn,
+            brute_radius,
+            weighted_directions,
+        )
         BaseIndex.register(RustLshIndex)
         AVAILABLE = True
     except ImportError:  # pure-Python install: wrapper falls back to lsh.py
         RustLshIndex = None
+        brute_knn = None
+        brute_radius = None
+        weighted_directions = None
         AVAILABLE = False
 else:
     logger.warning(
-        "torann: CPU lacks AVX2; the compiled backend is not loaded and the "
-        "pure-Python implementation will be used instead (25-75x slower). "
-        "Build from the sdist to get a native module tuned for this CPU."
+        "torann: CPU lacks AVX2, so the published wheel cannot run here and "
+        "the pure-Python backend will be used instead (25-75x slower). This "
+        "is a last resort, not the only option: a baseline build is still "
+        "30-41x faster than the NumPy path, because the win is structural "
+        "(no intermediate matrix, one fused pass, every core) and AVX2 only "
+        "adds 1.6-1.8x on top. Get one with\n"
+        "    RUSTFLAGS='-C target-cpu=x86-64' "
+        "pip install --no-binary torann torann"
     )
     RustLshIndex = None
+    brute_knn = None
+    brute_radius = None
+    weighted_directions = None
     AVAILABLE = False
 
-__all__ = ["AVAILABLE", "RustLshIndex"]
+__all__ = ["AVAILABLE", "RustLshIndex", "brute_knn", "brute_radius",
+           "weighted_directions"]

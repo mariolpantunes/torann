@@ -44,10 +44,18 @@
 // several arrays at once and were profile-tuned in this exact shape. The
 // introspection API also returns a few unavoidably wide tuple types.
 #![allow(clippy::needless_range_loop, clippy::type_complexity)]
+// Enforced, not asserted. The crate had exactly one `unsafe` block -- an
+// `_mm_prefetch` hint, which cannot fault, alias or race and was `unsafe`
+// only because `core::arch` intrinsics are gated on target features. It was
+// still the one thing keeping "this code is safe" a claim a reader had to
+// audit rather than one the compiler checks, so it was measured and dropped:
+// ~10% on the LSH query path, and nothing at all on the brute kernels, which
+// is where a population-sized caller spends every cycle. See `refine_topk`.
+#![forbid(unsafe_code)]
 
 use numpy::{
-    IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
-    PyUntypedArrayMethods,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
+    PyReadonlyArray3, PyUntypedArrayMethods,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -157,43 +165,6 @@ fn dist_l1_rows<const D: usize>(q: &[f32], tile: &[f32], d: usize) -> [f32; ROWS
         out[r] = l1::<D>(q, &tile[r * n..(r + 1) * n], n);
     }
     out
-}
-
-/// Hint the cache that an address is about to be read (gather and refine
-/// walk effectively random locations, so the hardware prefetcher cannot
-/// help). No-op off x86_64.
-///
-/// **The only `unsafe` left in this crate**, and worth being precise about
-/// what kind it is. `_mm_prefetch` cannot fault, cannot alias and cannot
-/// race — it is a hint that the hardware is free to ignore, and it is
-/// `unsafe` only because every `core::arch` intrinsic is (they are gated on
-/// target features rather than on any memory property). Since
-/// `AtomicI64::from_mut_slice` retired the raw-pointer `SendPtr` in
-/// `compute_keys`, no unchecked aliasing, lifetime or thread-safety claim
-/// remains anywhere in the file. Every call site here passes an in-bounds
-/// reference regardless.
-///
-/// It stays because it is paid for and there is no safe stable
-/// substitute. Deleting it costs **+4.1% at d=2 and +3.3% at d=64** (and
-/// is free at d=8 and d=32, where it does nothing). Writing it in safe
-/// Rust as a discarded real load — `black_box(*r)` — is *worse than
-/// either*, +3.1% at d=32 and +6.2% at d=2, because a load occupies a load
-/// port and can stall, which is the one thing a non-blocking hint will not
-/// do. `std::intrinsics::prefetch_read_data` is the safe-ish spelling and
-/// is nightly-only, so it is not an option for a published wheel.
-#[inline(always)]
-fn prefetch<T>(r: &T) {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::x86_64::_mm_prefetch(
-            r as *const T as *const i8,
-            core::arch::x86_64::_MM_HINT_T0,
-        );
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = r;
-    }
 }
 
 /// The canonical k-NN order: distance first, id as the tie-break. f32 bit
@@ -768,12 +739,21 @@ impl RustLshIndex {
         }
     }
 
+    // Candidate ids are effectively random, so the hardware prefetcher
+    // cannot help and a software hint used to run eight rows ahead here. It
+    // was the crate's only `unsafe` -- `_mm_prefetch` is an intrinsic, so it
+    // is `unsafe` on target-feature grounds even though the hint itself
+    // cannot fault, alias or race. Re-measured, it was worth 3-5% at d=64
+    // and at n=32768/d=100, nothing at d=8, 32 and 100, and slightly
+    // *negative* at d=2. That is not enough to keep the one construct
+    // standing between this crate and `#![forbid(unsafe_code)]`, which is a
+    // guarantee a compiler checks rather than one a comment asserts.
+    //
+    // `#[target_feature(enable = "sse")]` is not a way to keep it: it does
+    // not remove the `unsafe` at the call site, and it cannot be combined
+    // with `#[inline(always)]`, so the hint would cost a real function call.
     fn refine_topk(&self, ws: &Ws, top: &mut TopK, ex: i64) {
-        const PF: usize = 8; // prefetch distance, rows ahead
-        for (i, &id) in ws.cand.iter().enumerate() {
-            if let Some(&nid) = ws.cand.get(i + PF) {
-                prefetch(&self.pts32[nid as usize * self.d]);
-            }
+        for &id in ws.cand.iter() {
             if id == ex {
                 continue;
             }
@@ -1011,18 +991,13 @@ impl RustLshIndex {
                 pairs += (gids.len() * group.len()) as u64;
 
                 for chunk in gids.chunks(TILE) {
-                    // Issue every row's misses before touching the data:
-                    // the ids are scattered, so this is the one place the
-                    // tile pays for random access — once per block, not
-                    // once per query.
-                    for &id in chunk {
-                        let base = id as usize * d;
-                        let mut o = 0;
-                        while o < d {
-                            prefetch(&self.pts32[base + o]);
-                            o += 16;
-                        }
-                    }
+                    // Gather the scattered rows into one contiguous tile.
+                    // This is where the block pays for random access, and it
+                    // pays once per block rather than once per query, which
+                    // is the whole reason the batched path tiles at all. A
+                    // software prefetch used to run ahead of this copy; it
+                    // was the crate's only `unsafe` and did not survive
+                    // re-measurement (see `refine_topk`).
                     for (j, &id) in chunk.iter().enumerate() {
                         let base = id as usize * d;
                         tile[j * d..(j + 1) * d].copy_from_slice(&self.pts32[base..base + d]);
@@ -1624,9 +1599,528 @@ impl RustLshIndex {
     }
 }
 
+/// Toroidal L1 in f64, for the exact-contract brute path.
+///
+/// f32 is right for the LSH candidate scan, where a few ulp cannot change
+/// which bucket a point sits in and the width buys throughput. It is wrong
+/// here: `BruteIndex` is the reference the LSH implementations are validated
+/// against and what `metrics.toroidal_separation` reports with, and its tests
+/// pin distances to nine decimal places. In f32 the wrap distance 0.02 comes
+/// back as 0.019999980926513672, which is a real change of contract rather
+/// than a rounding detail.
+///
+/// The algebraic methods still apply — they permit reassociation and FMA
+/// contraction, not a change of width — so this is a few ulp of f64 on a sum
+/// of `d` terms in `[0, 0.5]`, about 1e-16 rather than 2e-8.
+#[inline(always)]
+fn l1_64<const D: usize>(a: &[f64], b: &[f64], d: usize) -> f64 {
+    let n = if D == 0 { d } else { D };
+    let mut s = 0.0f64;
+    for j in 0..n {
+        let t = a[j].algebraic_sub(b[j]).abs();
+        let w = 1.0f64.algebraic_sub(t);
+        s = s.algebraic_add(if t < w { t } else { w });
+    }
+    s
+}
+
+/// Bounded max-heap over f64 distances, keyed on the bit pattern.
+///
+/// The f32 heap above cannot serve: `f64::to_bits` is a `u64`. Non-negative
+/// floats order like their bit patterns in either width, so the comparison
+/// is the same one.
+#[inline]
+fn heap_offer_64(h: &mut [(u64, i64)], len: &mut usize, bits: u64, id: i64) {
+    let k = h.len();
+    if k == 0 {
+        return;
+    }
+    let e = (bits, id);
+    if *len < k {
+        h[*len] = e;
+        let mut i = *len;
+        *len += 1;
+        while i > 0 {
+            let up = (i - 1) >> 1;
+            if h[up] >= h[i] {
+                break;
+            }
+            h.swap(up, i);
+            i = up;
+        }
+    } else if e < h[0] {
+        h[0] = e;
+        let mut i = 0;
+        loop {
+            let (l, r) = (2 * i + 1, 2 * i + 2);
+            let mut big = i;
+            if l < k && h[big] < h[l] {
+                big = l;
+            }
+            if r < k && h[big] < h[r] {
+                big = r;
+            }
+            if big == i {
+                break;
+            }
+            h.swap(i, big);
+            i = big;
+        }
+    }
+}
+
+/// `l1_64` with the width chosen at run time.
+///
+/// The const-generic specializations exist so LLVM can fully unroll the
+/// widths this workload actually sees; picking between them is the only part
+/// that has to know which ones are worth specializing, so both brute kernels
+/// share this one copy of the decision rather than each carrying a `match`.
+#[inline(always)]
+fn l1_64_dyn(a: &[f64], b: &[f64], d: usize) -> f64 {
+    match d {
+        8 => l1_64::<8>(a, b, d),
+        16 => l1_64::<16>(a, b, d),
+        24 => l1_64::<24>(a, b, d),
+        _ => l1_64::<0>(a, b, d),
+    }
+}
+
+/// The arrays a brute kernel scans, copied out of NumPy once.
+///
+/// Both kernels release the GIL for the scan, so they cannot hold a
+/// `PyReadonlyArray` across it and the data has to be owned. The copy and
+/// the shape checks are identical either way, so they live here once.
+struct BruteInputs {
+    pts: Vec<f64>,
+    qs: Vec<f64>,
+    ex: Option<Vec<i64>>,
+    n: usize,
+    m: usize,
+    d: usize,
+}
+
+fn brute_inputs(
+    points: &PyReadonlyArray2<'_, f64>,
+    queries: &PyReadonlyArray2<'_, f64>,
+    exclude_ids: &Option<PyReadonlyArray1<'_, i64>>,
+) -> PyResult<BruteInputs> {
+    let (n, d) = (points.shape()[0], points.shape()[1]);
+    let m = queries.shape()[0];
+    if queries.shape()[1] != d {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "points and queries must have the same number of columns",
+        ));
+    }
+    // Checked rather than left to index into the slice: the scan runs inside
+    // rayon with the GIL released, where an out-of-range id would surface as
+    // a panic unwinding through the pool instead of as a Python error.
+    if let Some(e) = exclude_ids {
+        if e.shape()[0] != m {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "exclude_ids must have one id per query",
+            ));
+        }
+    }
+    Ok(BruteInputs {
+        pts: points.as_slice()?.to_vec(),
+        qs: queries.as_slice()?.to_vec(),
+        ex: match exclude_ids {
+            Some(e) => Some(e.as_slice()?.to_vec()),
+            None => None,
+        },
+        n,
+        m,
+        d,
+    })
+}
+
+/// Exact toroidal-L1 k-NN by scanning every point, in parallel.
+///
+/// **Why this exists at all.** The Python `BruteIndex` is what runs below
+/// `ToroidalNN`'s crossover, and until now that was the only path a caller
+/// under the threshold could take — so the compiled kernel served
+/// exclusively the regime a population-sized caller never enters. ESS and
+/// OBLESA sit at 60-400 points and spent 90% of their initialization inside
+/// that NumPy scan.
+///
+/// **Why it is faster than the NumPy it replaces**, which is already a good
+/// implementation — per-axis accumulation, eight lanes, in place. Three
+/// structural things NumPy cannot do from Python:
+///
+/// 1. **No `(m, n)` matrix.** NumPy must materialise every distance before
+///    it can `argpartition` them, so the array is written once and read
+///    again. Here the distance is consumed by the heap the instant it is
+///    computed and never reaches memory.
+/// 2. **One pass.** The fold is four passes over `(m, n)` in NumPy —
+///    subtract, abs, subtract, minimum — against one fused pass per pair,
+///    in registers.
+/// 3. **Every core.** The NumPy path is single-threaded.
+///
+/// **What it costs.** f64, not f32 — see `l1_64` for why the width is not
+/// negotiable here. Not bit-identical to the NumPy scan even so: the
+/// algebraic float methods permit reassociation and FMA contraction, so this
+/// is a few ulp on a sum of `d` terms in `[0, 0.5]`, around 1e-16. That can
+/// still reorder two candidates already within an ulp of each other, which is
+/// why the conformance test allows ids to differ on ties.
+///
+/// Args:
+///     points: `(n, d)` float64 in `[0, 1)`.
+///     queries: `(m, d)` float64 in `[0, 1)`.
+///     k: Neighbours per query.
+///     exclude_ids: Optional `(m,)` int64, one point id excluded per query.
+///
+/// Returns:
+///     `(idx, dist)` of shape `(m, k)`, rows ascending by distance, padded
+///     with `-1` / `inf` where fewer than `k` points qualify.
+#[pyfunction]
+#[pyo3(signature = (points, queries, k, exclude_ids=None))]
+fn brute_knn<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f64>,
+    queries: PyReadonlyArray2<'py, f64>,
+    k: usize,
+    exclude_ids: Option<PyReadonlyArray1<'py, i64>>,
+) -> PyResult<(Bound<'py, PyArray2<i64>>, Bound<'py, PyArray2<f64>>)> {
+    let BruteInputs {
+        pts,
+        qs,
+        ex,
+        n,
+        m,
+        d,
+    } = brute_inputs(&points, &queries, &exclude_ids)?;
+
+    let kk = k.min(n);
+
+    let rows: Vec<(Vec<i64>, Vec<f64>)> = py.detach(|| {
+        (0..m)
+            .into_par_iter()
+            .map_init(
+                || vec![(0u64, 0i64); kk],
+                |heap, qi| {
+                    let mut len = 0usize;
+                    let q = &qs[qi * d..(qi + 1) * d];
+                    let exq = ex.as_ref().map_or(-1, |e| e[qi]);
+                    for id in 0..n {
+                        if id as i64 == exq {
+                            continue;
+                        }
+                        let p = &pts[id * d..(id + 1) * d];
+                        let dd = l1_64_dyn(q, p, d);
+                        heap_offer_64(heap, &mut len, dd.to_bits(), id as i64);
+                    }
+                    let mut idx = vec![-1i64; k];
+                    let mut dst = vec![f64::INFINITY; k];
+                    heap[..len].sort_unstable();
+                    for (i, &(bits, id)) in heap[..len].iter().enumerate() {
+                        idx[i] = id;
+                        dst[i] = f64::from_bits(bits);
+                    }
+                    (idx, dst)
+                },
+            )
+            .collect()
+    });
+
+    let mut flat_i = Vec::with_capacity(m * k);
+    let mut flat_d = Vec::with_capacity(m * k);
+    for (i, dd) in rows {
+        flat_i.extend_from_slice(&i);
+        flat_d.extend_from_slice(&dd);
+    }
+    Ok((
+        flat_i.into_pyarray(py).reshape([m, k])?,
+        flat_d.into_pyarray(py).reshape([m, k])?,
+    ))
+}
+
+/// Every point within `radius` of each query, exactly, in parallel.
+///
+/// The range counterpart of `brute_knn`, and it exists for the same reason:
+/// `exact_radius` in NumPy has to materialise the `(m, n)` distance matrix
+/// before it can threshold it, and that matrix *is* the cost -- 96-100% of
+/// the call, measured by timing the block loop alone against the whole
+/// function. Here the distance is compared against `radius` in the register
+/// that produced it and is written only if it survives, so the matrix never
+/// exists. On the shapes ESS and OBLESA give this path that is 50-70x, which
+/// is the same factor `brute_knn` found and for the same three reasons: no
+/// intermediate matrix, one fused pass instead of four, every core.
+///
+/// **Why f64, emphatically.** `brute_knn` takes f64 because `BruteIndex` is
+/// the reference the LSH implementations are validated against and its tests
+/// pin distances to nine decimals. A range query raises the stakes: `<=` is a
+/// *threshold*, so an f32 error of ~2e-8 near the boundary does not merely
+/// reorder two neighbours, it adds or drops one. The returned set would
+/// change, not just its order. The algebraic float methods still apply --
+/// they permit reassociation and FMA contraction, not a change of width.
+///
+/// So this is a few ulp of f64 away from `exact_radius`, about 1e-16 on a sum
+/// of `d` terms in `[0, 0.5]`. A point sitting within 1e-16 of the cutoff can
+/// still fall on either side of it; the conformance test allows exactly that
+/// and nothing wider.
+///
+/// **Memory.** The output is the only large allocation, and it is inherent to
+/// the CSR contract: a radius that matches everything returns `m * n` pairs.
+/// That exposure is the caller's to manage and is unchanged from the NumPy
+/// path, which additionally held the distance matrix.
+///
+/// Args:
+///     points: `(n, d)` float64 in `[0, 1)`.
+///     queries: `(m, d)` float64 in `[0, 1)`.
+///     radius: Inclusive toroidal-L1 cutoff.
+///     exclude_ids: Optional `(m,)` int64, one point id excluded per query.
+///
+/// Returns:
+///     `(indptr, ids, dists)` in CSR form: query `i` owns
+///     `ids[indptr[i]:indptr[i + 1]]`, ascending by distance, ties by id.
+#[pyfunction]
+#[pyo3(signature = (points, queries, radius, exclude_ids=None))]
+fn brute_radius<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f64>,
+    queries: PyReadonlyArray2<'py, f64>,
+    radius: f64,
+    exclude_ids: Option<PyReadonlyArray1<'py, i64>>,
+) -> PyResult<(
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
+    let BruteInputs {
+        pts,
+        qs,
+        ex,
+        n,
+        m,
+        d,
+    } = brute_inputs(&points, &queries, &exclude_ids)?;
+
+    // One `Vec` per query rather than a reusable scratch buffer: a hit list
+    // is variable-length and has to outlive the closure to be assembled, so
+    // a reused buffer would have to be cloned out and would allocate anyway.
+    //
+    // Keyed on the bit pattern like the k-NN heap, for the same reason --
+    // non-negative floats order like their bits -- which also makes the sort
+    // a plain tuple sort: ascending distance, then ascending id. That is the
+    // order `exact_radius` produces, where a stable argsort over a row breaks
+    // ties by original position, which is the id.
+    let rows: Vec<Vec<(u64, i64)>> = py.detach(|| {
+        (0..m)
+            .into_par_iter()
+            .map(|qi| {
+                let q = &qs[qi * d..(qi + 1) * d];
+                let exq = ex.as_ref().map_or(-1, |e| e[qi]);
+                let mut hits: Vec<(u64, i64)> = Vec::new();
+                for id in 0..n {
+                    if id as i64 == exq {
+                        continue;
+                    }
+                    let p = &pts[id * d..(id + 1) * d];
+                    let dd = l1_64_dyn(q, p, d);
+                    if dd <= radius {
+                        hits.push((dd.to_bits(), id as i64));
+                    }
+                }
+                hits.sort_unstable();
+                hits
+            })
+            .collect()
+    });
+
+    let mut indptr = Vec::with_capacity(m + 1);
+    let mut total = 0i64;
+    indptr.push(total);
+    for r in &rows {
+        total += r.len() as i64;
+        indptr.push(total);
+    }
+    let mut ids = Vec::with_capacity(total as usize);
+    let mut dst = Vec::with_capacity(total as usize);
+    for r in rows {
+        for (bits, id) in r {
+            ids.push(id);
+            dst.push(f64::from_bits(bits));
+        }
+    }
+    Ok((
+        indptr.into_pyarray(py),
+        ids.into_pyarray(py),
+        dst.into_pyarray(py),
+    ))
+}
+
+/// Weighted sum of unit toroidal directions, per query.
+///
+/// $$\mathrm{out}_i = \sum_j w_{ij}\,
+///   \frac{\mathrm{sign}(\mathrm{wrap}(q_i - p_{\mathrm{ids}[i,j]}))}
+///        {\lVert \mathrm{sign}(\cdot) \rVert_1}$$
+///
+/// **Why this is torann's and not the caller's.** It is the toroidal
+/// displacement and its L1 normalization -- the metric's own definition,
+/// applied per axis. What multiplies it is the caller's: `weights` arrives
+/// already evaluated on an `(m, k)` array, so a force law stays an ordinary
+/// Python callable and never enters this crate. That split is not a
+/// convenience, it is what lets ESS keep a pure-Python wheel and a
+/// user-supplied `metric` at the same time.
+///
+/// **Why it exists.** Profiled on ESS's force kernel at `d = 100`, the
+/// `(rows, k, D)` tensor was **99.4%** of the call and the force law 0.6%.
+/// At `k = 128` that tensor is 20.5 MB and four of them are live at once --
+/// `disp`, `grad`, `norms`, `directions` -- so ~80 MB per block, well past
+/// any L3, which is why doubling the neighbourhood cost 5x rather than 2x.
+/// Here the direction is consumed into the accumulator as it is computed and
+/// the tensor never exists: `O(m * D)` of working memory instead of
+/// `O(m * k * D)`.
+///
+/// **Two semantics copied deliberately, not approximated.** NumPy rounds
+/// half to *even*, so the wrap uses `round_ties_even` and not `round`, which
+/// rounds half away from zero and would disagree on every exact half. And
+/// `np.sign(±0.0)` is `0.0`, where Rust's `signum` returns `±1.0` -- so the
+/// sign is written out rather than called. Either one would be a silent
+/// per-axis error, not a crash.
+///
+/// **Accuracy.** Each term is `±w / nnz` with `nnz` a small integer count,
+/// so the terms themselves are exactly rounded. The sum over `j` is
+/// reassociated by the algebraic float methods where NumPy sums pairwise,
+/// which is the only source of difference: a few ulp on a sum of `k` terms
+/// of similar magnitude, with no cancellation to amplify it.
+///
+/// It happens to come out bit-identical to the NumPy expression on every
+/// shape ESS runs, and that must not be relied on. The algebraic methods are
+/// documented as *non-deterministic* -- the same source may fold differently
+/// under a different compiler or target -- so the contract here is a few ulp
+/// and the agreement is a courtesy, not a guarantee. Anything that needs
+/// reproducibility across builds has to pin the wheel, not the source.
+///
+/// A negative id marks a missing neighbour and contributes nothing, which is
+/// what the caller's `-1` padding means. Coincident points are *not* handled
+/// here: a zero displacement yields a zero direction, and a caller that
+/// wants to perturb those must do it itself, where its own RNG lives.
+///
+/// Args:
+///     points: `(n, d)` float64 in `[0, 1)`.
+///     queries: `(m, d)` float64 in `[0, 1)`.
+///     ids: `(m, k)` int64 neighbour ids; negative means missing.
+///     weights: `(w, m, k)` float64 multipliers -- `w` independent
+///         weightings over one shared geometry. Every one of them reuses the
+///         same wrap and the same per-axis signs, which is the point: a
+///         caller with two force terms over one neighbour list (ESS has
+///         exactly two, repulsion and attraction) would otherwise pay for
+///         the displacement twice, and the displacement is 99% of the work.
+///
+/// Returns:
+///     `(w, m, d)` float64.
+#[pyfunction]
+#[pyo3(signature = (points, queries, ids, weights))]
+fn weighted_directions<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f64>,
+    queries: PyReadonlyArray2<'py, f64>,
+    ids: PyReadonlyArray2<'py, i64>,
+    weights: PyReadonlyArray3<'py, f64>,
+) -> PyResult<Bound<'py, PyArray3<f64>>> {
+    let (n, d) = (points.shape()[0], points.shape()[1]);
+    let (m, k) = (ids.shape()[0], ids.shape()[1]);
+    if queries.shape()[1] != d {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "points and queries must have the same number of columns",
+        ));
+    }
+    if queries.shape()[0] != m {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ids must have one row per query",
+        ));
+    }
+    let nw = weights.shape()[0];
+    if weights.shape()[1] != m || weights.shape()[2] != k {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "weights must be (w, m, k) with (m, k) matching ids",
+        ));
+    }
+    let pts = points.as_slice()?.to_vec();
+    let qs = queries.as_slice()?.to_vec();
+    let idv = ids.as_slice()?.to_vec();
+    let wv = weights.as_slice()?.to_vec();
+
+    let out: Vec<f64> = py.detach(|| {
+        (0..m)
+            .into_par_iter()
+            // The per-axis signs of one pair, so the wrap is computed once
+            // and not again for the accumulation pass. `d` doubles, not
+            // `k * d`.
+            .map_init(
+                || vec![0.0f64; d],
+                |sign: &mut Vec<f64>, i| {
+                    // Row `i` of every weighting, laid out `(w, d)`.
+                    let mut acc = vec![0.0f64; nw * d];
+                    let q = &qs[i * d..(i + 1) * d];
+                    for j in 0..k {
+                        let id = idv[i * k + j];
+                        if id < 0 || (id as usize) >= n {
+                            continue;
+                        }
+                        // The wrap is the expensive part, so it is skipped
+                        // only when *every* weighting is zero on this pair.
+                        let base = i * k + j;
+                        if (0..nw).all(|t| wv[t * m * k + base] == 0.0) {
+                            continue;
+                        }
+                        let p = &pts[id as usize * d..(id as usize + 1) * d];
+                        let mut nnz = 0.0f64;
+                        for l in 0..d {
+                            let t = q[l].algebraic_sub(p[l]);
+                            let t = t.algebraic_sub(t.round_ties_even());
+                            // `np.sign`, which is 0 at both zeros --
+                            // `f64::signum` is +/-1 there and would put a
+                            // spurious unit step on every flat axis.
+                            sign[l] = if t > 0.0 {
+                                1.0
+                            } else if t < 0.0 {
+                                -1.0
+                            } else {
+                                0.0
+                            };
+                            nnz += sign[l].abs();
+                        }
+                        // `np.maximum(norms, 1e-9)`: an all-zero direction
+                        // divides by the floor and stays zero either way.
+                        let inv = 1.0f64.algebraic_div(if nnz > 1e-9 { nnz } else { 1e-9 });
+                        for t in 0..nw {
+                            let coef = wv[t * m * k + base].algebraic_mul(inv);
+                            if coef == 0.0 {
+                                continue;
+                            }
+                            let row = &mut acc[t * d..(t + 1) * d];
+                            for l in 0..d {
+                                row[l] = row[l].algebraic_add(coef.algebraic_mul(sign[l]));
+                            }
+                        }
+                    }
+                    acc
+                },
+            )
+            .flatten()
+            .collect()
+    });
+
+    // `(m, w, d)` came out of the row-parallel loop; the caller asked for
+    // `(w, m, d)`, so the two leading axes swap.
+    let mut swapped = vec![0.0f64; nw * m * d];
+    for i in 0..m {
+        for t in 0..nw {
+            swapped[(t * m + i) * d..(t * m + i + 1) * d]
+                .copy_from_slice(&out[(i * nw + t) * d..(i * nw + t + 1) * d]);
+        }
+    }
+    swapped.into_pyarray(py).reshape([nw, m, d])
+}
+
 #[pymodule]
 #[pyo3(name = "_native")]
 fn torann_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustLshIndex>()?;
+    m.add_function(wrap_pyfunction!(brute_knn, m)?)?;
+    m.add_function(wrap_pyfunction!(brute_radius, m)?)?;
+    m.add_function(wrap_pyfunction!(weighted_directions, m)?)?;
     Ok(())
 }
