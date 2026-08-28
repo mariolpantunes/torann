@@ -127,7 +127,9 @@ try:
 except importlib.metadata.PackageNotFoundError:  # pragma: no cover
     __version__ = "0.0.0.dev0"
 
+from .base import DistArray, IdArray, Neighbours
 from .metrics import toroidal_separation
 from .wrapper import ToroidalNN, available_backends
 
-__all__ = ["ToroidalNN", "available_backends", "toroidal_separation"]
+__all__ = ["DistArray", "IdArray", "Neighbours", "ToroidalNN",
+           "available_backends", "toroidal_separation"]

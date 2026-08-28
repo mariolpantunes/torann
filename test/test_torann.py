@@ -14,7 +14,7 @@ import unittest.mock
 
 import numpy as np
 
-from torann import ToroidalNN, available_backends, rust
+from torann import Neighbours, ToroidalNN, available_backends, rust
 from torann.brute import exact_knn, exact_radius
 
 logging.basicConfig(level=logging.INFO)
@@ -971,3 +971,48 @@ class TestWeightedDirections(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQueryResultType(unittest.TestCase):
+    """Both queries answer with the same named pair, and it is still a
+    tuple -- the name is added, nothing is taken away."""
+
+    D = 8
+
+    def make(self, backend="auto"):
+        rng = np.random.default_rng(4)
+        return ToroidalNN(seed=1, backend=backend).fit(
+            rng.random((300, self.D)), rng.random((40, self.D)))
+
+    def test_knn_and_padded_radius_agree_on_the_type(self):
+        nn = self.make()
+        for res in (nn.query(k=4), nn.query_radius(0.6, pad=True)):
+            with self.subTest(res=type(res)):
+                self.assertIsInstance(res, Neighbours)
+                self.assertIsInstance(res, tuple)
+                self.assertEqual(res.ids.dtype, np.int64)
+                self.assertEqual(res.distances.dtype, np.float64)
+                self.assertEqual(res.ids.shape, res.distances.shape)
+
+    def test_the_names_are_the_positions(self):
+        """Nothing reordered: a caller unpacking the old pair is unaffected."""
+        res = self.make().query(k=4)
+        ids, dists = res
+        self.assertIs(ids, res.ids)
+        self.assertIs(dists, res.distances)
+        self.assertIs(res[0], res.ids)
+        self.assertIs(res[1], res.distances)
+
+    def test_the_ragged_form_is_one_per_query(self):
+        rows = self.make().query_radius(0.6)
+        self.assertEqual(len(rows), 40)
+        for row in rows:
+            self.assertIsInstance(row, Neighbours)
+            self.assertEqual(row.ids.shape, row.distances.shape)
+
+    def test_every_backend_answers_with_it(self):
+        for backend in available_backends():
+            with self.subTest(backend=backend):
+                nn = self.make(backend)
+                self.assertIsInstance(nn.query(k=4), Neighbours)
+                self.assertIsInstance(nn.query_radius(0.6, pad=True), Neighbours)

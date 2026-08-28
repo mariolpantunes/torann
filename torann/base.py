@@ -13,20 +13,52 @@ registered as a virtual subclass rather than inheriting.
 Array conventions (validated by the wrapper before any call): points are
 C-contiguous float64 ``(n, d)`` in ``[0, 1)``; ids are int64;
 ``query_radius`` returns a CSR triple ``(indptr, ids, dists)``.
+
+Implementations return bare tuples, because two of the three are compiled
+and a native ``pyclass`` cannot cheaply build a Python type per call. The
+public wrapper names them (`Neighbours`) once, at the boundary a user
+sees.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import NamedTuple
 
 import numpy as np
+from numpy.typing import NDArray
 
-__all__ = ["BaseIndex", "csr_to_padded"]
+__all__ = ["BaseIndex", "DistArray", "IdArray", "Neighbours", "csr_to_padded"]
+
+type IdArray = NDArray[np.int64]
+"""Neighbour ids. ``-1`` marks padding, never a point."""
+
+type DistArray = NDArray[np.float64]
+"""Toroidal-L1 distances. ``inf`` pairs with an id of ``-1``."""
+
+
+class Neighbours(NamedTuple):
+    """The answer to a query: who, and how far.
+
+    A named tuple rather than a bare pair because the two arrays are always
+    read together and nothing but position told them apart -- ``res[0]``
+    says nothing, ``res.ids`` does. It *is* a tuple, so unpacking, indexing
+    and equality are unchanged and no caller has to be updated.
+
+    Both modes return this shape. ``query`` fills ``(m, k)``;
+    ``query_radius(pad=True)`` fills ``(m, width)`` with the same ``-1`` /
+    ``inf`` convention, which is what lets a caller switch between them
+    without reshaping. ``query_radius(pad=False)`` returns one of these per
+    query, ragged and unpadded.
+    """
+
+    ids: IdArray
+    distances: DistArray
 
 
 def csr_to_padded(
-    indptr: np.ndarray, ids: np.ndarray, dists: np.ndarray, m: int
-) -> tuple[np.ndarray, np.ndarray]:
+    indptr: IdArray, ids: IdArray, dists: DistArray, m: int
+) -> Neighbours:
     """CSR range results → the dense padded form ``query_knn`` returns.
 
     Rows are padded with ``-1`` / ``inf``, so a radius result has exactly the
@@ -49,7 +81,7 @@ def csr_to_padded(
         m: Number of queries.
 
     Returns:
-        ``(ids, dists)`` of shape ``(m, width)``, where ``width`` is the
+        `Neighbours` of shape ``(m, width)``, where ``width`` is the
         largest neighbourhood found — at least 1, so downstream shapes stay
         valid when every query came back empty.
     """
@@ -63,7 +95,7 @@ def csr_to_padded(
     out_dst = np.full((m, width), np.inf)
     out_ids[row, col] = ids
     out_dst[row, col] = dists
-    return out_ids, out_dst
+    return Neighbours(out_ids, out_dst)
 
 
 class BaseIndex(ABC):
