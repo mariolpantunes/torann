@@ -1,6 +1,6 @@
 [package]
 name = "torann"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 # The distance kernel uses the algebraic float methods stabilized in 1.98.
 rust-version = "1.98"
