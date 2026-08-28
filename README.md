@@ -92,12 +92,14 @@ nn.fit(static, batch, k=2*d)            # build + tune from zero
 
 for epoch in range(32):
     idx, dist = nn.query()              # each candidate vs everything
+                                        # (a Neighbours pair: .ids, .distances)
     new = force_step(nn.candidates, idx, dist)   # your physics here
     nn.update(new)                      # selective refresh
 
 nn.promote(next_batch)                  # candidates freeze into anchors
 
-nn.query_radius(0.25)                   # range query as a post-filter
+nn.query_radius(0.25)                   # range query, one Neighbours per query
+nn.query_radius(0.25, pad=True)         # the same, dense and -1/inf padded
 nn.query(k=8, queries=Q)                # arbitrary external queries
 ```
 

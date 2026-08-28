@@ -55,7 +55,7 @@ from typing import Any, ClassVar, Literal, overload
 import numpy as np
 
 from . import rust
-from .base import csr_to_padded
+from .base import IdArray, Neighbours, csr_to_padded
 from .brute import BruteIndex, pairwise_l1, radius_scan
 from .lsh import PythonLshIndex
 
@@ -335,8 +335,8 @@ class ToroidalNN:
         self,
         k: int | None = None,
         queries: np.ndarray | None = None,
-        exclude_ids: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
+        exclude_ids: IdArray | None = None,
+    ) -> Neighbours:
         """Batch toroidal-L1 k-NN.
 
         With no arguments this is the ESS inner loop: every candidate point
@@ -350,8 +350,8 @@ class ToroidalNN:
                 automatically for the default self-join).
 
         Returns:
-            (indices, distances) of shape (m, k), sorted by distance; rows
-            are padded with -1 / inf only when fewer than k points exist.
+            `Neighbours` of shape (m, k), sorted by distance; rows are
+            padded with -1 / inf only when fewer than k points exist.
             In LSH mode under-filled queries are completed by prefix
             relaxation, so k results are guaranteed without a brute scan.
         """
@@ -360,7 +360,7 @@ class ToroidalNN:
         if kq < 1:
             raise ValueError("k must be >= 1")
         Q, ex = self._resolve_queries(queries, exclude_ids)
-        return self._impl.query_knn(np.ascontiguousarray(Q), kq, ex)
+        return Neighbours(*self._impl.query_knn(np.ascontiguousarray(Q), kq, ex))
 
     # `pad` chooses between two unrelated shapes, so it is overloaded rather
     # than left as a union: without this every caller of the padded form has
@@ -370,13 +370,13 @@ class ToroidalNN:
     def query_radius(
         self, radius: float, queries: np.ndarray | None = ...,
         exact: bool = ..., *, pad: Literal[True],
-    ) -> tuple[np.ndarray, np.ndarray]: ...
+    ) -> Neighbours: ...
 
     @overload
     def query_radius(
         self, radius: float, queries: np.ndarray | None = ...,
         exact: bool = ..., pad: Literal[False] = ...,
-    ) -> list[tuple[np.ndarray, np.ndarray]]: ...
+    ) -> list[Neighbours]: ...
 
     def query_radius(
         self,
@@ -384,7 +384,7 @@ class ToroidalNN:
         queries: np.ndarray | None = None,
         exact: bool = False,
         pad: bool = False,
-    ) -> list[tuple[np.ndarray, np.ndarray]] | tuple[np.ndarray, np.ndarray]:
+    ) -> list[Neighbours] | Neighbours:
         """Batch range query: indexed points within toroidal L1 ``radius``.
 
         In LSH mode this is a post-filter on the hash candidate set (recall
@@ -396,8 +396,9 @@ class ToroidalNN:
             queries: Optional (m, d) explicit queries; default is the
                 candidate tier.
             exact: Force the exact scan even in LSH mode.
-            pad: Return the dense ``(m, width)`` form instead of a list —
-                ``-1`` / ``inf`` padded, exactly what :meth:`query` returns,
+            pad: Return the dense ``(m, width)`` `Neighbours` instead of a
+                list — ``-1`` / ``inf`` padded, exactly what :meth:`query`
+                returns,
                 so a caller can switch between k-NN and radius without
                 reshaping anything. Prefer it: the list costs a Python pass
                 over ``m`` to build and almost always a second one to
@@ -405,8 +406,8 @@ class ToroidalNN:
                 a third of the call.
 
         Returns:
-            With ``pad``: ``(ids, distances)`` of shape ``(m, width)``.
-            Otherwise one ``(ids, distances)`` pair per query, sorted by
+            With ``pad``: one `Neighbours` of shape ``(m, width)``.
+            Otherwise one `Neighbours` per query, ragged and sorted by
             distance. The querying candidate itself is excluded for the
             default self-join.
         """
@@ -420,7 +421,8 @@ class ToroidalNN:
         m = Q.shape[0]
         if pad:
             return csr_to_padded(indptr, ids, dst, m)
-        return [(ids[indptr[i]:indptr[i + 1]], dst[indptr[i]:indptr[i + 1]])
+        return [Neighbours(ids[indptr[i]:indptr[i + 1]],
+                           dst[indptr[i]:indptr[i + 1]])
                 for i in range(m)]
 
     # ------------------------------------------------------------------ #
