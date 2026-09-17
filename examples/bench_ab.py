@@ -15,6 +15,9 @@ wrong in three ways, each of which has already produced a retracted number:
   Each case is repeated in pairs, and the report gives the median paired ratio
   with a bootstrap interval, next to an A/A run of the control against itself
   that says how wide "no change" is on that shape.
+* **In a fixed order.** The arm that runs second is the faster one, by ~0.3%
+  on average and up to 10% on a single case, so the order alternates per pair
+  and per batch and the pair count must be **even**.
 
 Arms are wheels unpacked into a directory (``build``); cases run in fresh
 subprocesses with that directory first on ``PYTHONPATH`` (``run``); the JSON is
@@ -495,12 +498,24 @@ def run(arms, suites, pattern, pairs, out, threads, shard=None):
     rows = []
     env = dict(os.environ, RAYON_NUM_THREADS=str(threads))
     t0 = time.perf_counter()
+    if pairs % 2:
+        print(f"warning: {pairs} pairs is odd, so the two arms cannot run first "
+              f"equally often; the second arm measures ~0.3% faster on average "
+              f"(much more on some cases). Use an even number.", file=sys.stderr)
     for p in range(pairs):
-        order = list(arms) if p % 2 == 0 else list(reversed(arms))
         rnd = random.Random(p)
         seq = batches[:]
         rnd.shuffle(seq)
-        for batch in seq:
+        for bi, batch in enumerate(seq):
+            # Order alternates per pair *and* per batch. Whichever arm runs
+            # second is faster -- caches, page tables and clock ramp are warm
+            # by then -- by ~0.3% on average and up to 10% on single cases, so
+            # the only defence is that each arm runs first exactly as often as
+            # the other. Alternating per pair alone leaves an odd pair count
+            # unbalanced 4-3, which an A/A run on a quiet machine then reports
+            # as a significant effect (measured on `atari`, 2026-09-17: 38 of
+            # 686 metrics flagged on a byte-identical binary).
+            order = list(arms) if (p + bi) % 2 == 0 else list(reversed(arms))
             for arm in order:
                 arm_dir = os.path.join(ARMS, arm)
                 cmd = [sys.executable, os.path.abspath(__file__), "_worker", arm_dir, *batch]
@@ -697,7 +712,7 @@ if __name__ == "__main__":
     r.add_argument("--arms", nargs=2, required=True)
     r.add_argument("--suites", nargs="+", default=["W1", "W2", "W3", "W4", "W5"])
     r.add_argument("--cases", help="regex over case ids")
-    r.add_argument("--pairs", type=int, default=7)
+    r.add_argument("--pairs", type=int, default=8)
     r.add_argument("--threads", type=int, default=os.cpu_count())
     r.add_argument("--out", required=True)
     r.add_argument("--shard", help="K/N: run the K-th of N case shards (0-based)")
