@@ -123,11 +123,15 @@ def build_arm(name, rev=None, rustflags=None, profile=None, features=None):
         os.makedirs(dest)
         with zipfile.ZipFile(os.path.join(wheels, wheel)) as zf:
             zf.extractall(dest)
-        head = subprocess.run(["git", "-C", src, "rev-parse", "HEAD"], check=True,
+        # Resolved in the real repository, not in the temporary worktree: on a
+        # shared filesystem the worktree registration can be pulled out from
+        # under a running build (an rsync --delete of `.git` will do it), and
+        # the arm's identity must not depend on that.
+        head = subprocess.run(["git", "-C", ROOT, "rev-parse", rev or "HEAD"], check=True,
                               capture_output=True, text=True).stdout.strip()
-        dirty = subprocess.run(["git", "-C", src, "status", "--porcelain", "src", "torann",
-                                "Cargo.toml", ".cargo"], capture_output=True,
-                               text=True, check=False).stdout.strip()
+        dirty = subprocess.run(["git", "-C", ROOT if rev else src, "status", "--porcelain",
+                                "src", "torann", "Cargo.toml", ".cargo"], capture_output=True,
+                               text=True, check=False).stdout.strip() if not rev else ""
         so = _native_so(os.path.join(dest, "torann"))
         meta = {"name": name, "rev": rev or "worktree", "head": head, "dirty": bool(dirty),
                 "so_sha256": _sha(so), "rustflags": rustflags, "profile": profile,
@@ -437,6 +441,26 @@ def _batches(ids):
     return out + list(lsh.values())
 
 
+def _host():
+    """Host and CPU model of this machine, recorded on every row.
+
+    A paired comparison is only valid within one machine, and the effects
+    this harness chases are micro-architectural (see the alignment finding
+    of 2026-09-17), so a merged run from several cluster nodes has to be
+    able to prove that both arms of a case met on the same CPU.
+    """
+    model = ""
+    try:
+        with open("/proc/cpuinfo", encoding="ascii", errors="ignore") as fh:
+            for line in fh:
+                if line.startswith("model name"):
+                    model = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    return {"host": os.uname().nodename, "cpu": model}
+
+
 def worker(arm_dir, ids):
     meta = _check_arm(arm_dir)
     reg = cases()
@@ -448,16 +472,26 @@ def worker(arm_dir, ids):
             row["error"] = None
         except Exception as e:  # noqa: BLE001 -- recorded in the row, never dropped
             row = {"error": f"{type(e).__name__}: {e}"}
-        row.update({"case": cid, "arm": meta["name"], "so_sha256": meta["so_sha256"],
+        row.update({"case": cid, "arm": meta["name"], "so_sha256": meta["so_sha256"], **_host(),
                     "wall_s": time.perf_counter() - t,
                     "maxrss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024})
         print("@@ROW " + json.dumps(row, default=float), flush=True)
 
 
-def run(arms, suites, pattern, pairs, out, threads):
+def run(arms, suites, pattern, pairs, out, threads, shard=None):
+    """Both arms of every case, interleaved ABBA, `pairs` times.
+
+    `shard` is `(k, n)`: case *batches* are dealt round-robin to n shards and
+    this process runs the k-th. Both arms of a case stay in the same shard,
+    so a shard can run on its own machine and the pieces merge (`merge`).
+    """
     reg = cases()
     ids = sorted(c for c in reg if c.split("/")[0] in suites and (not pattern or re.search(pattern, c)))
     batches = _batches(ids)
+    if shard:
+        k, n = shard
+        batches = [b for i, b in enumerate(batches) if i % n == k]
+        ids = [c for b in batches for c in b]
     rows = []
     env = dict(os.environ, RAYON_NUM_THREADS=str(threads))
     t0 = time.perf_counter()
@@ -482,7 +516,7 @@ def run(arms, suites, pattern, pairs, out, threads):
                 rows.extend(got)
         with open(out, "w") as fh:
             json.dump({"arms": arms, "suites": suites, "pattern": pattern, "pairs": pairs,
-                       "threads": threads, "rows": rows}, fh, indent=0)
+                       "threads": threads, "shard": shard, **_host(), "rows": rows}, fh, indent=0)
         print(f"pair {p + 1}/{pairs} done, {len(ids)} cases, {time.perf_counter() - t0:.0f}s", flush=True)
 
 
@@ -494,6 +528,37 @@ PRIMARY = ("query_ms_per_epoch", "ms_per_epoch", "us_per_call", "us_per_query",
            "fit_ms", "update_ms", "promote_ms", "query_ms", "ms_per_call")
 HIGHER_BETTER = ("recall",)
 LOWER_BETTER_QUALITY = ("projection_discrepancy", "wrap_around_discrepancy")
+
+
+def merge(paths, out):
+    """Merge shard JSONs into one, and refuse a case split across machines.
+
+    A case whose two arms were measured on different hosts is not a paired
+    comparison at all, so merging is where that has to be caught.
+    """
+    rows, arms, suites, pairs, meta = [], None, None, 0, {}
+    for p in paths:
+        with open(p) as fh:
+            d = json.load(fh)
+        if arms is None:
+            arms, suites = d["arms"], d["suites"]
+        elif [arms, suites] != [d["arms"], d["suites"]]:
+            raise SystemExit(f"{p}: arms/suites differ from the first shard")
+        pairs = max(pairs, d["pairs"])
+        rows.extend(d["rows"])
+        meta[p] = (d.get("host"), d.get("shard"))
+    seen = {}
+    for r in rows:
+        seen.setdefault(r["case"], set()).add((r.get("host"), r.get("cpu")))
+    split = {c: h for c, h in seen.items() if len(h) > 1}
+    if split:
+        raise SystemExit("cases measured on more than one machine: "
+                         + ", ".join(sorted(split)[:5]))
+    with open(out, "w") as fh:
+        json.dump({"arms": arms, "suites": suites, "pattern": None, "pairs": pairs,
+                   "threads": None, "shards": meta, "rows": rows}, fh, indent=0)
+    print(f"{out}: {len(rows)} rows, {len(seen)} cases, {len(paths)} shards, "
+          f"hosts {sorted({h for v in seen.values() for h, _ in v})}")
 
 
 def _log_ratios(ra, rb, pairs, metric):
@@ -635,6 +700,10 @@ if __name__ == "__main__":
     r.add_argument("--pairs", type=int, default=7)
     r.add_argument("--threads", type=int, default=os.cpu_count())
     r.add_argument("--out", required=True)
+    r.add_argument("--shard", help="K/N: run the K-th of N case shards (0-based)")
+    mg = sub.add_parser("merge")
+    mg.add_argument("paths", nargs="+")
+    mg.add_argument("--out", required=True)
     p = sub.add_parser("report")
     p.add_argument("path")
     p.add_argument("--aa")
@@ -645,7 +714,15 @@ if __name__ == "__main__":
     if args.cmd == "build":
         build_arm(args.name, args.rev, args.rustflags, args.profile, args.features)
     elif args.cmd == "run":
-        run(args.arms, args.suites, args.cases, args.pairs, args.out, args.threads)
+        shard = None
+        if args.shard:
+            k, n = (int(x) for x in args.shard.split("/"))
+            if not 0 <= k < n:
+                raise SystemExit("--shard K/N needs 0 <= K < N")
+            shard = (k, n)
+        run(args.arms, args.suites, args.cases, args.pairs, args.out, args.threads, shard)
+    elif args.cmd == "merge":
+        merge(args.paths, args.out)
     elif args.cmd == "report":
         report(args.path, args.aa, args.flagged)
     else:
