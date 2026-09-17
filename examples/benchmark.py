@@ -70,6 +70,7 @@ K = 5                      # ess.K_LOCAL: what the force kernel asks for
 EPOCHS = 30
 LR = 0.2
 STEP_CAP = 0.02
+AXIS_MAX = 0.5             # largest per-axis toroidal distance
 RECALL_QUERIES = 128
 _CHECKED: list[bool] = []
 
@@ -235,8 +236,14 @@ def run(dim: int, n: int, start: str, mode: str, engine: str,
     t0 = time.perf_counter()
     if use_ess:
         stats: dict = {}
+        # `esa` takes the radius normalised by the torus diameter
+        # (`ess.geometry.radius_from_normalized`), not in L1 units. Passing
+        # the L1 value used to be accepted silently below d = 32 -- where it
+        # is under 1 and read as a normalised radius several times too wide
+        # -- and to raise above it.
         pts = ess.esa(A, np.array([[0.0, 1.0]] * dim), n=n, index=index,
-                      seed=seed, stats=stats, k=K, radius=radius,
+                      seed=seed, stats=stats, k=K,
+                      radius=radius / (dim * AXIS_MAX),
                       search_mode="k_nn" if mode == "knn" else "radius",
                       epochs=epochs, patience=epochs + 1)
         total = time.perf_counter() - t0

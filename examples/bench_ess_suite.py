@@ -130,6 +130,7 @@ def run(dim, anchors, candidates, block, seed=0):
                   stats=stats)
     total = time.perf_counter() - t0
 
+    # Instrumented builds only (`--features stats`); a release wheel has none.
     impl = getattr(index, "_impl", None)
     native = impl.stats() if hasattr(impl, "stats") else {}
     queries = max(1, native.get("queries", 0))
@@ -145,8 +146,7 @@ def run(dim, anchors, candidates, block, seed=0):
         "B": getattr(index, "_B", None), "K": getattr(index, "_K", None),
         "recall": recall(index, stats.get("k", 5)),
         "pairs_per_query": native.get("pairs", 0) / queries,
-        "path": ("per_query" if native.get("cands") else "batched")
-        if native else "brute",
+        "path": native.get("path", "brute") if native else "brute",
         "fingerprint": int(np.asarray(pts * 1e9, dtype=np.int64).sum()),
     }
     return row

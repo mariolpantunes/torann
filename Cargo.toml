@@ -10,6 +10,12 @@ description = "Rust core of torann — toroidal L1 LSH index"
 name = "torann"
 crate-type = ["cdylib"]
 
+[features]
+# Query instrumentation (`RustLshIndex.stats()`). Debug builds always carry
+# it; release builds only with `maturin build --release --features stats`,
+# so a published wheel has no counters and exposes none of them.
+stats = []
+
 [dependencies]
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311"] }
 numpy = "0.29"

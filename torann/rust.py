@@ -16,6 +16,11 @@ d=8, where a 512-bit vector is the wrong shape for a one-vector distance.
 the pure-Python backend instead of taking SIGILL on the first packed
 instruction — a slow index beats a crash with no traceback.
 
+``STATS`` says whether the loaded extension carries the query
+instrumentation behind ``RustLshIndex.stats()``. Debug builds and builds with
+``--features stats`` do; release wheels do not, so they ship no counters and
+no introspection of the index's internals.
+
 The floor is a property of how the wheel is *built*, not of the source: the
 kernel names no vector type and no intrinsic, so a source build on a
 pre-AVX2 machine (`RUSTFLAGS="-C target-cpu=x86-64"`) is correct and still
@@ -39,6 +44,7 @@ logger = logging.getLogger(__name__)
 # every unpacking of a result is "Never is not iterable". The annotation says
 # what the try branch actually binds.
 RustLshIndex: Any
+STATS: bool
 brute_knn: Callable[..., Any] | None
 brute_radius: Callable[..., Any] | None
 weighted_directions: Callable[..., Any] | None
@@ -99,6 +105,7 @@ if _cpu_supports_avx2():
         # Compiled by maturin; absent from a source checkout, which is
         # exactly what the ImportError below handles.
         from ._native import (  # type: ignore[reportMissingImports]
+            STATS,
             RustLshIndex,
             brute_knn,
             brute_radius,
@@ -107,6 +114,7 @@ if _cpu_supports_avx2():
         BaseIndex.register(RustLshIndex)
         AVAILABLE = True
     except ImportError:  # pure-Python install: wrapper falls back to lsh.py
+        STATS = False
         RustLshIndex = None
         brute_knn = None
         brute_radius = None
@@ -123,11 +131,12 @@ else:
         "    RUSTFLAGS='-C target-cpu=x86-64' "
         "pip install --no-binary torann torann"
     )
+    STATS = False
     RustLshIndex = None
     brute_knn = None
     brute_radius = None
     weighted_directions = None
     AVAILABLE = False
 
-__all__ = ["AVAILABLE", "RustLshIndex", "brute_knn", "brute_radius",
+__all__ = ["AVAILABLE", "STATS", "RustLshIndex", "brute_knn", "brute_radius",
            "weighted_directions"]

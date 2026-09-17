@@ -969,9 +969,6 @@ class TestWeightedDirections(unittest.TestCase):
             rust.weighted_directions(pts, np.zeros((9, 6)), ids, w)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestQueryResultType(unittest.TestCase):
     """Both queries answer with the same named pair, and it is still a
@@ -1016,3 +1013,125 @@ class TestQueryResultType(unittest.TestCase):
                 nn = self.make(backend)
                 self.assertIsInstance(nn.query(k=4), Neighbours)
                 self.assertIsInstance(nn.query_radius(0.6, pad=True), Neighbours)
+
+
+class TestInstrumentationIsBuildTime(unittest.TestCase):
+    """Release builds carry no query instrumentation at all: no counters in
+    the hot path and no method exposing them. Only debug builds and builds
+    with the `stats` feature have `stats()`."""
+
+    def test_stats_exist_exactly_when_the_build_has_them(self):
+        if rust.RustLshIndex is None:
+            self.skipTest("compiled backend not available")
+        for name in ("stats", "reset_stats"):
+            self.assertEqual(hasattr(rust.RustLshIndex, name), rust.STATS, name)
+
+
+class TestNativeStats(unittest.TestCase):
+    """`RustLshIndex.stats()` is the instrument every performance change is
+    measured with, so its fields are pinned here: one definition per field
+    on every path. The batched join used to write neither `gather_ns` nor
+    `cands`, which is how two fields read zero on the production path for as
+    long as nothing tested them."""
+
+    KEYS = frozenset({"gather_ns", "refine_ns", "relax_ns", "queries", "cands", "pairs",
+            "loads", "relaxed", "block", "path"})
+
+    @classmethod
+    def setUpClass(cls):
+        if rust.RustLshIndex is None:
+            raise unittest.SkipTest("compiled backend not available")
+        if not rust.STATS:
+            raise unittest.SkipTest("release build: no instrumentation (build with --features stats)")
+
+    def _index(self, block=0, d=8, n=4096, seed=0):
+        rng = np.random.default_rng(seed)
+        pts = rng.random((n, d))
+        nn = ToroidalNN(seed=seed, brute_threshold=0).fit(pts[: n // 2], pts[n // 2:], k=2 * d)
+        native = rust.RustLshIndex(nn._B, nn._K, nn._L, nn.probes, nn._S, nn._U, block)
+        native.build(np.ascontiguousarray(nn._arena), nn.n_static)
+        return native, nn._arena, rng
+
+    def test_the_key_set_is_exact(self):
+        native, _, _ = self._index()
+        self.assertEqual(set(native.stats()), self.KEYS)
+        self.assertEqual(native.stats()["path"], "none")
+
+    def test_every_path_fills_every_counter(self):
+        cases = (("per_query", 1, "knn"), ("batched", 0, "knn"), ("radius", 0, "radius"))
+        for path, block, op in cases:
+            with self.subTest(path=path):
+                native, arena, rng = self._index(block)
+                q = np.ascontiguousarray(arena[rng.choice(len(arena), 256, replace=False)])
+                if op == "knn":
+                    native.query_knn(q, 10)
+                else:
+                    native.query_radius(q, 0.5)
+                st = native.stats()
+                self.assertEqual(st["path"], path)
+                self.assertEqual(st["queries"], 256)
+                for key in ("gather_ns", "refine_ns", "cands", "pairs", "loads"):
+                    self.assertGreater(st[key], 0, key)
+                self.assertLessEqual(st["cands"], st["pairs"])
+                self.assertLessEqual(st["loads"], st["pairs"])
+                if path == "batched":
+                    self.assertEqual(st["cands"], st["pairs"])
+                else:
+                    self.assertEqual(st["loads"], st["pairs"])
+
+    def test_pairs_count_the_same_thing_on_both_knn_paths(self):
+        a, arena, rng = self._index(block=1)
+        b, _, _ = self._index(block=0)
+        q = np.ascontiguousarray(arena[rng.choice(len(arena), 128, replace=False)])
+        ra, rb = a.query_knn(q, 10), b.query_knn(q, 10)
+        self.assertEqual(a.stats()["pairs"], b.stats()["pairs"])
+        np.testing.assert_array_equal(ra[0], rb[0])
+
+    def test_reset_zeroes_every_counter(self):
+        native, arena, _ = self._index()
+        native.query_knn(np.ascontiguousarray(arena[:100]), 5)
+        native.reset_stats()
+        st = native.stats()
+        for key in self.KEYS - {"block", "path"}:
+            self.assertEqual(st[key], 0, key)
+        self.assertEqual(st["path"], "none")
+
+    def test_small_batches_never_take_the_join(self):
+        """`BATCH_MIN`: below 64 queries the join has nothing to amortise,
+        whatever `block` says."""
+        native, arena, _ = self._index(block=0)
+        native.query_knn(np.ascontiguousarray(arena[:63]), 5)
+        self.assertEqual(native.stats()["path"], "per_query")
+        native.query_knn(np.ascontiguousarray(arena[:64]), 5)
+        self.assertEqual(native.stats()["path"], "batched")
+
+    def test_block_one_selects_the_per_query_path(self):
+        native, arena, _ = self._index(block=1)
+        native.query_knn(np.ascontiguousarray(arena[:1000]), 5)
+        self.assertEqual(native.stats()["path"], "per_query")
+        self.assertEqual(native.stats()["block"], 1)
+
+    def test_relaxation_is_booked_only_when_it_runs(self):
+        """One table of 512 cells over 512 points and no probes: a bucket
+        holds about one point, so k = 50 relaxes every query and k = 1
+        almost none."""
+        rng = np.random.default_rng(3)
+        pts = np.ascontiguousarray(rng.random((512, 3)))
+        S = np.array([[0, 1, 2]], dtype=np.int64)
+        U = rng.random((1, 3))
+        for block in (0, 1):
+            with self.subTest(block=block):
+                native = rust.RustLshIndex(8, 3, 1, 0, S, U, block)
+                native.build(pts, 256)
+                native.query_knn(np.ascontiguousarray(pts[:100]), 50)
+                st = native.stats()
+                self.assertEqual(st["relaxed"], 100)
+                self.assertGreater(st["relax_ns"], 0)
+                native.reset_stats()
+                q = np.ascontiguousarray(pts[:100])
+                native.query_knn(q, 1)
+                st = native.stats()
+                self.assertEqual(st["relaxed"] == 0, st["relax_ns"] == 0)
+
+if __name__ == "__main__":
+    unittest.main()

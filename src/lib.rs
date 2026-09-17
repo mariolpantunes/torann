@@ -61,6 +61,292 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 
+/// Query instrumentation, behind `stats()`: compiled into debug builds and
+/// builds with the `stats` feature, and **absent from release builds**.
+///
+/// The index answers tens of thousands of queries per ESS epoch, so any
+/// per-query cost compounds, and a counter nobody reads in production is
+/// not worth a single instruction there. Both versions of this module have
+/// the same interface; in the release one every type is zero-sized and every
+/// method an empty `#[inline(always)]` body, so each call site -- and the
+/// arithmetic feeding its arguments -- compiles to nothing. `stats()` and
+/// `reset_stats()` themselves exist only where the counters do.
+///
+/// Build an instrumented wheel with `maturin build --release --features
+/// stats`; `torann._native.STATS` says which kind was loaded.
+#[cfg(any(debug_assertions, feature = "stats"))]
+mod instrument {
+    use std::sync::atomic::{AtomicU64, AtomicU8, Ordering::Relaxed};
+
+    pub const ENABLED: bool = true;
+
+    /// A started interval.
+    #[derive(Clone, Copy)]
+    pub struct Clock(std::time::Instant);
+
+    impl Clock {
+        #[inline(always)]
+        pub fn start() -> Self {
+            Clock(std::time::Instant::now())
+        }
+
+        #[inline(always)]
+        pub fn ns(self) -> u64 {
+            self.0.elapsed().as_nanos() as u64
+        }
+    }
+
+    /// A running count of bucket rows.
+    #[derive(Default, Clone, Copy)]
+    pub struct Count(u64);
+
+    impl Count {
+        #[inline(always)]
+        pub fn new() -> Self {
+            Count(0)
+        }
+
+        #[inline(always)]
+        pub fn add(&mut self, n: usize) {
+            self.0 += n as u64;
+        }
+    }
+
+    /// One worker's share of `QueryStats`, kept on its own stack and folded
+    /// into the shared counters once per chunk of queries. Writing the
+    /// shared atomics once per *query* -- eight `lock add`s on one cache
+    /// line, from every worker -- measured 4-24% on the radius path.
+    #[derive(Default)]
+    pub struct Tally {
+        gather_ns: u64,
+        refine_ns: u64,
+        relax_ns: u64,
+        queries: u64,
+        cands: u64,
+        pairs: u64,
+        loads: u64,
+        relaxed: u64,
+    }
+
+    impl Tally {
+        #[inline(always)]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        #[inline(always)]
+        pub fn gather(&mut self, c: Clock) {
+            self.gather_ns += c.ns();
+        }
+
+        #[inline(always)]
+        pub fn refine(&mut self, c: Clock) {
+            self.refine_ns += c.ns();
+        }
+
+        /// Refinement since `c`, less time already booked elsewhere.
+        #[inline(always)]
+        pub fn refine_less(&mut self, c: Clock, booked: u64) {
+            self.refine_ns += c.ns().saturating_sub(booked);
+        }
+
+        /// One relaxed query since `c`; returns its nanoseconds.
+        #[inline(always)]
+        pub fn relax(&mut self, c: Clock) -> u64 {
+            let ns = c.ns();
+            self.relax_ns += ns;
+            self.relaxed += 1;
+            ns
+        }
+
+        #[inline(always)]
+        pub fn queries(&mut self, n: usize) {
+            self.queries += n as u64;
+        }
+
+        #[inline(always)]
+        pub fn cands(&mut self, n: usize) {
+            self.cands += n as u64;
+        }
+
+        #[inline(always)]
+        pub fn hits(&mut self, pairs: Count, loads: Count) {
+            self.pairs += pairs.0;
+            self.loads += loads.0;
+        }
+
+        /// Hits that were all scored: `cands` equals `pairs`.
+        #[inline(always)]
+        pub fn scored(&mut self, pairs: Count, loads: Count) {
+            self.cands += pairs.0;
+            self.hits(pairs, loads);
+        }
+    }
+
+    /// The path a query took.
+    #[derive(Clone, Copy)]
+    pub enum Path {
+        PerQuery = 1,
+        Batched = 2,
+        Radius = 3,
+    }
+
+    /// Cumulative query profile, CPU-ns summed across workers.
+    ///
+    /// Every field means the same thing on every query path, which is what
+    /// makes two paths comparable at all. It did not use to: the batched join
+    /// wrote neither `gather_ns` nor `cands`, so both read zero on the path
+    /// that serves production, and the per-query path added the same number
+    /// to `cands` and `pairs`. See `stats()` for the definitions.
+    #[derive(Default)]
+    pub struct QueryStats {
+        gather_ns: AtomicU64,
+        refine_ns: AtomicU64,
+        relax_ns: AtomicU64,
+        queries: AtomicU64,
+        cands: AtomicU64,
+        pairs: AtomicU64,
+        loads: AtomicU64,
+        relaxed: AtomicU64,
+        path: AtomicU8,
+    }
+
+    impl QueryStats {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn add(&self, t: &Tally) {
+            self.gather_ns.fetch_add(t.gather_ns, Relaxed);
+            self.refine_ns.fetch_add(t.refine_ns, Relaxed);
+            self.relax_ns.fetch_add(t.relax_ns, Relaxed);
+            self.queries.fetch_add(t.queries, Relaxed);
+            self.cands.fetch_add(t.cands, Relaxed);
+            self.pairs.fetch_add(t.pairs, Relaxed);
+            self.loads.fetch_add(t.loads, Relaxed);
+            self.relaxed.fetch_add(t.relaxed, Relaxed);
+        }
+
+        #[inline(always)]
+        pub fn set_path(&self, path: Path) {
+            self.path.store(path as u8, Relaxed);
+        }
+
+        /// `(name, value)` of every counter, and the last path's name.
+        pub fn snapshot(&self) -> ([(&'static str, u64); 8], &'static str) {
+            let counters = [
+                ("gather_ns", self.gather_ns.load(Relaxed)),
+                ("refine_ns", self.refine_ns.load(Relaxed)),
+                ("relax_ns", self.relax_ns.load(Relaxed)),
+                ("queries", self.queries.load(Relaxed)),
+                ("cands", self.cands.load(Relaxed)),
+                ("pairs", self.pairs.load(Relaxed)),
+                ("loads", self.loads.load(Relaxed)),
+                ("relaxed", self.relaxed.load(Relaxed)),
+            ];
+            let path = match self.path.load(Relaxed) {
+                1 => "per_query",
+                2 => "batched",
+                3 => "radius",
+                _ => "none",
+            };
+            (counters, path)
+        }
+
+        pub fn reset(&self) {
+            for c in [
+                &self.gather_ns,
+                &self.refine_ns,
+                &self.relax_ns,
+                &self.queries,
+                &self.cands,
+                &self.pairs,
+                &self.loads,
+                &self.relaxed,
+            ] {
+                c.store(0, Relaxed);
+            }
+            self.path.store(0, Relaxed);
+        }
+    }
+}
+
+/// The release build of `instrument`: the same interface, and no code.
+#[cfg(not(any(debug_assertions, feature = "stats")))]
+mod instrument {
+    pub const ENABLED: bool = false;
+
+    #[derive(Clone, Copy)]
+    pub struct Clock;
+
+    impl Clock {
+        #[inline(always)]
+        pub fn start() -> Self {
+            Clock
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Count;
+
+    impl Count {
+        #[inline(always)]
+        pub fn new() -> Self {
+            Count
+        }
+        #[inline(always)]
+        pub fn add(&mut self, _n: usize) {}
+    }
+
+    pub struct Tally;
+
+    impl Tally {
+        #[inline(always)]
+        pub fn new() -> Self {
+            Tally
+        }
+        #[inline(always)]
+        pub fn gather(&mut self, _c: Clock) {}
+        #[inline(always)]
+        pub fn refine(&mut self, _c: Clock) {}
+        #[inline(always)]
+        pub fn refine_less(&mut self, _c: Clock, _booked: u64) {}
+        #[inline(always)]
+        pub fn relax(&mut self, _c: Clock) -> u64 {
+            0
+        }
+        #[inline(always)]
+        pub fn queries(&mut self, _n: usize) {}
+        #[inline(always)]
+        pub fn cands(&mut self, _n: usize) {}
+        #[inline(always)]
+        pub fn hits(&mut self, _pairs: Count, _loads: Count) {}
+        #[inline(always)]
+        pub fn scored(&mut self, _pairs: Count, _loads: Count) {}
+    }
+
+    #[derive(Clone, Copy)]
+    pub enum Path {
+        PerQuery,
+        Batched,
+        Radius,
+    }
+
+    pub struct QueryStats;
+
+    impl QueryStats {
+        pub fn new() -> Self {
+            QueryStats
+        }
+        #[inline(always)]
+        pub fn add(&self, _t: &Tally) {}
+        #[inline(always)]
+        pub fn set_path(&self, _path: Path) {}
+    }
+}
+
+use instrument::{Clock, Count, Path, QueryStats, Tally};
+
 /// Lower bound: first index whose value is >= v.
 #[inline]
 fn lower_bound(a: &[i64], v: i64) -> usize {
@@ -392,19 +678,6 @@ struct RustLshIndex {
     stats: QueryStats,
 }
 
-/// Cumulative per-phase query timing (CPU-ns summed across rayon workers)
-/// — the built-in profiler behind `stats()` / `reset_stats()`.
-#[derive(Default)]
-struct QueryStats {
-    gather_ns: std::sync::atomic::AtomicU64,
-    refine_ns: std::sync::atomic::AtomicU64,
-    relax_ns: std::sync::atomic::AtomicU64,
-    queries: std::sync::atomic::AtomicU64,
-    cands: std::sync::atomic::AtomicU64,
-    pairs: std::sync::atomic::AtomicU64,
-    relaxed: std::sync::atomic::AtomicU64,
-}
-
 /// Memory budget for the direct-address offset tables, in bytes, counted
 /// over **both** tiers. The tuner keeps `B^K ~ n/64`, so real indexes use a
 /// few MB; the budget only trips on hand-forced parameters, where every
@@ -654,7 +927,11 @@ impl RustLshIndex {
     /// *batched*: one level-synchronous branchless lower_bound over all
     /// keys at once, keeping every miss chain in flight simultaneously
     /// (memory-level parallelism — the FAISS lesson applied to lookups).
-    fn gather_query(&self, ws: &mut Ws, x: &[f64]) {
+    ///
+    /// Returns the raw bucket hits before deduplication — the `pairs` of
+    /// `stats()`, which is the same count the batched join reports.
+    fn gather_query(&self, ws: &mut Ws, x: &[f64]) -> Count {
+        let mut hits = Count::new();
         ws.stamp_now += 1;
         ws.cand.clear();
         ws.kbuf.clear();
@@ -682,6 +959,7 @@ impl RustLshIndex {
                 let ot = &self.offs_s[t as usize * row..(t as usize + 1) * row];
                 let lo = ot[key as usize] as usize;
                 let hi = ot[key as usize + 1] as usize;
+                hits.add(hi - lo);
                 let si = &self.sids_s[t as usize * ns..(t as usize + 1) * ns];
                 for &id in &si[lo..hi] {
                     if ws.stamp[id as usize] != ws.stamp_now {
@@ -714,6 +992,7 @@ impl RustLshIndex {
                 let si = &self.sids_s[t as usize * ns..(t as usize + 1) * ns];
                 let mut lo = ws.base[i] + usize::from(sk[ws.base[i]] < key);
                 while lo < ns && sk[lo] == key {
+                    hits.add(1);
                     let id = si[lo] as usize;
                     if ws.stamp[id] != ws.stamp_now {
                         ws.stamp[id] = ws.stamp_now;
@@ -729,6 +1008,7 @@ impl RustLshIndex {
                 let (t, key) = ws.kbuf[i];
                 let (_, si) = self.cand_tier(t as usize);
                 let (lo, hi) = self.cand_range(t as usize, key, 1);
+                hits.add(hi - lo);
                 for &id in &si[lo..hi] {
                     if ws.stamp[id as usize] != ws.stamp_now {
                         ws.stamp[id as usize] = ws.stamp_now;
@@ -737,6 +1017,7 @@ impl RustLshIndex {
                 }
             }
         }
+        hits
     }
 
     // Candidate ids are effectively random, so the hardware prefetcher
@@ -910,7 +1191,15 @@ impl RustLshIndex {
     /// and `heap_offer` keeps ids distinct.
     ///
     /// Heaps are left in `ws` for the caller to relax and emit.
-    fn query_block(&self, ws: &mut BWs, q: &[f64], nq: usize, k: usize, ex: Option<&[i64]>) -> u64 {
+    fn query_block(
+        &self,
+        ws: &mut BWs,
+        q: &[f64],
+        nq: usize,
+        k: usize,
+        ex: Option<&[i64]>,
+        tally: &mut Tally,
+    ) {
         let (d, ns, nc) = (self.d, self.n_static, self.n_cand());
         ws.reset(nq, d, k, self.kdim);
         for i in 0..nq * d {
@@ -920,7 +1209,7 @@ impl RustLshIndex {
             ws.exq[i] = ex.map_or(-1, |e| e[i]);
         }
 
-        let mut pairs = 0u64;
+        let (mut pairs, mut loads) = (Count::new(), Count::new());
         let BWs {
             q32,
             exq,
@@ -936,6 +1225,9 @@ impl RustLshIndex {
         } = ws;
 
         for t in 0..self.l {
+            // One interval pair per table, not per tile: gather is the probe
+            // hashing and the bucket grouping, refine everything after it.
+            let t0 = Clock::start();
             probe.clear();
             for i in 0..nq {
                 let x = &q[i * d..(i + 1) * d];
@@ -944,6 +1236,8 @@ impl RustLshIndex {
             // Group by bucket. The keys of one table live in [0, B^K), so
             // this is a bucket-major reordering of the block's probes.
             probe.sort_unstable();
+            tally.gather(t0);
+            let t1 = Clock::start();
 
             let (sk_s, sid_s) = (
                 &self.skeys_s[t * ns..(t + 1) * ns],
@@ -988,7 +1282,8 @@ impl RustLshIndex {
                 if gids.is_empty() {
                     continue;
                 }
-                pairs += (gids.len() * group.len()) as u64;
+                pairs.add(gids.len() * group.len());
+                loads.add(gids.len());
 
                 for chunk in gids.chunks(TILE) {
                     // Gather the scattered rows into one contiguous tile.
@@ -1027,8 +1322,10 @@ impl RustLshIndex {
                     }
                 }
             }
+            tally.refine(t1);
         }
-        pairs
+        // No dedup on this path: every pair is scored.
+        tally.scored(pairs, loads);
     }
 
     /// Prefix relaxation for one under-filled query (see `lsh.py`).
@@ -1091,19 +1388,19 @@ impl RustLshIndex {
             .for_each_init(
                 || (BWs::default(), None::<Ws>, TopK::new(k)),
                 |(bws, ws, top), (bi, (oi, od))| {
-                    use std::sync::atomic::Ordering::Relaxed;
                     let q0 = bi * qb;
                     let nq = oi.len() / k;
-                    let t0 = std::time::Instant::now();
-                    let pairs = self.query_block(
+                    let mut tally = Tally::new();
+                    self.query_block(
                         bws,
                         &q[q0 * d..(q0 + nq) * d],
                         nq,
                         k,
                         ex.map(|e| &e[q0..q0 + nq]),
+                        &mut tally,
                     );
-                    let t1 = std::time::Instant::now();
-                    let mut relaxed = 0u64;
+                    let t1 = Clock::start();
+                    let mut relax_ns = 0u64;
                     for i in 0..nq {
                         let len = bws.hlen[i] as usize;
                         let (row_idx, row_dst) =
@@ -1114,20 +1411,19 @@ impl RustLshIndex {
                             for j in 0..d {
                                 w.q32[j] = x[j] as f32;
                             }
+                            let tr = Clock::start();
                             self.relax_query(w, top, x, k, bws.exq[i]);
+                            relax_ns += tally.relax(tr);
                             top.emit(row_idx, row_dst);
-                            relaxed += 1;
                         } else {
                             heap_emit(&mut bws.heaps[i * k..(i + 1) * k], len, row_idx, row_dst);
                         }
                     }
-                    let st = &self.stats;
-                    st.refine_ns.fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
-                    st.relax_ns
-                        .fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
-                    st.pairs.fetch_add(pairs, Relaxed);
-                    st.queries.fetch_add(nq as u64, Relaxed);
-                    st.relaxed.fetch_add(relaxed, Relaxed);
+                    // Emitting the heaps is refinement; relaxation is booked
+                    // on its own, and only for the queries that needed it.
+                    tally.refine_less(t1, relax_ns);
+                    tally.queries(nq);
+                    self.stats.add(&tally);
                 },
             );
     }
@@ -1147,40 +1443,52 @@ impl RustLshIndex {
         out_idx: &mut [i64],
         out_dst: &mut [f64],
     ) {
+        let m = out_idx.len() / k;
+        let chunk = self.scan_chunk(m);
         out_idx
-            .par_chunks_mut(k)
-            .zip(out_dst.par_chunks_mut(k))
+            .par_chunks_mut(chunk * k)
+            .zip(out_dst.par_chunks_mut(chunk * k))
             .enumerate()
-            .for_each_init(
-                || (Ws::new(self.n_points, d, self.kdim), TopK::new(k)),
-                |(ws, top), (qi, (row_idx, row_dst))| {
-                    use std::sync::atomic::Ordering::Relaxed;
+            .for_each(|(ci, (oi, od))| {
+                let mut ws = Ws::new(self.n_points, d, self.kdim);
+                let mut top = TopK::new(k);
+                let mut tally = Tally::new();
+                let rows = oi.chunks_mut(k).zip(od.chunks_mut(k));
+                for (i, (row_idx, row_dst)) in rows.enumerate() {
+                    let qi = ci * chunk + i;
                     let x = &q[qi * d..(qi + 1) * d];
                     for j in 0..d {
                         ws.q32[j] = x[j] as f32;
                     }
                     let exq = ex.map_or(-1, |e| e[qi]);
-                    let t0 = std::time::Instant::now();
-                    self.gather_query(ws, x);
-                    let t1 = std::time::Instant::now();
+                    let t0 = Clock::start();
+                    let hits = self.gather_query(&mut ws, x);
+                    tally.gather(t0);
+                    let t1 = Clock::start();
                     top.clear();
-                    self.refine_topk(ws, top, exq);
-                    let t2 = std::time::Instant::now();
-                    let st = &self.stats;
-                    st.cands.fetch_add(ws.cand.len() as u64, Relaxed);
-                    st.pairs.fetch_add(ws.cand.len() as u64, Relaxed);
+                    self.refine_topk(&ws, &mut top, exq);
+                    tally.refine(t1);
+                    // The gather deduplicated, so each distinct candidate is
+                    // scored once: `cands` < `pairs` whenever tables overlap.
+                    tally.cands(ws.cand.len());
+                    tally.hits(hits, hits);
+                    tally.queries(1);
                     if top.len < kk {
-                        self.relax_query(ws, top, x, k, exq);
-                        st.relax_ns
-                            .fetch_add(t2.elapsed().as_nanos() as u64, Relaxed);
-                        st.relaxed.fetch_add(1, Relaxed);
+                        let t2 = Clock::start();
+                        self.relax_query(&mut ws, &mut top, x, k, exq);
+                        tally.relax(t2);
                     }
                     top.emit(row_idx, row_dst);
-                    st.gather_ns.fetch_add((t1 - t0).as_nanos() as u64, Relaxed);
-                    st.refine_ns.fetch_add((t2 - t1).as_nanos() as u64, Relaxed);
-                    st.queries.fetch_add(1, Relaxed);
-                },
-            );
+                }
+                self.stats.add(&tally);
+            });
+    }
+
+    /// Queries per chunk of the per-query and radius scans: four chunks per
+    /// worker, so work still balances across the pool while each chunk
+    /// allocates its workspace and publishes its counters once.
+    fn scan_chunk(&self, m: usize) -> usize {
+        m.div_ceil(4 * rayon::current_num_threads().max(1)).max(1)
     }
 }
 
@@ -1238,7 +1546,7 @@ impl RustLshIndex {
             skeys_c: Vec::new(),
             sids_c: Vec::new(),
             offs_c: Vec::new(),
-            stats: QueryStats::default(),
+            stats: QueryStats::new(),
         })
     }
 
@@ -1421,8 +1729,10 @@ impl RustLshIndex {
             // block == 1 asks for one query per block, i.e. no batching:
             // the per-query path is that, without the wasted machinery.
             if m >= BATCH_MIN && self.block != 1 {
+                self.stats.set_path(Path::Batched);
                 self.knn_batched(&q, d, k, kk, ex.as_deref(), &mut out_idx, &mut out_dst);
             } else {
+                self.stats.set_path(Path::PerQuery);
                 self.knn_per_query(&q, d, k, kk, ex.as_deref(), &mut out_idx, &mut out_dst);
             }
         });
@@ -1463,18 +1773,26 @@ impl RustLshIndex {
         };
         let r32 = radius as f32;
 
-        let rows: Vec<(Vec<i64>, Vec<f64>)> = py.detach(|| {
-            (0..m)
+        let chunks: Vec<Vec<(Vec<i64>, Vec<f64>)>> = py.detach(|| {
+            self.stats.set_path(Path::Radius);
+            let chunk = self.scan_chunk(m);
+            (0..m.div_ceil(chunk))
                 .into_par_iter()
-                .map_init(
-                    || Ws::new(self.n_points, d, self.kdim),
-                    |ws, qi| {
+                .map(|c| {
+                    let (lo, hi) = (c * chunk, ((c + 1) * chunk).min(m));
+                    let mut ws = Ws::new(self.n_points, d, self.kdim);
+                    let mut tally = Tally::new();
+                    let mut out = Vec::with_capacity(hi - lo);
+                    for qi in lo..hi {
                         let x = &q[qi * d..(qi + 1) * d];
                         for j in 0..d {
                             ws.q32[j] = x[j] as f32;
                         }
                         let exq = ex.as_ref().map_or(-1, |e| e[qi]);
-                        self.gather_query(ws, x);
+                        let t0 = Clock::start();
+                        let raw = self.gather_query(&mut ws, x);
+                        tally.gather(t0);
+                        let t1 = Clock::start();
                         let mut hits: Vec<(u32, i64)> = Vec::new();
                         for &id in &ws.cand {
                             if id == exq {
@@ -1490,11 +1808,18 @@ impl RustLshIndex {
                         let ids: Vec<i64> = hits.iter().map(|h| h.1).collect();
                         let ds: Vec<f64> =
                             hits.iter().map(|h| f32::from_bits(h.0) as f64).collect();
-                        (ids, ds)
-                    },
-                )
+                        tally.refine(t1);
+                        tally.cands(ws.cand.len());
+                        tally.hits(raw, raw);
+                        tally.queries(1);
+                        out.push((ids, ds));
+                    }
+                    self.stats.add(&tally);
+                    out
+                })
                 .collect()
         });
+        let rows: Vec<(Vec<i64>, Vec<f64>)> = chunks.into_iter().flatten().collect();
 
         let mut indptr = vec![0i64; m + 1];
         for i in 0..m {
@@ -1553,31 +1878,49 @@ impl RustLshIndex {
     }
 
     /// Cumulative query-phase profile: CPU-ns summed across workers, plus
-    /// gathered-candidate and relaxation counters. Reset with reset_stats().
+    /// candidate and relaxation counters. Reset with `reset_stats()`.
+    ///
+    /// **Instrumented builds only** -- debug builds and `--features stats`.
+    /// A release build has no counters and no such method; see `instrument`.
+    ///
+    /// Every field has one definition on every path (k-NN per query, k-NN
+    /// batched, radius), so two paths can be compared field by field:
+    ///
+    /// - `gather_ns`: hashing the query, locating its buckets and, per query,
+    ///   deduplicating their rows. On the batched path this is the probe
+    ///   hashing and bucket grouping; loading the rows into tiles happens
+    ///   interleaved with scoring there, and is booked under `refine_ns`.
+    /// - `refine_ns`: scoring candidates and emitting results.
+    /// - `relax_ns`: prefix relaxation of under-filled k-NN queries only.
+    /// - `queries`: queries answered.
+    /// - `pairs`: raw bucket hits, (query, row) pairs before deduplication —
+    ///   the same count on every path for the same index and queries.
+    /// - `cands`: distance evaluations. Below `pairs` on the per-query and
+    ///   radius paths, which deduplicate first; equal on the batched path,
+    ///   which scores every pair and deduplicates in the heap.
+    /// - `loads`: bucket rows read. Equal to `pairs` per query; on the
+    ///   batched path a bucket is read once for all the queries of a block
+    ///   that probe it, so `pairs / loads` is the join's reuse factor.
+    /// - `relaxed`: queries that needed relaxation.
+    /// - `block`: the constructor's `block` argument.
+    /// - `path`: the path of the most recent query: `"per_query"`,
+    ///   `"batched"`, `"radius"`, or `"none"` before the first.
+    #[cfg(any(debug_assertions, feature = "stats"))]
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        use std::sync::atomic::Ordering::Relaxed;
         let d = PyDict::new(py);
-        d.set_item("gather_ns", self.stats.gather_ns.load(Relaxed))?;
-        d.set_item("refine_ns", self.stats.refine_ns.load(Relaxed))?;
-        d.set_item("relax_ns", self.stats.relax_ns.load(Relaxed))?;
-        d.set_item("queries", self.stats.queries.load(Relaxed))?;
-        d.set_item("cands", self.stats.cands.load(Relaxed))?;
-        d.set_item("pairs", self.stats.pairs.load(Relaxed))?;
-        d.set_item("relaxed", self.stats.relaxed.load(Relaxed))?;
+        let (counters, path) = self.stats.snapshot();
+        for (name, value) in counters {
+            d.set_item(name, value)?;
+        }
         d.set_item("block", self.block)?;
+        d.set_item("path", path)?;
         Ok(d)
     }
 
-    /// Zero the counters read by `stats`.
+    /// Zero the counters read by `stats`. Instrumented builds only.
+    #[cfg(any(debug_assertions, feature = "stats"))]
     fn reset_stats(&self) {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.stats.gather_ns.store(0, Relaxed);
-        self.stats.refine_ns.store(0, Relaxed);
-        self.stats.relax_ns.store(0, Relaxed);
-        self.stats.queries.store(0, Relaxed);
-        self.stats.cands.store(0, Relaxed);
-        self.stats.pairs.store(0, Relaxed);
-        self.stats.relaxed.store(0, Relaxed);
+        self.stats.reset();
     }
 
     /// Points in the index, both tiers.
@@ -2119,6 +2462,8 @@ fn weighted_directions<'py>(
 #[pyo3(name = "_native")]
 fn torann_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustLshIndex>()?;
+    // Whether this build carries the query instrumentation (`stats()`).
+    m.add("STATS", instrument::ENABLED)?;
     m.add_function(wrap_pyfunction!(brute_knn, m)?)?;
     m.add_function(wrap_pyfunction!(brute_radius, m)?)?;
     m.add_function(wrap_pyfunction!(weighted_directions, m)?)?;
