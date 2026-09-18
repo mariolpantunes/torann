@@ -616,21 +616,46 @@ def summarise(path, aa=None, z_crit=3.0):
       because the bursts drift through a session, so the band has to come
       from a full run and may never be narrower than the comparison's own.
 
-    With both, the A/A run flags 0 of 461 at |z| > 3, which is the threshold.
+    With both, the A/A run flags 0 of 461 at |z| > 3 on that host.
+
+    **Several A/A files may be given, and on a noisy host they must be.** A
+    single run's spread measures the scatter *inside* one session, and on
+    `atari` the dominant term is drift *between* sessions: three 7-8 pair A/A
+    runs of a byte-identical binary flagged 38, 9 and 40 of ~686 metrics, and
+    their per-case medians disagreed by up to 13.7% (p90 3.2%). With two or
+    more A/A files the band for a case also absorbs the scatter of their
+    medians, scaled back into the same units, so what the rule calls noise is
+    what the machine has actually been seen to do to a binary that did not
+    change.
     """
     data, by = _paired(path)
     a, b = data["arms"]
     cal = {}
     if aa:
-        adata, aby = _paired(aa)
-        a0, b0 = adata["arms"]
-        for cid, arms in aby.items():
-            ra, rb = arms.get(a0, {}), arms.get(b0, {})
-            okp = [p for p in sorted(set(ra) & set(rb)) if not ra[p].get("error") and not rb[p].get("error")]
-            for metric in PRIMARY:
-                lr = _log_ratios(ra, rb, okp, metric)
-                if len(lr) >= 2:
-                    cal[(cid, metric)] = _spread(lr)
+        seen = {}
+        for path_aa in ([aa] if isinstance(aa, str) else aa):
+            adata, aby = _paired(path_aa)
+            a0, b0 = adata["arms"]
+            for cid, arms in aby.items():
+                ra, rb = arms.get(a0, {}), arms.get(b0, {})
+                okp = [p for p in sorted(set(ra) & set(rb))
+                       if not ra[p].get("error") and not rb[p].get("error")]
+                for metric in PRIMARY:
+                    lr = _log_ratios(ra, rb, okp, metric)
+                    if len(lr) >= 2:
+                        seen.setdefault((cid, metric), []).append(
+                            (_spread(lr), statistics.median(lr), len(lr)))
+        for key, obs in seen.items():
+            within = max(sp for sp, _, _ in obs)
+            if len(obs) >= 2:
+                # The scatter of the per-run medians is a standard error; the
+                # verdict divides s by 1.2533/sqrt(n), so convert it back into
+                # an s before taking the wider of the two.
+                n = statistics.median(k for _, _, k in obs)
+                drift = statistics.stdev(m for _, m, _ in obs) * math.sqrt(n) / 1.2533
+                cal[key] = max(within, drift)
+            else:
+                cal[key] = within
     out = []
     for cid in sorted(by):
         ra, rb = by[cid].get(a, {}), by[cid].get(b, {})
@@ -726,7 +751,7 @@ if __name__ == "__main__":
     mg.add_argument("--out", required=True)
     p = sub.add_parser("report")
     p.add_argument("path")
-    p.add_argument("--aa")
+    p.add_argument("--aa", nargs="+", help="one or more A/A runs of this host")
     p.add_argument("--flagged", action="store_true")
     ls = sub.add_parser("list")
     ls.add_argument("--suites", nargs="+")
