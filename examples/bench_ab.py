@@ -502,19 +502,24 @@ def run(arms, suites, pattern, pairs, out, threads, shard=None):
         print(f"warning: {pairs} pairs is odd, so the two arms cannot run first "
               f"equally often; the second arm measures ~0.3% faster on average "
               f"(much more on some cases). Use an even number.", file=sys.stderr)
+    slot = {id(b): i for i, b in enumerate(batches)}
     for p in range(pairs):
         rnd = random.Random(p)
         seq = batches[:]
         rnd.shuffle(seq)
-        for bi, batch in enumerate(seq):
+        for batch in seq:
+            bi = slot[id(batch)]
             # Order alternates per pair *and* per batch. Whichever arm runs
             # second is faster -- caches, page tables and clock ramp are warm
             # by then -- by ~0.3% on average and up to 10% on single cases, so
             # the only defence is that each arm runs first exactly as often as
-            # the other. Alternating per pair alone leaves an odd pair count
-            # unbalanced 4-3, which an A/A run on a quiet machine then reports
-            # as a significant effect (measured on `atari`, 2026-09-17: 38 of
-            # 686 metrics flagged on a byte-identical binary).
+            # the other, *for every case*. The parity therefore comes from the
+            # batch's fixed slot, not from its position in the shuffled
+            # sequence, which changes every pair and would randomise the
+            # balance away. Measured on `atari` against a byte-identical
+            # binary: 38 of 686 metrics flagged with per-pair alternation
+            # alone, 9 with shuffled-position parity, and this is the version
+            # that balances each case exactly.
             order = list(arms) if (p + bi) % 2 == 0 else list(reversed(arms))
             for arm in order:
                 arm_dir = os.path.join(ARMS, arm)
