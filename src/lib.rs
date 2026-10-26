@@ -639,6 +639,24 @@ const TILE: usize = 128;
 /// which pays for a dedup stamp but scores each candidate once — wins.
 const BATCH_MIN: usize = 64;
 
+/// Widest `d` the radius join serves; above it `query_radius` keeps the
+/// per-query scan. Measured against the scan (8 interleaved pairs, every W3
+/// and W4 radius shape, results bit-identical): the join is 6-45% faster at
+/// d = 8, 16 and 32, and 9-102% *slower* at d = 64 and 100. High `d` pushes
+/// `B` to 2, so a point shares many tables with a query; the join scores
+/// every copy and the scan scores it once, and at d = 100 a distance costs
+/// more than the stamp dedup it saves. No shape between 32 and 64 was
+/// measured, so the cut sits at the last one that won.
+const RADIUS_JOIN_MAX_D: usize = 32;
+
+/// Radius results in CSR parts: per-query hit counts, then every row's ids
+/// and distances back to back.
+struct RadiusRows {
+    counts: Vec<usize>,
+    ids: Vec<i64>,
+    dists: Vec<f64>,
+}
+
 /// Toroidal-L1 LSH index, compiled.
 ///
 /// Behaviourally identical to `torann.lsh.PythonLshIndex` — given the same
@@ -1520,16 +1538,14 @@ impl RustLshIndex {
     }
 
     /// Radius over blocks of queries: the batched join, one block per worker.
-    fn radius_batched(
-        &self,
-        q: &[f64],
-        d: usize,
-        r32: f32,
-        ex: Option<&[i64]>,
-    ) -> Vec<(Vec<i64>, Vec<f64>)> {
+    ///
+    /// Each block is emitted as flat `(counts, ids, dists)` and its hit lists
+    /// are released straight away, so the join holds no more copies of the
+    /// result than the per-query scan does.
+    fn radius_batched(&self, q: &[f64], d: usize, r32: f32, ex: Option<&[i64]>) -> RadiusRows {
         let m = q.len() / d;
         let qb = self.block_size(m);
-        let blocks: Vec<Vec<(Vec<i64>, Vec<f64>)>> = (0..m.div_ceil(qb))
+        let blocks: Vec<RadiusRows> = (0..m.div_ceil(qb))
             .into_par_iter()
             .map_init(BWs::default, |bws, bi| {
                 let (q0, q1) = (bi * qb, ((bi + 1) * qb).min(m));
@@ -1544,21 +1560,37 @@ impl RustLshIndex {
                     &mut tally,
                 );
                 let t1 = Clock::start();
-                let rows = bws.rhits[..nq]
-                    .iter()
-                    .map(|h| {
-                        let ids = h.iter().map(|e| e.1).collect();
-                        let ds = h.iter().map(|e| f32::from_bits(e.0) as f64).collect();
-                        (ids, ds)
-                    })
-                    .collect();
+                let total = bws.rhits[..nq].iter().map(Vec::len).sum();
+                let mut out = RadiusRows {
+                    counts: Vec::with_capacity(nq),
+                    ids: Vec::with_capacity(total),
+                    dists: Vec::with_capacity(total),
+                };
+                for h in &mut bws.rhits[..nq] {
+                    out.counts.push(h.len());
+                    out.ids.extend(h.iter().map(|e| e.1));
+                    out.dists
+                        .extend(h.iter().map(|e| f32::from_bits(e.0) as f64));
+                    *h = Vec::new();
+                }
                 tally.refine(t1);
                 tally.queries(nq);
                 self.stats.add(&tally);
-                rows
+                out
             })
             .collect();
-        blocks.into_iter().flatten().collect()
+        let total = blocks.iter().map(|b| b.ids.len()).sum();
+        let mut rows = RadiusRows {
+            counts: Vec::with_capacity(m),
+            ids: Vec::with_capacity(total),
+            dists: Vec::with_capacity(total),
+        };
+        for b in blocks {
+            rows.counts.extend(b.counts);
+            rows.ids.extend(b.ids);
+            rows.dists.extend(b.dists);
+        }
+        rows
     }
 
     /// Prefix relaxation for one under-filled query (see `lsh.py`).
@@ -2006,23 +2038,28 @@ impl RustLshIndex {
         };
         let r32 = radius as f32;
 
-        let rows: Vec<(Vec<i64>, Vec<f64>)> = py.detach(|| {
-            // The k-NN gate: below BATCH_MIN queries there is nothing for the
+        let rows: RadiusRows = py.detach(|| {
+            // The k-NN gate (below BATCH_MIN queries there is nothing for the
             // join to amortise its bucket loads over, and block == 1 asks for
-            // the per-query path.
-            if m >= BATCH_MIN && self.block != 1 {
+            // the per-query path), plus the measured width limit.
+            if m >= BATCH_MIN && self.block != 1 && d <= RADIUS_JOIN_MAX_D {
                 self.stats.set_path(Path::RadiusBatched);
                 return self.radius_batched(&q, d, r32, ex.as_deref());
             }
             self.stats.set_path(Path::Radius);
             let chunk = self.scan_chunk(m);
-            (0..m.div_ceil(chunk))
+            let chunks: Vec<RadiusRows> = (0..m.div_ceil(chunk))
                 .into_par_iter()
                 .map(|c| {
                     let (lo, hi) = (c * chunk, ((c + 1) * chunk).min(m));
                     let mut ws = Ws::new(self.n_points, d, self.kdim);
                     let mut tally = Tally::new();
-                    let mut out = Vec::with_capacity(hi - lo);
+                    let mut out = RadiusRows {
+                        counts: Vec::with_capacity(hi - lo),
+                        ids: Vec::new(),
+                        dists: Vec::new(),
+                    };
+                    let mut hits: Vec<(u32, i64)> = Vec::new();
                     for qi in lo..hi {
                         let x = &q[qi * d..(qi + 1) * d];
                         for j in 0..d {
@@ -2033,7 +2070,7 @@ impl RustLshIndex {
                         let raw = self.gather_query(&mut ws, x);
                         tally.gather(t0);
                         let t1 = Clock::start();
-                        let mut hits: Vec<(u32, i64)> = Vec::new();
+                        hits.clear();
                         for &id in &ws.cand {
                             if id == exq {
                                 continue;
@@ -2045,39 +2082,41 @@ impl RustLshIndex {
                             }
                         }
                         hits.sort_unstable();
-                        let ids: Vec<i64> = hits.iter().map(|h| h.1).collect();
-                        let ds: Vec<f64> =
-                            hits.iter().map(|h| f32::from_bits(h.0) as f64).collect();
+                        out.counts.push(hits.len());
+                        out.ids.extend(hits.iter().map(|h| h.1));
+                        out.dists
+                            .extend(hits.iter().map(|h| f32::from_bits(h.0) as f64));
                         tally.refine(t1);
                         tally.cands(ws.cand.len());
                         tally.hits(raw, raw);
                         tally.queries(1);
-                        out.push((ids, ds));
                     }
                     self.stats.add(&tally);
                     out
                 })
-                .collect::<Vec<Vec<(Vec<i64>, Vec<f64>)>>>()
-                .into_iter()
-                .flatten()
-                .collect()
+                .collect();
+            let total = chunks.iter().map(|c| c.ids.len()).sum();
+            let mut rows = RadiusRows {
+                counts: Vec::with_capacity(m),
+                ids: Vec::with_capacity(total),
+                dists: Vec::with_capacity(total),
+            };
+            for c in chunks {
+                rows.counts.extend(c.counts);
+                rows.ids.extend(c.ids);
+                rows.dists.extend(c.dists);
+            }
+            rows
         });
 
         let mut indptr = vec![0i64; m + 1];
         for i in 0..m {
-            indptr[i + 1] = indptr[i] + rows[i].0.len() as i64;
-        }
-        let total = indptr[m] as usize;
-        let mut ids = Vec::with_capacity(total);
-        let mut ds = Vec::with_capacity(total);
-        for (ri, rd) in rows {
-            ids.extend(ri);
-            ds.extend(rd);
+            indptr[i + 1] = indptr[i] + rows.counts[i] as i64;
         }
         Ok((
             PyArray1::from_vec(py, indptr),
-            PyArray1::from_vec(py, ids),
-            PyArray1::from_vec(py, ds),
+            PyArray1::from_vec(py, rows.ids),
+            PyArray1::from_vec(py, rows.dists),
         ))
     }
 
