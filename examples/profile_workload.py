@@ -51,6 +51,7 @@ LOW_DIM = 10  # ess.geometry.LOW_DIM: radius mode from here up
 K_LOCAL = 5  # ess.ess.K_LOCAL: default k in k-NN mode
 K_ATT = 8  # ess.esa default k_att
 POOL = 64  # OBLESA's k_cand, forwarded to esa as init_pool
+BRUTE = {"threshold": None}  # --brute-threshold: forwarded to every ToroidalNN
 
 
 def oblesa_shapes(dims):
@@ -72,11 +73,13 @@ def ess_shapes(dims):
 def radius_for(points, target, rng):
     """L1 radius holding `target` neighbours: median target-th NN distance."""
     sample = points[rng.choice(len(points), min(256, len(points)), replace=False)]
-    _, dist = ToroidalNN(backend="auto").fit(points).query(k=target + 1, queries=sample)
+    _, dist = (
+        ToroidalNN(backend="auto", brute_threshold=BRUTE["threshold"]).fit(points).query(k=target + 1, queries=sample)
+    )
     return float(np.median(dist[:, target]))
 
 
-def esa_call(anchors, n, epochs, rng, timers, attraction=True):
+def esa_call(anchors, n, epochs, rng, timers, pool=POOL, attraction=True):
     """One ess.esa run's torann calls. Returns the new points."""
     d = anchors.shape[1]
     radius_mode = d >= LOW_DIM
@@ -90,14 +93,18 @@ def esa_call(anchors, n, epochs, rng, timers, attraction=True):
         timers[name] = timers.get(name, 0.0) + time.perf_counter() - t
         return out
 
-    index = ToroidalNN(backend="auto")
+    index = ToroidalNN(backend="auto", brute_threshold=BRUTE["threshold"])
     timed("fit", index.fit, anchors, k=k, radius=radius if radius_mode else None)
-    field = timed("field_fit", ToroidalNN(backend="auto").fit, anchors) if attraction else None
+    field = (
+        timed("field_fit", ToroidalNN(backend="auto", brute_threshold=BRUTE["threshold"]).fit, anchors)
+        if attraction
+        else None
+    )
 
-    candidates = rng.random((n * POOL, d))
+    candidates = rng.random((n * pool, d))
     _, novelty = timed("placement", index.query, k=1, queries=candidates)
-    best = novelty.reshape(n, POOL).argmax(axis=1)
-    active = candidates.reshape(n, POOL, d)[np.arange(n), best].copy()
+    best = novelty.reshape(n, pool).argmax(axis=1)
+    active = candidates.reshape(n, pool, d)[np.arange(n), best].copy()
     timed("promote", index.promote, active)
     all_data = np.vstack([anchors, active])
 
@@ -121,7 +128,7 @@ def esa_call(anchors, n, epochs, rng, timers, attraction=True):
     return active, type(index._impl).__name__ if index._impl is not None else "?"
 
 
-def run(shapes, epochs, seed):
+def run(shapes, epochs, seed, pool=POOL):
     rows = []
     for label, d, n_anchor, n_new, rounds in shapes:
         rng = np.random.default_rng(seed)
@@ -130,7 +137,7 @@ def run(shapes, epochs, seed):
         t0 = time.perf_counter()
         impl = "?"
         for _ in range(rounds):
-            new, impl = esa_call(anchors, n_new, epochs, rng, timers)
+            new, impl = esa_call(anchors, n_new, epochs, rng, timers, pool)
             # OBLESA measures the new points and their opposites; both become anchors.
             anchors = np.vstack([anchors, new, np.mod(1.0 - new, 1.0)])
         total = time.perf_counter() - t0
@@ -146,14 +153,17 @@ def main():
     ap.add_argument("--dims", type=int, nargs="+", default=[2, 8, 10, 32, 100])
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--pool", type=int, default=POOL, help="placement candidates per point (ESS/OBLESA: 64)")
+    ap.add_argument("--brute-threshold", type=int, help="override the brute/LSH crossover (default: measured)")
     ap.add_argument("--json", help="write the rows here")
     args = ap.parse_args()
+    BRUTE["threshold"] = args.brute_threshold
     shapes = []
     if args.family in ("oblesa", "both"):
         shapes += list(oblesa_shapes(args.dims))
     if args.family in ("ess", "both"):
         shapes += list(ess_shapes(args.dims))
-    rows = run(shapes, args.epochs, args.seed)
+    rows = run(shapes, args.epochs, args.seed, args.pool)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump({"native": rust.AVAILABLE, "epochs": args.epochs, "rows": rows}, handle, indent=1)
