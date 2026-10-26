@@ -1042,7 +1042,12 @@ class TestNativeStats(unittest.TestCase):
         self.assertEqual(native.stats()["path"], "none")
 
     def test_every_path_fills_every_counter(self):
-        cases = (("per_query", 1, "knn"), ("batched", 0, "knn"), ("radius", 0, "radius"))
+        cases = (
+            ("per_query", 1, "knn"),
+            ("batched", 0, "knn"),
+            ("radius", 1, "radius"),
+            ("radius_batched", 0, "radius"),
+        )
         for path, block, op in cases:
             with self.subTest(path=path):
                 native, arena, rng = self._index(block)
@@ -1058,7 +1063,7 @@ class TestNativeStats(unittest.TestCase):
                     self.assertGreater(st[key], 0, key)
                 self.assertLessEqual(st["cands"], st["pairs"])
                 self.assertLessEqual(st["loads"], st["pairs"])
-                if path == "batched":
+                if path in ("batched", "radius_batched"):
                     self.assertEqual(st["cands"], st["pairs"])
                 else:
                     self.assertEqual(st["loads"], st["pairs"])
@@ -1088,6 +1093,10 @@ class TestNativeStats(unittest.TestCase):
         self.assertEqual(native.stats()["path"], "per_query")
         native.query_knn(np.ascontiguousarray(arena[:64]), 5)
         self.assertEqual(native.stats()["path"], "batched")
+        native.query_radius(np.ascontiguousarray(arena[:63]), 0.5)
+        self.assertEqual(native.stats()["path"], "radius")
+        native.query_radius(np.ascontiguousarray(arena[:64]), 0.5)
+        self.assertEqual(native.stats()["path"], "radius_batched")
 
     def test_block_one_selects_the_per_query_path(self):
         native, arena, _ = self._index(block=1)
@@ -1116,6 +1125,61 @@ class TestNativeStats(unittest.TestCase):
                 native.query_knn(q, 1)
                 st = native.stats()
                 self.assertEqual(st["relaxed"] == 0, st["relax_ns"] == 0)
+
+
+class TestRadiusJoin(unittest.TestCase):
+    """The batched radius join returns exactly what the per-query scan does.
+
+    Same ids, same order, same f64 distances, on every row -- including the
+    points that sit on the cutoff, which is where two kernels that disagree
+    in the last f32 bit would part. Runs on a release build: no `stats()`
+    needed, `block=1` selects the per-query scan and `block=0` the join.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if rust.RustLshIndex is None:
+            raise unittest.SkipTest("compiled backend not available")
+
+    def _pair(self, d, n, seed):
+        rng = np.random.default_rng(seed)
+        pts = rng.random((n, d))
+        nn = ToroidalNN(seed=seed, brute_threshold=0).fit(pts[: n // 2], pts[n // 2 :], k=2 * d)
+        arena = np.ascontiguousarray(nn._arena)
+        out = []
+        for block in (1, 0):
+            native = rust.RustLshIndex(nn._B, nn._K, nn._L, nn.probes, nn._S, nn._U, block)
+            native.build(arena, nn.n_static)
+            out.append(native)
+        return out, arena, rng
+
+    def _assert_same(self, per_query, batched, q, r, ex=None):
+        a = per_query.query_radius(q, r, ex)
+        b = batched.query_radius(q, r, ex)
+        for x, y, name in zip(a, b, ("indptr", "ids", "dists"), strict=True):
+            np.testing.assert_array_equal(x, y, err_msg=name)
+        return a
+
+    def test_identical_to_the_per_query_scan(self):
+        for d in (2, 8, 16, 24, 32, 100):
+            (per_query, batched), arena, rng = self._pair(d, 4096, seed=d)
+            q = np.ascontiguousarray(arena[rng.choice(len(arena), 300, replace=False)])
+            ex = rng.integers(0, len(arena), 300).astype(np.int64)
+            for frac in (0.02, 0.06, 0.15):
+                with self.subTest(d=d, frac=frac):
+                    indptr, _, dists = self._assert_same(per_query, batched, q, frac * d, ex)
+                    self.assertGreater(indptr[-1], 0)
+                    # A cutoff exactly on returned distances: the boundary case.
+                    for r in np.unique(dists)[:: max(1, len(dists) // 5)][:5]:
+                        self._assert_same(per_query, batched, q, float(r))
+
+    def test_self_join_excludes_the_query_point(self):
+        (per_query, batched), arena, _ = self._pair(8, 2048, seed=1)
+        q = np.ascontiguousarray(arena[:500])
+        ids = np.arange(500, dtype=np.int64)
+        indptr, got, _ = self._assert_same(per_query, batched, q, 0.6, ids)
+        for i in range(500):
+            self.assertNotIn(i, got[indptr[i] : indptr[i + 1]])
 
 
 if __name__ == "__main__":

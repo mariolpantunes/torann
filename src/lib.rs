@@ -189,6 +189,7 @@ mod instrument {
         PerQuery = 1,
         Batched = 2,
         Radius = 3,
+        RadiusBatched = 4,
     }
 
     /// Cumulative query profile, CPU-ns summed across workers.
@@ -248,6 +249,7 @@ mod instrument {
                 1 => "per_query",
                 2 => "batched",
                 3 => "radius",
+                4 => "radius_batched",
                 _ => "none",
             };
             (counters, path)
@@ -330,6 +332,7 @@ mod instrument {
         PerQuery,
         Batched,
         Radius,
+        RadiusBatched,
     }
 
     pub struct QueryStats;
@@ -607,6 +610,7 @@ struct BWs {
     gids: Vec<i64>,         // ids of the bucket being scored
     tile: Vec<f32>,         // TILE * d gathered point coordinates
     tids: Vec<i64>,         // TILE ids, aligned to tile rows
+    rhits: Vec<Vec<(u32, i64)>>, // nq radius hit lists (radius join only)
 }
 
 impl BWs {
@@ -1222,6 +1226,7 @@ impl RustLshIndex {
             gids,
             tile,
             tids,
+            ..
         } = ws;
 
         for t in 0..self.l {
@@ -1326,6 +1331,234 @@ impl RustLshIndex {
         }
         // No dedup on this path: every pair is scored.
         tally.scored(pairs, loads);
+    }
+
+    /// Score one tile against every query of a bucket group, keeping the
+    /// points within `r32`: the radius twin of [`Self::score_tile`].
+    ///
+    /// The row grouping of the k-NN tile, always at runtime `d` (see the call
+    /// site); nothing is ranked here, so there is no heap and no running
+    /// worst to hold.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn score_tile_radius<const D: usize>(
+        &self,
+        group: &[(i64, u32)],
+        tile: &[f32],
+        tids: &[i64],
+        q32: &[f32],
+        exq: &[i64],
+        rhits: &mut [Vec<(u32, i64)>],
+        r32: f32,
+    ) {
+        let d = self.d;
+        let nt = tids.len();
+        for &(_, slot) in group {
+            let si = slot as usize;
+            let qrow = &q32[si * d..(si + 1) * d];
+            let (ex, hits) = (exq[si], &mut rhits[si]);
+            let mut i = 0;
+            while i + ROWS <= nt {
+                let ds = dist_l1_rows::<D>(qrow, &tile[i * d..(i + ROWS) * d], d);
+                for r in 0..ROWS {
+                    let id = tids[i + r];
+                    if ds[r] <= r32 && id != ex {
+                        hits.push((ds[r].to_bits(), id));
+                    }
+                }
+                i += ROWS;
+            }
+            while i < nt {
+                let dd = l1::<D>(qrow, &tile[i * d..(i + 1) * d], d);
+                let id = tids[i];
+                if dd <= r32 && id != ex {
+                    hits.push((dd.to_bits(), id));
+                }
+                i += 1;
+            }
+        }
+    }
+
+    /// One block of the batched radius join: [`Self::query_block`] with a
+    /// cutoff in place of a heap.
+    ///
+    /// The per-query radius scan probes every table once per query and
+    /// deduplicates through an `n`-sized stamp, so at ESS's d=32 shape its
+    /// gather alone cost 13x the k-NN join's per query. Here each bucket a
+    /// block touches is read once and scored against every query probing it,
+    /// as on the k-NN path. A point a query shares through several tables is
+    /// scored once per table and arrives once per table; the hit lists are
+    /// deduplicated by id when the block ends, keeping each id's smallest
+    /// distance (the copies are the same f32 by construction; the minimum
+    /// makes that a non-assumption). Hit lists are left in `ws.rhits`, in
+    /// `(distance, id)` order -- the order of the per-query scan.
+    #[allow(clippy::too_many_arguments)]
+    fn radius_block(
+        &self,
+        ws: &mut BWs,
+        q: &[f64],
+        nq: usize,
+        r32: f32,
+        ex: Option<&[i64]>,
+        tally: &mut Tally,
+    ) {
+        let (d, ns, nc) = (self.d, self.n_static, self.n_cand());
+        ws.reset(nq, d, 0, self.kdim);
+        ws.rhits.resize_with(nq, Vec::new);
+        for h in &mut ws.rhits[..nq] {
+            h.clear();
+        }
+        for i in 0..nq * d {
+            ws.q32[i] = q[i] as f32;
+        }
+        for i in 0..nq {
+            ws.exq[i] = ex.map_or(-1, |e| e[i]);
+        }
+
+        let (mut pairs, mut loads) = (Count::new(), Count::new());
+        let BWs {
+            q32,
+            exq,
+            codes,
+            frac,
+            clos,
+            probe,
+            gids,
+            tile,
+            tids,
+            rhits,
+            ..
+        } = ws;
+        let rhits = &mut rhits[..nq];
+
+        for t in 0..self.l {
+            let t0 = Clock::start();
+            probe.clear();
+            for i in 0..nq {
+                let x = &q[i * d..(i + 1) * d];
+                self.probe_keys(x, t, codes, frac, clos, |key| probe.push((key, i as u32)));
+            }
+            probe.sort_unstable();
+            tally.gather(t0);
+            let t1 = Clock::start();
+
+            let (sk_s, sid_s) = (
+                &self.skeys_s[t * ns..(t + 1) * ns],
+                &self.sids_s[t * ns..(t + 1) * ns],
+            );
+            let (sk_c, sid_c) = if nc > 0 {
+                self.cand_tier(t)
+            } else {
+                (&[][..], &[][..])
+            };
+
+            let mut gs = 0usize;
+            while gs < probe.len() {
+                let key = probe[gs].0;
+                let mut ge = gs + 1;
+                while ge < probe.len() && probe[ge].0 == key {
+                    ge += 1;
+                }
+                let group = &probe[gs..ge];
+                gs = ge;
+                gids.clear();
+                if ns > 0 {
+                    let (lo, hi) = if !self.offs_s.is_empty() {
+                        let row = self.offs_s.len() / self.l;
+                        let ot = &self.offs_s[t * row..(t + 1) * row];
+                        (ot[key as usize] as usize, ot[key as usize + 1] as usize)
+                    } else {
+                        (lower_bound(sk_s, key), lower_bound(sk_s, key + 1))
+                    };
+                    gids.extend_from_slice(&sid_s[lo..hi]);
+                }
+                if nc > 0 {
+                    let (lo, hi) = if !self.offs_c.is_empty() {
+                        let row = self.offs_c.len() / self.l;
+                        let ot = &self.offs_c[t * row..(t + 1) * row];
+                        (ot[key as usize] as usize, ot[key as usize + 1] as usize)
+                    } else {
+                        (lower_bound(sk_c, key), lower_bound(sk_c, key + 1))
+                    };
+                    gids.extend_from_slice(&sid_c[lo..hi]);
+                }
+                if gids.is_empty() {
+                    continue;
+                }
+                pairs.add(gids.len() * group.len());
+                loads.add(gids.len());
+
+                for chunk in gids.chunks(TILE) {
+                    for (j, &id) in chunk.iter().enumerate() {
+                        let base = id as usize * d;
+                        tile[j * d..(j + 1) * d].copy_from_slice(&self.pts32[base..base + d]);
+                        tids[j] = id;
+                    }
+                    let n = chunk.len();
+                    let (tl, ti) = (&tile[..n * d], &tids[..n]);
+                    // Runtime `d` at every width, unlike the k-NN tile's 8/16/24
+                    // specialisations: a const-`D` kernel reassociates the sum
+                    // differently (the algebraic float methods allow it), and
+                    // at d=16 and 24 that moved 9-13% of distances by an ulp
+                    // against the per-query scan, which uses `::<0>`. A radius
+                    // result is a set cut at `r`, so an ulp can move a point
+                    // across it; the join must return what the scan returns.
+                    self.score_tile_radius::<0>(group, tl, ti, q32, exq, rhits, r32);
+                }
+            }
+            tally.refine(t1);
+        }
+        let t2 = Clock::start();
+        for h in rhits.iter_mut() {
+            // By id, smallest distance first, so `dedup_by_key` keeps it.
+            h.sort_unstable_by_key(|&(bits, id)| (id, bits));
+            h.dedup_by_key(|e| e.1);
+            h.sort_unstable();
+        }
+        tally.refine(t2);
+        tally.scored(pairs, loads);
+    }
+
+    /// Radius over blocks of queries: the batched join, one block per worker.
+    fn radius_batched(
+        &self,
+        q: &[f64],
+        d: usize,
+        r32: f32,
+        ex: Option<&[i64]>,
+    ) -> Vec<(Vec<i64>, Vec<f64>)> {
+        let m = q.len() / d;
+        let qb = self.block_size(m);
+        let blocks: Vec<Vec<(Vec<i64>, Vec<f64>)>> = (0..m.div_ceil(qb))
+            .into_par_iter()
+            .map_init(BWs::default, |bws, bi| {
+                let (q0, q1) = (bi * qb, ((bi + 1) * qb).min(m));
+                let nq = q1 - q0;
+                let mut tally = Tally::new();
+                self.radius_block(
+                    bws,
+                    &q[q0 * d..q1 * d],
+                    nq,
+                    r32,
+                    ex.map(|e| &e[q0..q1]),
+                    &mut tally,
+                );
+                let t1 = Clock::start();
+                let rows = bws.rhits[..nq]
+                    .iter()
+                    .map(|h| {
+                        let ids = h.iter().map(|e| e.1).collect();
+                        let ds = h.iter().map(|e| f32::from_bits(e.0) as f64).collect();
+                        (ids, ds)
+                    })
+                    .collect();
+                tally.refine(t1);
+                tally.queries(nq);
+                self.stats.add(&tally);
+                rows
+            })
+            .collect();
+        blocks.into_iter().flatten().collect()
     }
 
     /// Prefix relaxation for one under-filled query (see `lsh.py`).
@@ -1773,7 +2006,14 @@ impl RustLshIndex {
         };
         let r32 = radius as f32;
 
-        let chunks: Vec<Vec<(Vec<i64>, Vec<f64>)>> = py.detach(|| {
+        let rows: Vec<(Vec<i64>, Vec<f64>)> = py.detach(|| {
+            // The k-NN gate: below BATCH_MIN queries there is nothing for the
+            // join to amortise its bucket loads over, and block == 1 asks for
+            // the per-query path.
+            if m >= BATCH_MIN && self.block != 1 {
+                self.stats.set_path(Path::RadiusBatched);
+                return self.radius_batched(&q, d, r32, ex.as_deref());
+            }
             self.stats.set_path(Path::Radius);
             let chunk = self.scan_chunk(m);
             (0..m.div_ceil(chunk))
@@ -1817,9 +2057,11 @@ impl RustLshIndex {
                     self.stats.add(&tally);
                     out
                 })
+                .collect::<Vec<Vec<(Vec<i64>, Vec<f64>)>>>()
+                .into_iter()
+                .flatten()
                 .collect()
         });
-        let rows: Vec<(Vec<i64>, Vec<f64>)> = chunks.into_iter().flatten().collect();
 
         let mut indptr = vec![0i64; m + 1];
         for i in 0..m {
@@ -1904,7 +2146,8 @@ impl RustLshIndex {
     /// - `relaxed`: queries that needed relaxation.
     /// - `block`: the constructor's `block` argument.
     /// - `path`: the path of the most recent query: `"per_query"`,
-    ///   `"batched"`, `"radius"`, or `"none"` before the first.
+    ///   `"batched"`, `"radius"` (per-query radius scan), `"radius_batched"`
+    ///   (the radius join), or `"none"` before the first.
     #[cfg(any(debug_assertions, feature = "stats"))]
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
