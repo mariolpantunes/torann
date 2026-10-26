@@ -61,6 +61,7 @@ def main():
         def f(x, y):
             u = RNG.random(x.shape)
             return h1(x, u, B) == h1(y, u, B)
+
         return f
 
     def pair_h2(B):
@@ -69,12 +70,14 @@ def main():
             z = np.round(RNG.normal(0, 2.0, x.shape))
             z[z == 0] = 1.0
             return h2(x, u, z, B) == h2(y, u, z, B)
+
         return f
 
     def pair_h3(B):
         def f(x, y):
             u = RNG.random(x.shape)
             return h3(x, u, B) == h3(y, u, B)
+
         return f
 
     curves = [
@@ -86,23 +89,23 @@ def main():
     for name, f, color in curves:
         axA.plot(deltas, collision_curve(f, deltas), color=color, label=name)
     for B, color in ((2, vs.BLUE), (4, vs.AQUA)):
-        axA.plot(deltas, np.maximum(0, 1 - B * deltas), ls="--", lw=1.1,
-                 color=color, alpha=0.85)
-    axA.set(title="A — collision probability vs toroidal distance",
-            xlabel="toroidal distance δ", ylabel="P[same bucket]")
+        axA.plot(deltas, np.maximum(0, 1 - B * deltas), ls="--", lw=1.1, color=color, alpha=0.85)
+    axA.set(
+        title="A — collision probability vs toroidal distance", xlabel="toroidal distance δ", ylabel="P[same bucket]"
+    )
     axA.legend()
     axA.text(0.31, 0.62, "dashed = max(0, 1−Bδ)", fontsize=8.5, color=vs.INK2)
 
     B = 4
     for z, color in ((1, vs.BLUE), (2, vs.VIOLET), (3, vs.RED)):
+
         def fz(x, y, z=z):
             u = RNG.random(x.shape)
             return h2(x, u, float(z), B) == h2(y, u, float(z), B)
+
         axB.plot(deltas, collision_curve(fz, deltas), color=color, label=f"z = {z}")
-        axB.plot(deltas, np.maximum(0, 1 - B * circ_dist(z * deltas)),
-                 ls="--", lw=1.1, color=color, alpha=0.85)
-    axB.set(title="B — H2 winding defect (B=4, fixed weight z)",
-            xlabel="toroidal distance δ", ylabel="P[same bucket]")
+        axB.plot(deltas, np.maximum(0, 1 - B * circ_dist(z * deltas)), ls="--", lw=1.1, color=color, alpha=0.85)
+    axB.set(title="B — H2 winding defect (B=4, fixed weight z)", xlabel="toroidal distance δ", ylabel="P[same bucket]")
     axB.legend()
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "1d_collision.png"), bbox_inches="tight")
@@ -122,9 +125,12 @@ def main():
     axC.axvspan(0.0, delta / 2, color=vs.GRID, alpha=0.6)
     axC.axvspan(1.0 - delta / 2, 1.0, color=vs.GRID, alpha=0.6)
     axC.text(0.03, 0.08, "pair straddles seam", fontsize=8.5, color=vs.INK2)
-    axC.set(title=f"C — seam invariance (pair distance fixed at δ={delta})",
-            xlabel="pair midpoint position on the circle",
-            ylabel="P[same bucket]", ylim=(-0.02, 1.02))
+    axC.set(
+        title=f"C — seam invariance (pair distance fixed at δ={delta})",
+        xlabel="pair midpoint position on the circle",
+        ylabel="P[same bucket]",
+        ylim=(-0.02, 1.02),
+    )
     axC.legend(loc="center")
 
     steps = np.linspace(0.0, 0.6, 61)
@@ -135,10 +141,10 @@ def main():
             u = RNG.random(TRIALS // 4)
             pc[i] = np.mean(h1(x, u, B) != h1(np.mod(x + s, 1.0), u, B))
         axD.plot(steps, pc, color=color, label=f"B = {B}")
-        axD.plot(steps, np.minimum(1, B * circ_dist(steps)), ls="--", lw=1.1,
-                 color=color, alpha=0.85)
-    axD.set(title="D — H1 index churn: P[bucket changes] per step",
-            xlabel="movement step s (toroidal)", ylabel="P[rehash]")
+        axD.plot(steps, np.minimum(1, B * circ_dist(steps)), ls="--", lw=1.1, color=color, alpha=0.85)
+    axD.set(
+        title="D — H1 index churn: P[bucket changes] per step", xlabel="movement step s (toroidal)", ylabel="P[rehash]"
+    )
     axD.legend()
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "1d_invariance.png"), bbox_inches="tight")

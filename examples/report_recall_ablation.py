@@ -28,13 +28,11 @@ ARM_ORDER = ("exact", "top2k", "rank1-4k", "rank8-16k", "ratio2x", "uniform")
 ARM_GLOSS = {
     "exact": "True k nearest neighbours. The control.",
     "top2k": "k drawn from the true 2k nearest — half the true neighbours "
-             "survive, and locality is essentially untouched.",
+    "survive, and locality is essentially untouched.",
     "rank1-4k": "k drawn from ranks k..4k. Not one true neighbour, but the "
-                "nearest points that are not true neighbours.",
-    "rank8-16k": "k drawn from ranks 8k..16k. Still local relative to n, "
-                 "several times the true neighbour distance.",
-    "ratio2x": "k drawn from everything within 2x the k-th distance — the "
-               "arm as originally specified.",
+    "nearest points that are not true neighbours.",
+    "rank8-16k": "k drawn from ranks 8k..16k. Still local relative to n, several times the true neighbour distance.",
+    "ratio2x": "k drawn from everything within 2x the k-th distance — the arm as originally specified.",
     "uniform": "k uniformly random points. The null.",
 }
 
@@ -95,8 +93,7 @@ def bars(shape_stats, key, null_value):
     # Unitless: the rule's offset is a length times a number, which calc
     # allows — a percentage times a length, which it does not, is the easy
     # way to get a silently unplaced rule here.
-    out = [f'<div class="plot" style="--null:{null_pct / 100:.4f}">',
-           '<div class="nullrule" aria-hidden="true"></div>']
+    out = [f'<div class="plot" style="--null:{null_pct / 100:.4f}">', '<div class="nullrule" aria-hidden="true"></div>']
     for arm in ARM_ORDER:
         if arm not in shape_stats:
             continue
@@ -110,31 +107,32 @@ def bars(shape_stats, key, null_value):
             f'<div class="row"><div class="rowname">{html.escape(arm)}</div>'
             f'<div class="track"><div class="{cls}" '
             f'style="width:{pct:.2f}%"></div>'
-            f'<span class="val">{v:.4f}{note}</span></div></div>')
+            f'<span class="val">{v:.4f}{note}</span></div></div>'
+        )
     out.append("</div>")
     return "\n".join(out)
 
 
 def table(shape_stats):
     """The full numeric record for one shape — every column, no rounding games."""
-    head = ("arm", "recall", "mean ratio", "separation", "vs exact",
-            "epochs")
+    head = ("arm", "recall", "mean ratio", "separation", "vs exact", "epochs")
     base = shape_stats["exact"]["sep"] if "exact" in shape_stats else None
-    rows = ["<div class=\"tablewrap\"><table><thead><tr>"
-            + "".join(f"<th>{h}</th>" for h in head) + "</tr></thead><tbody>"]
+    rows = [
+        '<div class="tablewrap"><table><thead><tr>' + "".join(f"<th>{h}</th>" for h in head) + "</tr></thead><tbody>"
+    ]
     for arm in ARM_ORDER:
         if arm not in shape_stats:
             continue
         s = shape_stats[arm]
-        delta = ("—" if base is None or arm == "exact"
-                 else f"{100 * (s['sep'] - base) / base:+.2f}%")
-        sd = f" <span class=\"sd\">±{s['sep_sd']:.4f}</span>" if s["seeds"] > 1 else ""
+        delta = "—" if base is None or arm == "exact" else f"{100 * (s['sep'] - base) / base:+.2f}%"
+        sd = f' <span class="sd">±{s["sep_sd"]:.4f}</span>' if s["seeds"] > 1 else ""
         rows.append(
-            f"<tr{' class=\"ctl\"' if arm == 'exact' else ''}>"
-            f"<td class=\"arm\">{html.escape(arm)}</td>"
+            f"<tr{' class="ctl"' if arm == 'exact' else ''}>"
+            f'<td class="arm">{html.escape(arm)}</td>'
             f"<td>{s['recall']:.3f}</td><td>{s['ratio']:.2f}</td>"
             f"<td>{s['sep']:.4f}{sd}</td><td>{delta}</td>"
-            f"<td>{s['epochs']:.0f}</td></tr>")
+            f"<td>{s['epochs']:.0f}</td></tr>"
+        )
     rows.append("</tbody></table></div>")
     return "\n".join(rows)
 
@@ -279,30 +277,32 @@ def render(rows, source):
         s = stats[shape]
         null_sep = s["uniform"]["sep"]
         start = "filled start" if anchors else "empty start"
-        label = (f'<h3>d = {dim} <span>&nbsp;·&nbsp; {start} &nbsp;·&nbsp; '
-                 f'{anchors}+{cands}</span></h3>')
-        facets_sep.append(f'<div class="facet">{label}'
-                          f'{bars(s, "sep", null_sep)}</div>')
+        label = f"<h3>d = {dim} <span>&nbsp;·&nbsp; {start} &nbsp;·&nbsp; {anchors}+{cands}</span></h3>"
+        facets_sep.append(f'<div class="facet">{label}{bars(s, "sep", null_sep)}</div>')
 
     ladder = "".join(
         f'<div class="rung"><div class="rungno">{i}</div><div>'
-        f'<b>{html.escape(a)}</b><p>{html.escape(ARM_GLOSS[a])}</p>'
-        f'</div></div>'
-        for i, a in enumerate(ARM_ORDER, 1))
+        f"<b>{html.escape(a)}</b><p>{html.escape(ARM_GLOSS[a])}</p>"
+        f"</div></div>"
+        for i, a in enumerate(ARM_ORDER, 1)
+    )
 
     tables = "".join(
-        f'<section><h3>d = {d} &nbsp;·&nbsp; '
-        f'{"filled" if a else "empty"} start &nbsp;·&nbsp; {a}+{c}</h3>'
-        f'{table(stats[(d, a, c)])}</section>'
-        for (d, a, c) in shapes)
+        f"<section><h3>d = {d} &nbsp;·&nbsp; "
+        f"{'filled' if a else 'empty'} start &nbsp;·&nbsp; {a}+{c}</h3>"
+        f"{table(stats[(d, a, c)])}</section>"
+        for (d, a, c) in shapes
+    )
 
-    legend = ('<div class="legend">'
-              '<span class="key"><span class="swatch"></span>'
-              'at or above the uniform null</span>'
-              '<span class="key"><span class="swatch crit"></span>'
-              'below the uniform null — actively clustered</span>'
-              '<span class="key"><span class="swatch null"></span>'
-              'uniform null</span></div>')
+    legend = (
+        '<div class="legend">'
+        '<span class="key"><span class="swatch"></span>'
+        "at or above the uniform null</span>"
+        '<span class="key"><span class="swatch crit"></span>'
+        "below the uniform null — actively clustered</span>"
+        '<span class="key"><span class="swatch null"></span>'
+        "uniform null</span></div>"
+    )
 
     # Headline numbers per dimension: the answer is not the same at d=8 and
     # d=32, and a report that quoted only one of them would be wrong about
@@ -311,7 +311,7 @@ def render(rows, source):
         s = stats[shape]
         return 100 * (s[arm]["sep"] - s["exact"]["sep"]) / s["exact"]["sep"]
 
-    sep_pct = pct   # kept as a name; the two tracks are one metric now
+    sep_pct = pct  # kept as a name; the two tracks are one metric now
 
     # Never quote an empty-start number beside a filled-start one as though
     # they were the same experiment: they are different jobs, and the filled
@@ -328,15 +328,18 @@ def render(rows, source):
     hi_f, lo_f = pick(d_hi, True), pick(d_lo, True)
     has_filled = hi_f is not None and lo_f is not None
 
-    filled_note = ("" if not has_filled else
-                   f"""<p><strong>The filled start — the case ESS is
+    filled_note = (
+        ""
+        if not has_filled
+        else f"""<p><strong>The filled start — the case ESS is
     actually for — is uniformly less sensitive.</strong> With anchors that
-    cannot be pushed, recall 0.5 costs {abs(pct(hi_f, 'top2k')):.2f}% at
-    d={d_hi} and {abs(pct(lo_f, 'top2k')):.2f}% at d={d_lo}; recall 0 costs
-    {abs(pct(hi_f, 'rank1-4k')):.1f}% and
-    {abs(pct(lo_f, 'rank1-4k')):.1f}%. Every arm hurts less than it does
+    cannot be pushed, recall 0.5 costs {abs(pct(hi_f, "top2k")):.2f}% at
+    d={d_hi} and {abs(pct(lo_f, "top2k")):.2f}% at d={d_lo}; recall 0 costs
+    {abs(pct(hi_f, "rank1-4k")):.1f}% and
+    {abs(pct(lo_f, "rank1-4k")):.1f}%. Every arm hurts less than it does
     from an empty start, so the slack above is a lower bound on the slack
-    in production.</p>""")
+    in production.</p>"""
+    )
 
     return f"""<title>Does ESS need recall, or only plausible repellers?</title>
 <style>{CSS}</style>
@@ -357,13 +360,13 @@ def render(rows, source):
     <p><strong>Half the true neighbours can go almost free; all of them
     cannot go at all.</strong> From an <em>empty start</em>, dropping to
     recall 0.5 while holding locality fixed costs
-    {abs(pct(hi, 'top2k')):.2f}% Clark-Evans at d={d_hi} and
-    {abs(pct(lo, 'top2k')):.2f}% at d={d_lo}. Dropping to recall 0 costs
-    {abs(pct(hi, 'rank1-4k')):.1f}% at d={d_hi} and
-    {abs(pct(lo, 'rank1-4k')):.1f}% at d={d_lo} — collapsing to the uniform
+    {abs(pct(hi, "top2k")):.2f}% Clark-Evans at d={d_hi} and
+    {abs(pct(lo, "top2k")):.2f}% at d={d_lo}. Dropping to recall 0 costs
+    {abs(pct(hi, "rank1-4k")):.1f}% at d={d_hi} and
+    {abs(pct(lo, "rank1-4k")):.1f}% at d={d_lo} — collapsing to the uniform
     null or below it — <em>even when the substituted neighbours are only
-    {100 * (stats[hi]['rank1-4k']['ratio'] - 1):.0f}&ndash;{
-    100 * (stats[lo]['rank1-4k']['ratio'] - 1):.0f}% further away</em>.</p>
+    {100 * (stats[hi]["rank1-4k"]["ratio"] - 1):.0f}&ndash;{
+        100 * (stats[lo]["rank1-4k"]["ratio"] - 1):.0f}% further away</em>.</p>
     {filled_note}
     <p>So this lands on the branch where a distance <em>ranking</em> is the
     product. The index must return real nearest neighbours, but it has
@@ -411,21 +414,21 @@ def render(rows, source):
 <section class="prose">
   <h2>Reading the collapse</h2>
   <p><code>rank1-4k</code> is the informative arm: its neighbours are only
-  {100 * (stats[lo]['rank1-4k']['ratio'] - 1):.0f}% further away than the
-  true ones at d={d_lo}, and {100 * (stats[hi]['rank1-4k']['ratio'] - 1):.0f}%
+  {100 * (stats[lo]["rank1-4k"]["ratio"] - 1):.0f}% further away than the
+  true ones at d={d_lo}, and {100 * (stats[hi]["rank1-4k"]["ratio"] - 1):.0f}%
   at d={d_hi}. Being nearly-nearest buys nothing. The pairs at risk of fusing
   are exactly the ones the force law must see, and plausible mid-range
   repulsion does not compensate for missing them — separation falls
-  {abs(sep_pct(lo, 'rank1-4k')):.0f}% at d={d_lo} and
-  {abs(sep_pct(hi, 'rank1-4k')):.0f}% at d={d_hi}.</p>
+  {abs(sep_pct(lo, "rank1-4k")):.0f}% at d={d_lo} and
+  {abs(sep_pct(hi, "rank1-4k")):.0f}% at d={d_hi}.</p>
   <p>The severity is strongly dimension-dependent, and this is the part
   worth not over-reading. At d={d_lo} a near-miss neighbour list is
-  <em>worse than random</em> — separation {stats[lo]['rank1-4k']['sep']:.4f}
-  against a null of {stats[lo]['uniform']['sep']:.4f} — because it holds points
+  <em>worse than random</em> — separation {stats[lo]["rank1-4k"]["sep"]:.4f}
+  against a null of {stats[lo]["uniform"]["sep"]:.4f} — because it holds points
   together while pushing on the wrong pairs, where random neighbours at
   least apply an isotropic mean-field pressure. At d={d_hi} that gap nearly
-  vanishes ({stats[hi]['rank1-4k']['sep']:.4f} against
-  {stats[hi]['uniform']['sep']:.4f}): once recall is zero, every arm lands on
+  vanishes ({stats[hi]["rank1-4k"]["sep"]:.4f} against
+  {stats[hi]["uniform"]["sep"]:.4f}): once recall is zero, every arm lands on
   the null and how local the substitutes were stops mattering.</p>
   <p>The arm as originally specified confirms why it needed replacing. At
   d={d_hi}, <code>ratio2x</code> and <code>uniform</code> agree to four
@@ -457,14 +460,12 @@ def render(rows, source):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--json", nargs="+",
-                    default=[os.path.join(OUT, "recall_ablation.json")])
+    ap.add_argument("--json", nargs="+", default=[os.path.join(OUT, "recall_ablation.json")])
     ap.add_argument("--out", default=os.path.join(OUT, "recall_ablation.html"))
     args = ap.parse_args()
 
     rows = [r for path in args.json for r in load(path)]
     os.makedirs(OUT, exist_ok=True)
     with open(args.out, "w") as fh:
-        fh.write(render(rows, ", ".join(os.path.basename(p)
-                                        for p in args.json)))
+        fh.write(render(rows, ", ".join(os.path.basename(p) for p in args.json)))
     print(f"[wrote {args.out}]")

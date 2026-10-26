@@ -95,7 +95,7 @@ class TestBruteMode(unittest.TestCase):
     def test_k_larger_than_n_pads(self):
         nn = ToroidalNN(seed=0).fit(self.static[:5], self.cands[:2])
         idx, dst = nn.query(k=10)
-        self.assertTrue((idx[:, :6] >= 0).all())   # 7 points minus self
+        self.assertTrue((idx[:, :6] >= 0).all())  # 7 points minus self
         self.assertTrue((idx[:, 6:] == -1).all())
         self.assertTrue(np.isinf(dst[:, 6:]).all())
 
@@ -110,7 +110,7 @@ class TestBruteMode(unittest.TestCase):
 
     def test_explicit_exclude_ids(self):
         nn = ToroidalNN(seed=0).fit(self.static, self.cands)
-        Q = self.all_pts[:20]          # query the indexed points themselves
+        Q = self.all_pts[:20]  # query the indexed points themselves
         ex = np.arange(20, dtype=np.int64)
         idx, dst = nn.query(k=3, queries=Q, exclude_ids=ex)
         self.assertFalse((idx == ex[:, None]).any())  # self never returned
@@ -118,10 +118,10 @@ class TestBruteMode(unittest.TestCase):
 
     def test_promote_empty_batch(self):
         nn = ToroidalNN(seed=0).fit(self.static, self.cands)
-        nn.promote()                   # no new batch
+        nn.promote()  # no new batch
         self.assertEqual((nn.n_static, nn.n_candidates), (500, 0))
         with self.assertRaises(ValueError):
-            nn.query(k=2)              # no candidate tier to self-join
+            nn.query(k=2)  # no candidate tier to self-join
         idx, _ = nn.query(k=2, queries=self.cands[:4])
         self.assertEqual(idx.shape, (4, 2))
 
@@ -129,13 +129,12 @@ class TestBruteMode(unittest.TestCase):
         """The from-scratch case: no anchors, first batch repels itself."""
         rng = np.random.default_rng(3)
         cands = rng.random((40, 4))
-        nn = ToroidalNN(seed=0, brute_threshold=64).fit(
-            np.empty((0, 4)), cands, k=5)
+        nn = ToroidalNN(seed=0, brute_threshold=64).fit(np.empty((0, 4)), cands, k=5)
         self.assertEqual((nn.n_static, nn.n_candidates), (0, 40))
         idx, dst = nn.query(k=5)
         self.assertEqual(idx.shape, (40, 5))
         self.assertFalse((idx == np.arange(40)[:, None]).any())  # self excluded
-        nn.promote(rng.random((40, 4)))    # crosses threshold -> LSH build
+        nn.promote(rng.random((40, 4)))  # crosses threshold -> LSH build
         self.assertEqual((nn.n_static, nn.n_candidates), (40, 40))
         self.assertTrue(nn.is_approximate)
         idx2, _ = nn.query(k=5)
@@ -192,8 +191,7 @@ class TestLSHMode(unittest.TestCase):
     def test_distances_are_true_l1_and_sorted(self):
         nn = self.make().fit(self.static, self.cands, k=16)
         idx, dst = nn.query()
-        d_true = np.take_along_axis(
-            torus_l1(self.cands, self.all_pts), idx, axis=1)
+        d_true = np.take_along_axis(torus_l1(self.cands, self.all_pts), idx, axis=1)
         np.testing.assert_allclose(dst, d_true, atol=1e-5)  # float32 refine
         self.assertTrue((np.diff(dst, axis=1) >= -1e-6).all())
 
@@ -211,8 +209,7 @@ class TestLSHMode(unittest.TestCase):
         np.testing.assert_array_equal(a[0], b[0])
 
     def test_tuning_respects_explicit_args(self):
-        nn = self.make(resolution=2, num_tables=5,
-                       dims_per_table=7).fit(self.static, self.cands)
+        nn = self.make(resolution=2, num_tables=5, dims_per_table=7).fit(self.static, self.cands)
         self.assertEqual((nn._B, nn._L, nn._K), (2, 5, 7))
 
     def test_tables_match_normative_hash(self):
@@ -224,10 +221,8 @@ class TestLSHMode(unittest.TestCase):
         fresh_c = ref_keys(nn, np.arange(nn.n_static, nn.n_points))
         np.testing.assert_array_equal(tab["cand_keys"], fresh_c)
         for t in range(nn._L):
-            np.testing.assert_array_equal(
-                np.sort(fresh_s[t]), tab["static_keys"][t])
-            np.testing.assert_array_equal(
-                fresh_s[t][tab["static_ids"][t]], tab["static_keys"][t])
+            np.testing.assert_array_equal(np.sort(fresh_s[t]), tab["static_keys"][t])
+            np.testing.assert_array_equal(fresh_s[t][tab["static_ids"][t]], tab["static_keys"][t])
 
     def test_radius_hint_tuning(self):
         """fit(radius=...) is the alternative tuning hint; the index must
@@ -252,15 +247,13 @@ class TestLSHMode(unittest.TestCase):
         """One table, no probes, oversized keys: buckets are near-empty, so
         most queries must be completed by prefix relaxation, not brute force.
         """
-        nn = self.make(num_tables=1, probes=0,
-                       dims_per_table=14).fit(self.static, self.cands, k=16)
+        nn = self.make(num_tables=1, probes=0, dims_per_table=14).fit(self.static, self.cands, k=16)
         idx, dst = nn.query()
         self.assertTrue((idx >= 0).all())
         self.assertTrue(np.isfinite(dst).all())
         cand_ids = np.arange(7000, 8000)
         self.assertFalse((idx == cand_ids[:, None]).any())
-        d_true = np.take_along_axis(
-            torus_l1(self.cands, self.all_pts), idx, axis=1)
+        d_true = np.take_along_axis(torus_l1(self.cands, self.all_pts), idx, axis=1)
         np.testing.assert_allclose(dst, d_true, atol=1e-5)
         self.assertTrue((np.diff(dst, axis=1) >= -1e-6).all())
 
@@ -288,7 +281,7 @@ class TestLifecycle(unittest.TestCase):
         return ToroidalNN(backend=self.BACKEND, **kw)
 
     def _reference(self, nn, k):
-        all_pts = np.vstack([nn._arena[:nn.n_static], nn.candidates])
+        all_pts = np.vstack([nn._arena[: nn.n_static], nn.candidates])
         cand_ids = np.arange(nn.n_static, nn.n_points)
         return brute_knn(all_pts, nn.candidates.copy(), k, cand_ids)
 
@@ -322,11 +315,10 @@ class TestLifecycle(unittest.TestCase):
             fresh = ref_keys(nn, np.arange(nn.n_static, nn.n_points))
             np.testing.assert_array_equal(tab["cand_keys"], fresh)
             for t in range(nn._L):
+                np.testing.assert_array_equal(np.sort(fresh[t]), tab["cand_sorted_keys"][t])
                 np.testing.assert_array_equal(
-                    np.sort(fresh[t]), tab["cand_sorted_keys"][t])
-                np.testing.assert_array_equal(
-                    fresh[t][tab["cand_sorted_ids"][t] - nn.n_static],
-                    tab["cand_sorted_keys"][t])
+                    fresh[t][tab["cand_sorted_ids"][t] - nn.n_static], tab["cand_sorted_keys"][t]
+                )
 
     def test_promote_merge_equals_full_rebuild(self):
         nn = self.make().fit(self.static, self.cands)
@@ -337,10 +329,8 @@ class TestLifecycle(unittest.TestCase):
         keys = ref_keys(nn, np.arange(nn.n_static))
         for t in range(nn._L):  # merged arrays must be perfectly sorted
             self.assertTrue((np.diff(tab["static_keys"][t]) >= 0).all())
-            np.testing.assert_array_equal(
-                np.sort(keys[t]), tab["static_keys"][t])
-            np.testing.assert_array_equal(
-                keys[t][tab["static_ids"][t]], tab["static_keys"][t])
+            np.testing.assert_array_equal(np.sort(keys[t]), tab["static_keys"][t])
+            np.testing.assert_array_equal(keys[t][tab["static_ids"][t]], tab["static_keys"][t])
 
     def test_promote_freezes_current_positions(self):
         nn = self.make().fit(self.static, self.cands)
@@ -367,8 +357,7 @@ class TestLifecycle(unittest.TestCase):
         self.assertGreater(recall(idx, ridx), 0.80)
 
     def test_promote_crosses_brute_threshold(self):
-        nn = self.make(brute_threshold=1500).fit(
-            self.static[:1000], self.cands[:400])
+        nn = self.make(brute_threshold=1500).fit(self.static[:1000], self.cands[:400])
         self.assertFalse(nn.is_approximate)
         nn.promote(self.rng.random((300, self.D)))  # 1700 > 1500
         self.assertTrue(nn.is_approximate)
@@ -446,17 +435,17 @@ class TestCpuFloor(unittest.TestCase):
     @staticmethod
     def _platform(machine, **system):
         """Patch what the detector sees: machine, and how `system` behaves."""
-        return (unittest.mock.patch.object(rust.platform, "machine",
-                                           return_value=machine),
-                unittest.mock.patch.object(rust.platform, "system", **system))
+        return (
+            unittest.mock.patch.object(rust.platform, "machine", return_value=machine),
+            unittest.mock.patch.object(rust.platform, "system", **system),
+        )
 
     def test_detection_answers_and_never_raises(self):
         self.assertIsInstance(rust._cpu_supports_avx2(), bool)
 
     def test_non_x86_needs_no_floor(self):
         """aarch64 has NEON as baseline, so there is nothing to gate on."""
-        with unittest.mock.patch.object(rust.platform, "machine",
-                                        return_value="aarch64"):
+        with unittest.mock.patch.object(rust.platform, "machine", return_value="aarch64"):
             self.assertTrue(rust._cpu_supports_avx2())
 
     def test_unknown_platform_assumes_supported(self):
@@ -476,16 +465,12 @@ class TestCpuFloor(unittest.TestCase):
             self.assertTrue(rust._cpu_supports_avx2())
 
     def test_linux_reads_the_cpuinfo_flags(self):
-        for flags, expected in ((" fpu vme avx2 bmi1 ", True),
-                                (" fpu vme avx bmi1 ", False),
-                                (" sse2 ssse3 ", False)):
-            with unittest.mock.patch.object(rust.platform, "machine",
-                                            return_value="x86_64"), \
-                 unittest.mock.patch.object(rust.platform, "system",
-                                            return_value="Linux"), \
-                 unittest.mock.patch(
-                     "builtins.open",
-                     return_value=io.StringIO(f"flags\t:{flags}\n")):
+        for flags, expected in ((" fpu vme avx2 bmi1 ", True), (" fpu vme avx bmi1 ", False), (" sse2 ssse3 ", False)):
+            with (
+                unittest.mock.patch.object(rust.platform, "machine", return_value="x86_64"),
+                unittest.mock.patch.object(rust.platform, "system", return_value="Linux"),
+                unittest.mock.patch("builtins.open", return_value=io.StringIO(f"flags\t:{flags}\n")),
+            ):
                 self.assertIs(rust._cpu_supports_avx2(), expected, flags)
 
 
@@ -495,8 +480,7 @@ class TestValidation(unittest.TestCase):
             ToroidalNN().query(k=1)
 
     def test_bad_params(self):
-        for kwargs in ({"resolution": 1}, {"num_tables": 0}, {"probes": -1},
-                       {"dims_per_table": 0}):
+        for kwargs in ({"resolution": 1}, {"num_tables": 0}, {"probes": -1}, {"dims_per_table": 0}):
             with self.assertRaises(ValueError):
                 ToroidalNN(**kwargs)
 
@@ -525,16 +509,14 @@ class TestValidation(unittest.TestCase):
             nn.query(k=1, queries=np.zeros((1, 3)))
 
     def test_bad_k(self):
-        nn = ToroidalNN(seed=0).fit(np.random.default_rng(0).random((10, 3)),
-                                    np.random.default_rng(1).random((4, 3)))
+        nn = ToroidalNN(seed=0).fit(np.random.default_rng(0).random((10, 3)), np.random.default_rng(1).random((4, 3)))
         with self.assertRaises(ValueError):
             nn.query(k=0)
 
     def test_exclude_ids_shape_checked(self):
         nn = ToroidalNN(seed=0).fit(np.random.default_rng(0).random((10, 3)))
         with self.assertRaises(ValueError):
-            nn.query(k=1, queries=np.zeros((2, 3)),
-                     exclude_ids=np.array([0], dtype=np.int64))
+            nn.query(k=1, queries=np.zeros((2, 3)), exclude_ids=np.array([0], dtype=np.int64))
 
     def test_available_backends(self):
         names = available_backends()
@@ -557,7 +539,8 @@ class TestBackendEquivalence(unittest.TestCase):
         # 8192 now that its brute path is compiled -- so 6800 points would
         # put one on LSH and the other on brute.
         nn = ToroidalNN(seed=4, backend=backend, brute_threshold=1).fit(
-            rng.random((6000, self.D)), rng.random((800, self.D)), k=16)
+            rng.random((6000, self.D)), rng.random((800, self.D)), k=16
+        )
         results = [nn.query()]
         for _ in range(3):
             step = rng.normal(0, 0.01, (nn.n_candidates, self.D))
@@ -577,8 +560,7 @@ class TestBackendEquivalence(unittest.TestCase):
                 nn, res = self._run_lifecycle(backend)
                 tab = nn._impl.tables()
                 for name in ref_tab:  # byte-identical tables
-                    np.testing.assert_array_equal(
-                        tab[name], ref_tab[name], err_msg=name)
+                    np.testing.assert_array_equal(tab[name], ref_tab[name], err_msg=name)
                 for (ai, ad), (bi, bd) in zip(ref_res, res):
                     np.testing.assert_allclose(bd, ad, atol=1e-5)
                     same = (ai == bi).mean()  # ids may differ only on ties
@@ -595,33 +577,33 @@ class TestMetrics(unittest.TestCase):
     def test_wrap_is_the_short_way_round(self):
         """The whole point: a pair across the seam is near, not far."""
         from torann.metrics import toroidal_separation
-        self.assertAlmostEqual(
-            toroidal_separation(np.array([[0.99], [0.01]])), 0.02)
+
+        self.assertAlmostEqual(toroidal_separation(np.array([[0.99], [0.01]])), 0.02)
 
     def test_matches_a_brute_pairwise_minimum(self):
         """Agrees with an independent O(n^2) scan, wrap included."""
         from torann.metrics import toroidal_separation
+
         rng = np.random.default_rng(0)
         for d in (1, 2, 8):
             pts = rng.random((60, d))
             D = torus_l1(pts, pts)
             np.fill_diagonal(D, np.inf)
-            self.assertAlmostEqual(
-                toroidal_separation(pts), float(D.min()), places=12,
-                msg=f"d={d}")
+            self.assertAlmostEqual(toroidal_separation(pts), float(D.min()), places=12, msg=f"d={d}")
 
     def test_inputs_are_reduced_mod_1(self):
         """Same contract as the index: any real input is accepted."""
         from torann.metrics import toroidal_separation
+
         rng = np.random.default_rng(1)
         pts = rng.random((40, 4))
         for shift in (-3.0, 2.0):
-            self.assertAlmostEqual(toroidal_separation(pts),
-                                   toroidal_separation(pts + shift), places=12)
+            self.assertAlmostEqual(toroidal_separation(pts), toroidal_separation(pts + shift), places=12)
 
     def test_degenerate_inputs(self):
         """Fewer than two points has no pair; duplicates are 0 apart."""
         from torann.metrics import toroidal_separation
+
         self.assertEqual(toroidal_separation(np.zeros((0, 3))), 0.0)
         self.assertEqual(toroidal_separation(np.zeros((1, 3))), 0.0)
         self.assertEqual(toroidal_separation(np.zeros((5, 3))), 0.0)
@@ -635,25 +617,25 @@ class TestMetrics(unittest.TestCase):
         union would report 0.01 and call a good batch bad.
         """
         from torann.metrics import toroidal_separation
+
         anchors = np.array([[0.00], [0.01]])
         batch = np.array([[0.40], [0.70]])
         # Each batch point's nearest neighbour is the other one, 0.30 away.
-        self.assertAlmostEqual(
-            toroidal_separation(batch, anchors), 0.30, places=12)
+        self.assertAlmostEqual(toroidal_separation(batch, anchors), 0.30, places=12)
         # Scoring the union instead would return the 0.01 anchor gap.
-        self.assertAlmostEqual(
-            toroidal_separation(np.vstack([anchors, batch])), 0.01, places=12)
+        self.assertAlmostEqual(toroidal_separation(np.vstack([anchors, batch])), 0.01, places=12)
 
     def test_anchors_none_and_empty_agree(self):
         from torann.metrics import toroidal_separation
+
         rng = np.random.default_rng(3)
         pts = rng.random((30, 4))
-        self.assertEqual(toroidal_separation(pts),
-                         toroidal_separation(pts, np.empty((0, 4))))
+        self.assertEqual(toroidal_separation(pts), toroidal_separation(pts, np.empty((0, 4))))
 
     def test_a_batch_on_top_of_an_anchor_scores_zero(self):
         """The failure the metric exists to catch."""
         from torann.metrics import toroidal_separation
+
         anchors = np.array([[0.25, 0.25], [0.75, 0.75]])
         batch = np.array([[0.25, 0.25], [0.10, 0.90]])
         self.assertAlmostEqual(toroidal_separation(batch, anchors), 0.0)
@@ -661,11 +643,12 @@ class TestMetrics(unittest.TestCase):
     def test_empty_batch_against_anchors(self):
         """No new points means no pair to score."""
         from torann.metrics import toroidal_separation
-        self.assertEqual(
-            toroidal_separation(np.zeros((0, 2)), np.ones((3, 2)) * 0.5), 0.0)
+
+        self.assertEqual(toroidal_separation(np.zeros((0, 2)), np.ones((3, 2)) * 0.5), 0.0)
 
     def test_anchor_shape_is_checked(self):
         from torann.metrics import toroidal_separation
+
         with self.assertRaises(ValueError):
             toroidal_separation(np.zeros((4, 3)), np.zeros((4, 2)))
 
@@ -679,6 +662,7 @@ class TestMetrics(unittest.TestCase):
         coverage radius on the ESS-vs-LHS comparison manages 0.02% there.
         """
         from torann.metrics import toroidal_separation
+
         rng = np.random.default_rng(2)
         for d in (2, 8, 32):
             n = 512
@@ -720,8 +704,7 @@ class TestRustBruteKernel(unittest.TestCase):
     def test_it_agrees_with_the_reference_scan(self):
         """Ids exactly, distances to f64 ulp -- not to f32, which is why the
         kernel is f64 despite the LSH path being f32."""
-        for n, m, d, k in ((60, 30, 100, 8), (400, 200, 100, 8),
-                           (300, 300, 32, 16), (200, 100, 8, 8)):
+        for n, m, d, k in ((60, 30, 100, 8), (400, 200, 100, 8), (300, 300, 32, 16), (200, 100, 8, 8)):
             with self.subTest(n=n, m=m, d=d, k=k):
                 pts, q, k = self._case(n, m, d, k)
                 i_np, d_np = exact_knn(pts, q, k)
@@ -783,8 +766,7 @@ class TestRustRadiusKernel(unittest.TestCase):
         return pts, q, r
 
     def test_it_agrees_with_the_reference_scan(self):
-        for n, m, d in ((60, 30, 100), (400, 200, 100), (200, 100, 8),
-                        (50, 50, 2), (300, 64, 1000)):
+        for n, m, d in ((60, 30, 100), (400, 200, 100), (200, 100, 8), (50, 50, 2), (300, 64, 1000)):
             with self.subTest(n=n, m=m, d=d):
                 pts, q, r = self._case(n, m, d)
                 a = exact_radius(pts, q, r, None)
@@ -798,13 +780,13 @@ class TestRustRadiusKernel(unittest.TestCase):
         ex = np.arange(80, dtype=np.int64)
         indptr, ids, _ = rust.brute_radius(pts, pts, r, ex)
         for i in range(80):
-            self.assertNotIn(i, ids[indptr[i]:indptr[i + 1]])
+            self.assertNotIn(i, ids[indptr[i] : indptr[i + 1]])
 
     def test_rows_are_sorted_by_distance(self):
         pts, q, r = self._case(300, 50, 10)
         indptr, _, dst = rust.brute_radius(pts, q, r, None)
         for i in range(50):
-            row = dst[indptr[i]:indptr[i + 1]]
+            row = dst[indptr[i] : indptr[i + 1]]
             self.assertTrue((np.diff(row) >= 0).all())
 
     def test_degenerate_radii_match_the_reference(self):
@@ -902,20 +884,26 @@ class TestWeightedDirections(unittest.TestCase):
     @staticmethod
     def _case(n, m, d, k, nw=1, seed=0):
         rng = np.random.default_rng(seed)
-        return (np.ascontiguousarray(rng.random((n, d))),
-                np.ascontiguousarray(rng.random((m, d))),
-                rng.integers(-1, n, (m, k)).astype(np.int64),
-                rng.standard_normal((nw, m, k)))
+        return (
+            np.ascontiguousarray(rng.random((n, d))),
+            np.ascontiguousarray(rng.random((m, d))),
+            rng.integers(-1, n, (m, k)).astype(np.int64),
+            rng.standard_normal((nw, m, k)),
+        )
 
     def test_it_agrees_with_the_reference_expression(self):
-        for n, m, d, k, nw in ((400, 200, 100, 8, 1), (400, 200, 100, 64, 2),
-                               (120, 60, 10, 5, 1), (200, 100, 3, 4, 2),
-                               (300, 64, 200, 32, 2)):
+        for n, m, d, k, nw in (
+            (400, 200, 100, 8, 1),
+            (400, 200, 100, 64, 2),
+            (120, 60, 10, 5, 1),
+            (200, 100, 3, 4, 2),
+            (300, 64, 200, 32, 2),
+        ):
             with self.subTest(n=n, m=m, d=d, k=k, nw=nw):
                 pts, q, ids, w = self._case(n, m, d, k, nw)
                 np.testing.assert_allclose(
-                    self._ref(pts, q, ids, w),
-                    rust.weighted_directions(pts, q, ids, w), atol=1e-12)
+                    self._ref(pts, q, ids, w), rust.weighted_directions(pts, q, ids, w), atol=1e-12
+                )
 
     def test_the_wrap_rounds_half_to_even(self):
         """NumPy rounds half to even; Rust's `f64::round` rounds half away
@@ -925,8 +913,7 @@ class TestWeightedDirections(unittest.TestCase):
         q = np.array([[0.75]])
         ids = np.array([[0, 1]], dtype=np.int64)
         w = np.ones((1, 1, 2))
-        np.testing.assert_array_equal(
-            self._ref(pts, q, ids, w), rust.weighted_directions(pts, q, ids, w))
+        np.testing.assert_array_equal(self._ref(pts, q, ids, w), rust.weighted_directions(pts, q, ids, w))
 
     def test_a_shared_axis_contributes_no_direction(self):
         """`np.sign(0) == 0`, where Rust's `signum` is +/-1 -- which would
@@ -939,9 +926,7 @@ class TestWeightedDirections(unittest.TestCase):
 
     def test_coincident_points_give_a_zero_vector(self):
         pts = np.array([[0.3, 0.4]])
-        out = rust.weighted_directions(
-            pts, pts.copy(), np.array([[0]], dtype=np.int64),
-            np.full((1, 1, 1), 2.0))
+        out = rust.weighted_directions(pts, pts.copy(), np.array([[0]], dtype=np.int64), np.full((1, 1, 1), 2.0))
         np.testing.assert_array_equal(out, 0.0)
 
     def test_missing_neighbours_contribute_nothing(self):
@@ -956,7 +941,7 @@ class TestWeightedDirections(unittest.TestCase):
         pts, q, ids, w = self._case(300, 100, 40, 16, 2)
         both = rust.weighted_directions(pts, q, ids, w)
         for t in range(2):
-            single = rust.weighted_directions(pts, q, ids, w[t:t + 1])
+            single = rust.weighted_directions(pts, q, ids, w[t : t + 1])
             np.testing.assert_array_equal(both[t], single[0])
 
     def test_malformed_shapes_are_refused(self):
@@ -969,7 +954,6 @@ class TestWeightedDirections(unittest.TestCase):
             rust.weighted_directions(pts, np.zeros((9, 6)), ids, w)
 
 
-
 class TestQueryResultType(unittest.TestCase):
     """Both queries answer with the same named pair, and it is still a
     tuple -- the name is added, nothing is taken away."""
@@ -978,8 +962,7 @@ class TestQueryResultType(unittest.TestCase):
 
     def make(self, backend="auto"):
         rng = np.random.default_rng(4)
-        return ToroidalNN(seed=1, backend=backend).fit(
-            rng.random((300, self.D)), rng.random((40, self.D)))
+        return ToroidalNN(seed=1, backend=backend).fit(rng.random((300, self.D)), rng.random((40, self.D)))
 
     def test_knn_and_padded_radius_agree_on_the_type(self):
         nn = self.make()
@@ -1034,8 +1017,9 @@ class TestNativeStats(unittest.TestCase):
     `cands`, which is how two fields read zero on the production path for as
     long as nothing tested them."""
 
-    KEYS = frozenset({"gather_ns", "refine_ns", "relax_ns", "queries", "cands", "pairs",
-            "loads", "relaxed", "block", "path"})
+    KEYS = frozenset(
+        {"gather_ns", "refine_ns", "relax_ns", "queries", "cands", "pairs", "loads", "relaxed", "block", "path"}
+    )
 
     @classmethod
     def setUpClass(cls):
@@ -1047,7 +1031,7 @@ class TestNativeStats(unittest.TestCase):
     def _index(self, block=0, d=8, n=4096, seed=0):
         rng = np.random.default_rng(seed)
         pts = rng.random((n, d))
-        nn = ToroidalNN(seed=seed, brute_threshold=0).fit(pts[: n // 2], pts[n // 2:], k=2 * d)
+        nn = ToroidalNN(seed=seed, brute_threshold=0).fit(pts[: n // 2], pts[n // 2 :], k=2 * d)
         native = rust.RustLshIndex(nn._B, nn._K, nn._L, nn.probes, nn._S, nn._U, block)
         native.build(np.ascontiguousarray(nn._arena), nn.n_static)
         return native, nn._arena, rng
@@ -1132,6 +1116,7 @@ class TestNativeStats(unittest.TestCase):
                 native.query_knn(q, 1)
                 st = native.stats()
                 self.assertEqual(st["relaxed"] == 0, st["relax_ns"] == 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -92,18 +92,17 @@ def run_iterative(dim, n, rounds, seed):
         pts, info = one_round(acc, dim, n, seed + r)
         acc = np.vstack([acc, pts])
         sep = metrics(acc)
-        out.append({"round": r + 1, "static_in": acc.shape[0] - n,
-                    "total": acc.shape[0], "separation": sep, **info})
-        print(f"  [d={dim} round {r + 1}/{rounds}: {acc.shape[0]} pts, "
-              f"{info['wall_s']:.2f}s, sep {sep:.4f}]", flush=True)
+        out.append({"round": r + 1, "static_in": acc.shape[0] - n, "total": acc.shape[0], "separation": sep, **info})
+        print(
+            f"  [d={dim} round {r + 1}/{rounds}: {acc.shape[0]} pts, {info['wall_s']:.2f}s, sep {sep:.4f}]", flush=True
+        )
     return out, acc
 
 
 def run_one_shot(dim, total, seed):
     """A single call for the same final point count."""
     pts, info = one_round(np.empty((0, dim)), dim, total, seed)
-    return {"round": 0, "static_in": 0, "total": total,
-            "separation": metrics(pts), **info}
+    return {"round": 0, "static_in": 0, "total": total, "separation": metrics(pts), **info}
 
 
 def report(rows):
@@ -112,29 +111,34 @@ def report(rows):
         it = [r for r in sub if r["variant"] == "iterative"]
         os_ = [r for r in sub if r["variant"] == "one-shot"]
         print(f"\nd={dim}")
-        head = ("round", "static in", "total", "mode", "L", "wall",
-                "setup", "query", "epochs", "separation")
+        head = ("round", "static in", "total", "mode", "L", "wall", "setup", "query", "epochs", "separation")
         print("| " + " | ".join(head) + " |")
         print("|" + "---|" * len(head))
         for r in it:
-            print(f"| {r['round']} | {r['static_in']} | {r['total']} "
-                  f"| {r['mode']} | {r['tables']} | {r['wall_s']:.2f}s "
-                  f"| {100 * r['setup_s'] / max(r['wall_s'], 1e-9):.0f}% "
-                  f"| {100 * r['query_s'] / max(r['wall_s'], 1e-9):.0f}% "
-                  f"| {r['epochs']} | {r['separation']:.4f} |")
+            print(
+                f"| {r['round']} | {r['static_in']} | {r['total']} "
+                f"| {r['mode']} | {r['tables']} | {r['wall_s']:.2f}s "
+                f"| {100 * r['setup_s'] / max(r['wall_s'], 1e-9):.0f}% "
+                f"| {100 * r['query_s'] / max(r['wall_s'], 1e-9):.0f}% "
+                f"| {r['epochs']} | {r['separation']:.4f} |"
+            )
         for r in os_:
-            print(f"| one-shot | 0 | {r['total']} | {r['mode']} "
-                  f"| {r['tables']} | {r['wall_s']:.2f}s "
-                  f"| {100 * r['setup_s'] / max(r['wall_s'], 1e-9):.0f}% "
-                  f"| {100 * r['query_s'] / max(r['wall_s'], 1e-9):.0f}% "
-                  f"| {r['epochs']} | {r['separation']:.4f} |")
+            print(
+                f"| one-shot | 0 | {r['total']} | {r['mode']} "
+                f"| {r['tables']} | {r['wall_s']:.2f}s "
+                f"| {100 * r['setup_s'] / max(r['wall_s'], 1e-9):.0f}% "
+                f"| {100 * r['query_s'] / max(r['wall_s'], 1e-9):.0f}% "
+                f"| {r['epochs']} | {r['separation']:.4f} |"
+            )
         if it and os_:
             tot = sum(r["wall_s"] for r in it)
-            print(f"\n  iterative total {tot:.2f}s vs one-shot "
-                  f"{os_[0]['wall_s']:.2f}s "
-                  f"({tot / max(os_[0]['wall_s'], 1e-9):.2f}x) — "
-                  f"final separation {it[-1]['separation']:.4f} vs "
-                  f"{os_[0]['separation']:.4f}")
+            print(
+                f"\n  iterative total {tot:.2f}s vs one-shot "
+                f"{os_[0]['wall_s']:.2f}s "
+                f"({tot / max(os_[0]['wall_s'], 1e-9):.2f}x) — "
+                f"final separation {it[-1]['separation']:.4f} vs "
+                f"{os_[0]['separation']:.4f}"
+            )
 
 
 if __name__ == "__main__":
@@ -146,19 +150,20 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     import torann
+
     print(f"[torann: {torann.__file__}]")
-    picked = ([CASES[i - 1] for i in args.cases] if args.cases else list(CASES))
+    picked = [CASES[i - 1] for i in args.cases] if args.cases else list(CASES)
 
     rows = []
     for dim, n in picked:
         it, _ = run_iterative(dim, n, args.rounds, args.seed)
-        rows += [{"dim": dim, "per_round": n, "variant": "iterative", **r}
-                 for r in it]
+        rows += [{"dim": dim, "per_round": n, "variant": "iterative", **r} for r in it]
         shot = run_one_shot(dim, n * args.rounds, args.seed)
         rows.append({"dim": dim, "per_round": n, "variant": "one-shot", **shot})
-        print(f"  [d={dim} one-shot {n * args.rounds} pts: "
-              f"{shot['wall_s']:.2f}s, sep {shot['separation']:.4f}]",
-              flush=True)
+        print(
+            f"  [d={dim} one-shot {n * args.rounds} pts: {shot['wall_s']:.2f}s, sep {shot['separation']:.4f}]",
+            flush=True,
+        )
 
     report(rows)
     os.makedirs(OUT, exist_ok=True)

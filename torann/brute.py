@@ -14,8 +14,7 @@ import numpy as np
 from . import rust
 from .base import BaseIndex
 
-__all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1",
-           "radius_scan"]
+__all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1", "radius_scan"]
 
 # Element budget for the temporary (queries x points) distance blocks.
 #
@@ -102,8 +101,7 @@ def pairwise_l1(Q: np.ndarray, pts: np.ndarray) -> np.ndarray:
         for lane in range(8):
             lanes[lane] += fold(j + lane, tmp)
         j += 8
-    acc = (((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))
-           + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7])))
+    acc = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3])) + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]))
     while j < d:
         acc += fold(j, tmp)
         j += 1
@@ -188,9 +186,11 @@ def exact_radius(pts, Q, radius, exclude_ids=None):
             all_dst.append(row[ids[order]])
     indptr = np.zeros(m + 1, dtype=np.int64)
     np.cumsum(np.asarray(counts, dtype=np.int64), out=indptr[1:])
-    return (indptr,
-            np.concatenate(all_ids) if all_ids else np.empty(0, np.int64),
-            np.concatenate(all_dst) if all_dst else np.empty(0))
+    return (
+        indptr,
+        np.concatenate(all_ids) if all_ids else np.empty(0, np.int64),
+        np.concatenate(all_dst) if all_dst else np.empty(0),
+    )
 
 
 def radius_scan(pts, Q, radius, exclude_ids=None):
@@ -216,8 +216,7 @@ def radius_scan(pts, Q, radius, exclude_ids=None):
     if rust.brute_radius is None:
         return exact_radius(pts, Q, radius, exclude_ids)
     q = np.ascontiguousarray(Q, dtype=np.float64)
-    ex = None if exclude_ids is None else np.ascontiguousarray(
-        exclude_ids, dtype=np.int64)
+    ex = None if exclude_ids is None else np.ascontiguousarray(exclude_ids, dtype=np.int64)
     return rust.brute_radius(pts, q, float(radius), ex)
 
 
@@ -237,7 +236,7 @@ class BruteIndex(BaseIndex):
 
     def update(self, coords):
         """Overwrite the candidate rows (no structure to maintain)."""
-        self._pts[self.n_static:] = coords
+        self._pts[self.n_static :] = coords
 
     def promote(self, new_candidates):
         """Freeze candidates into the static tier; append the new batch."""
@@ -266,8 +265,7 @@ class BruteIndex(BaseIndex):
         if rust.brute_knn is None:
             return exact_knn(self._pts, queries, k, exclude_ids)
         q = np.ascontiguousarray(queries, dtype=np.float64)
-        ex = None if exclude_ids is None else np.ascontiguousarray(
-            exclude_ids, dtype=np.int64)
+        ex = None if exclude_ids is None else np.ascontiguousarray(exclude_ids, dtype=np.int64)
         return rust.brute_knn(self._pts, q, int(k), ex)
 
     def query_radius(self, queries, radius, exclude_ids=None):

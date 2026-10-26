@@ -48,7 +48,7 @@ def exact_knn_sample(pts, Q, k, exclude_ids, block=100_000):
         diff = np.abs(Q[:, None, :] - pts[None, s:e, :])
         D = np.minimum(diff, 1.0 - diff).sum(-1)
         ids = np.broadcast_to(np.arange(s, e), D.shape).copy()
-        mask = (ids == exclude_ids[:, None])
+        mask = ids == exclude_ids[:, None]
         D[mask] = np.inf
         best_d = np.concatenate([best_d, D], axis=1)
         best_i = np.concatenate([best_i, ids], axis=1)
@@ -84,18 +84,19 @@ def run_scenario(backend, n, d, epochs):
         t_update.append(time.perf_counter() - t0)
 
     sample = rng.choice(BATCH, SAMPLE, replace=False)
-    pts = np.vstack([nn._arena[:nn.n_static], nn.candidates])
-    truth = exact_knn_sample(pts, nn.candidates[sample], k,
-                             nn.n_static + sample)
-    hits = sum(len(np.intersect1d(idx[s], truth[i]))
-               for i, s in enumerate(sample))
+    pts = np.vstack([nn._arena[: nn.n_static], nn.candidates])
+    truth = exact_knn_sample(pts, nn.candidates[sample], k, nn.n_static + sample)
+    hits = sum(len(np.intersect1d(idx[s], truth[i])) for i, s in enumerate(sample))
 
     t0 = time.perf_counter()
     nn.promote(rng.random((BATCH, d)))
     t_promote = time.perf_counter() - t0
 
     return {
-        "backend": backend, "n": n, "d": d, "k": k,
+        "backend": backend,
+        "n": n,
+        "d": d,
+        "k": k,
         "tuned": {"B": nn._B, "K": nn._K, "L": nn._L, "probes": nn.probes},
         "fit_s": round(t_fit, 4),
         "query_us_per_q": round(1e6 * float(np.median(t_query)) / BATCH, 1),
@@ -118,9 +119,11 @@ def main():
     dims = [int(x) for x in args.dims.split(",")]
     backends = args.backends.split(",")
 
-    header = (f"{'backend':>8} {'n':>8} {'d':>3} {'B/K/L':>8} {'fit(s)':>8} "
-              f"{'query(us/q)':>12} {'update(s)':>10} {'promote(s)':>10} "
-              f"{'recall':>7}")
+    header = (
+        f"{'backend':>8} {'n':>8} {'d':>3} {'B/K/L':>8} {'fit(s)':>8} "
+        f"{'query(us/q)':>12} {'update(s)':>10} {'promote(s)':>10} "
+        f"{'recall':>7}"
+    )
     print(header)
     print("-" * len(header))
     results = []
@@ -130,10 +133,12 @@ def main():
                 r = run_scenario(backend, n, d, args.epochs)
                 results.append(r)
                 tuned = f"{r['tuned']['B']}/{r['tuned']['K']}/{r['tuned']['L']}"
-                print(f"{r['backend']:>8} {r['n']:>8} {r['d']:>3} {tuned:>8} "
-                      f"{r['fit_s']:>8.3f} {r['query_us_per_q']:>12.1f} "
-                      f"{r['update_s']:>10.4f} {r['promote_s']:>10.4f} "
-                      f"{r['recall']:>7.3f}")
+                print(
+                    f"{r['backend']:>8} {r['n']:>8} {r['d']:>3} {tuned:>8} "
+                    f"{r['fit_s']:>8.3f} {r['query_us_per_q']:>12.1f} "
+                    f"{r['update_s']:>10.4f} {r['promote_s']:>10.4f} "
+                    f"{r['recall']:>7.3f}"
+                )
 
     out_dir = os.path.join(os.path.dirname(__file__), "out")
     os.makedirs(out_dir, exist_ok=True)

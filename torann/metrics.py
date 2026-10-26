@@ -81,9 +81,7 @@ from .brute import exact_knn
 __all__ = ["toroidal_separation"]
 
 
-def toroidal_separation(
-    points: np.ndarray, anchors: np.ndarray | None = None
-) -> float:
+def toroidal_separation(points: np.ndarray, anchors: np.ndarray | None = None) -> float:
     r"""Maximin quality of a design, or of a batch added to one.
 
     With `anchors`, the shortest toroidal-$L_1$ distance from any point of

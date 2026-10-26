@@ -56,9 +56,7 @@ class Neighbours(NamedTuple):
     distances: DistArray
 
 
-def csr_to_padded(
-    indptr: IdArray, ids: IdArray, dists: DistArray, m: int
-) -> Neighbours:
+def csr_to_padded(indptr: IdArray, ids: IdArray, dists: DistArray, m: int) -> Neighbours:
     """CSR range results → the dense padded form ``query_knn`` returns.
 
     Rows are padded with ``-1`` / ``inf``, so a radius result has exactly the
@@ -124,17 +122,17 @@ class BaseIndex(ABC):
         ``new_candidates`` (possibly ``(0, d)``) as the new candidate tier."""
 
     @abstractmethod
-    def query_knn(self, queries: np.ndarray, k: int,
-                  exclude_ids: np.ndarray | None = None
-                  ) -> tuple[np.ndarray, np.ndarray]:
+    def query_knn(
+        self, queries: np.ndarray, k: int, exclude_ids: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Batch k-NN → ``(idx, dist)`` of shape ``(m, k)``, rows sorted by
         distance, padded with ``-1`` / ``inf`` when fewer than k reachable
         points exist. ``exclude_ids`` is one point id per query or None."""
 
     @abstractmethod
-    def query_radius(self, queries: np.ndarray, radius: float,
-                     exclude_ids: np.ndarray | None = None
-                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def query_radius(
+        self, queries: np.ndarray, radius: float, exclude_ids: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Batch range query → CSR ``(indptr, ids, dists)``; row ``i`` is
         ``ids[indptr[i]:indptr[i+1]]``, sorted by distance."""
 

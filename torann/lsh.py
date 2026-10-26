@@ -62,8 +62,8 @@ class PythonLshIndex(BaseIndex):
         """Move the candidate tier. Selective: only entries whose key
         changed — i.e. that moved far enough to leave a cell — are
         re-placed, by delete + merge. Exact after every call."""
-        self._pts[self.n_static:] = coords
-        self._pts32[self.n_static:] = coords.astype(np.float32)
+        self._pts[self.n_static :] = coords
+        self._pts32[self.n_static :] = coords.astype(np.float32)
         ids = self._cand_sids
         new_keys = self._tier_keys(ids)
         off = self.n_static
@@ -120,16 +120,14 @@ class PythonLshIndex(BaseIndex):
         ex = exclude_ids
         for s in range(0, m, self.block):
             e = min(m, s + self.block)
-            self._lsh_block(queries[s:e], k, None if ex is None else ex[s:e],
-                            idx[s:e], dst[s:e])
+            self._lsh_block(queries[s:e], k, None if ex is None else ex[s:e], idx[s:e], dst[s:e])
 
         reachable = self.n_points - (0 if ex is None else 1)
         kk = min(k, reachable)
         if kk > 0:
             short = np.flatnonzero(idx[:, kk - 1] == -1)
             if short.size:  # prefix relaxation: k results, no brute force
-                bi, bd = self._relaxed_query(
-                    queries[short], k, None if ex is None else ex[short])
+                bi, bd = self._relaxed_query(queries[short], k, None if ex is None else ex[short])
                 idx[short] = bi
                 dst[short] = bd
         return idx, dst
@@ -272,7 +270,7 @@ class PythonLshIndex(BaseIndex):
         for lev in range(1, self.K):
             if not active.any():
                 break
-            width = self.B ** lev
+            width = self.B**lev
             aidx = np.flatnonzero(active)
             counts = np.zeros(aidx.size, dtype=np.int64)
             for t in range(self.L):
@@ -288,7 +286,7 @@ class PythonLshIndex(BaseIndex):
         chunks = []
         for lev in np.unique(level):
             gidx = np.flatnonzero(level == lev)
-            width = self.B ** lev
+            width = self.B**lev
             # Level K covers every point: one pass per tier is exhaustive.
             for t in range(self.L) if lev < self.K else (0,):
                 lo_key = base[t, gidx] // width * width

@@ -100,8 +100,7 @@ def recall(index, k, seed=0):
     ids = np.ascontiguousarray(rows, dtype=np.int64)
     approx, _ = index.query(k=k, queries=q, exclude_ids=ids)
     exact, _ = exact_knn(arena, q, k, exclude_ids=ids)
-    hits = sum(len(set(approx[i].tolist()) & set(exact[i].tolist()))
-               for i in range(take))
+    hits = sum(len(set(approx[i].tolist()) & set(exact[i].tolist())) for i in range(take))
     return hits / float(take * k)
 
 
@@ -126,8 +125,7 @@ def run(dim, anchors, candidates, block, seed=0):
     stats: dict = {}
 
     t0 = time.perf_counter()
-    pts = ess.esa(samples, bounds, n=candidates, index=index, seed=seed,
-                  stats=stats)
+    pts = ess.esa(samples, bounds, n=candidates, index=index, seed=seed, stats=stats)
     total = time.perf_counter() - t0
 
     # Instrumented builds only (`--features stats`); a release wheel has none.
@@ -135,7 +133,9 @@ def run(dim, anchors, candidates, block, seed=0):
     native = impl.stats() if hasattr(impl, "stats") else {}
     queries = max(1, native.get("queries", 0))
     row = {
-        "dim": dim, "anchors": anchors, "candidates": candidates,
+        "dim": dim,
+        "anchors": anchors,
+        "candidates": candidates,
         "total_s": total,
         **{p: stats.get(p, 0.0) for p in PHASES},
         "epochs": stats.get("epochs_total"),
@@ -143,7 +143,8 @@ def run(dim, anchors, candidates, block, seed=0):
         "mode": "lsh" if index.is_approximate else "brute",
         "backend": index.backend_name or "brute",
         "tables": index.n_tables,
-        "B": getattr(index, "_B", None), "K": getattr(index, "_K", None),
+        "B": getattr(index, "_B", None),
+        "K": getattr(index, "_K", None),
         "recall": recall(index, stats.get("k", 5)),
         "pairs_per_query": native.get("pairs", 0) / queries,
         "path": native.get("path", "brute") if native else "brute",
@@ -154,19 +155,23 @@ def run(dim, anchors, candidates, block, seed=0):
 
 def table(rows, ref=None):
     """Print one row per shape; with `ref`, add the A/B comparison."""
-    head = ["d", "anchors", "cands", "mode", "L", "total", "query",
-            "setup", "epochs", "sep", "recall"]
+    head = ["d", "anchors", "cands", "mode", "L", "total", "query", "setup", "epochs", "sep", "recall"]
     if ref:
         head += ["speed-up", "query x", "same?"]
     print("| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for i, r in enumerate(rows):
         cells = [
-            str(r["dim"]), str(r["anchors"]), str(r["candidates"]), r["mode"],
-            str(r["tables"]), f"{r['total_s']:.2f}s",
+            str(r["dim"]),
+            str(r["anchors"]),
+            str(r["candidates"]),
+            r["mode"],
+            str(r["tables"]),
+            f"{r['total_s']:.2f}s",
             f"{r['query_s']:.2f}s ({100 * r['query_s'] / r['total_s']:.0f}%)",
             f"{100 * r['setup_s'] / r['total_s']:.0f}%",
-            str(r["epochs"]), f"{r['separation']:.4f}",
+            str(r["epochs"]),
+            f"{r['separation']:.4f}",
             "exact" if np.isnan(r["recall"]) else f"{r['recall']:.3f}",
         ]
         if ref:
@@ -174,10 +179,14 @@ def table(rows, ref=None):
             # The exact path has no query_block_size to vary, so the two
             # runs are the same code: report n/a rather than dress the
             # run-to-run spread (~15% at these sizes) up as a speed-up.
-            comp = ["n/a", "n/a"] if r["mode"] == "brute" else [
-                f"{b['total_s'] / r['total_s']:.2f}x",
-                f"{b['query_s'] / max(r['query_s'], 1e-9):.2f}x",
-            ]
+            comp = (
+                ["n/a", "n/a"]
+                if r["mode"] == "brute"
+                else [
+                    f"{b['total_s'] / r['total_s']:.2f}x",
+                    f"{b['query_s'] / max(r['query_s'], 1e-9):.2f}x",
+                ]
+            )
             cells += comp + [
                 "yes" if b["fingerprint"] == r["fingerprint"] else "NO",
             ]
@@ -190,27 +199,24 @@ def group(rows, ref=None, label="suite"):
     per-shape speed-ups, which weights every regime equally."""
     tot = sum(r["total_s"] for r in rows)
     qry = sum(r["query_s"] for r in rows)
-    line = (f"{label}: total {tot:.2f}s, query {qry:.2f}s "
-            f"({100 * qry / tot:.0f}% of wall)")
+    line = f"{label}: total {tot:.2f}s, query {qry:.2f}s ({100 * qry / tot:.0f}% of wall)"
     if ref:
         rtot = sum(r["total_s"] for r in ref)
         rqry = sum(r["query_s"] for r in ref)
-        geo = statistics.geometric_mean(
-            [b["total_s"] / r["total_s"] for b, r in zip(ref, rows)])
-        same = all(b["fingerprint"] == r["fingerprint"]
-                   for b, r in zip(ref, rows))
-        line += (f"  |  vs per-query: {rtot / tot:.2f}x total, "
-                 f"{rqry / qry:.2f}x query, geometric mean per shape "
-                 f"{geo:.2f}x, results {'identical' if same else 'DIFFER'}")
+        geo = statistics.geometric_mean([b["total_s"] / r["total_s"] for b, r in zip(ref, rows)])
+        same = all(b["fingerprint"] == r["fingerprint"] for b, r in zip(ref, rows))
+        line += (
+            f"  |  vs per-query: {rtot / tot:.2f}x total, "
+            f"{rqry / qry:.2f}x query, geometric mean per shape "
+            f"{geo:.2f}x, results {'identical' if same else 'DIFFER'}"
+        )
     print(line)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--cases", type=int, nargs="+",
-                    help="1-based shape indices (default: all)")
-    ap.add_argument("--repeat", type=int, default=1,
-                    help="runs per shape; the fastest is kept")
+    ap.add_argument("--cases", type=int, nargs="+", help="1-based shape indices (default: all)")
+    ap.add_argument("--repeat", type=int, default=1, help="runs per shape; the fastest is kept")
     ap.add_argument("--json", help="write the raw rows here")
     args = ap.parse_args()
 

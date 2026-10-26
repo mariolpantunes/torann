@@ -78,14 +78,19 @@ def _cpu_supports_avx2() -> bool:
             # Imported on the branch that needs it: this runs at import time
             # and most installs never reach here.
             import subprocess
+
             out = subprocess.run(
                 ["sysctl", "-n", "hw.optional.avx2_0"],
-                capture_output=True, text=True, timeout=5, check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
             )
             return out.stdout.strip() != "0"
 
         if system == "Windows":
             import ctypes
+
             # PF_AVX2_INSTRUCTIONS_AVAILABLE. Absent before Windows 10, where
             # the call returns 0 for an unknown feature -- indistinguishable
             # from "unsupported", so a false negative is possible on an old
@@ -111,6 +116,7 @@ if _cpu_supports_avx2():
             brute_radius,
             weighted_directions,
         )
+
         BaseIndex.register(RustLshIndex)
         AVAILABLE = True
     except ImportError:  # pure-Python install: wrapper falls back to lsh.py
@@ -138,5 +144,4 @@ else:
     weighted_directions = None
     AVAILABLE = False
 
-__all__ = ["AVAILABLE", "STATS", "RustLshIndex", "brute_knn", "brute_radius",
-           "weighted_directions"]
+__all__ = ["AVAILABLE", "STATS", "RustLshIndex", "brute_knn", "brute_radius", "weighted_directions"]

@@ -36,7 +36,7 @@ SAMPLE = 300
 def sample_recall(nn, rng):
     """Recall of nn.query() against exact search, on a candidate sample."""
     idx, _ = nn.query()
-    pts = np.vstack([nn._arena[:nn.n_static], nn.candidates])
+    pts = np.vstack([nn._arena[: nn.n_static], nn.candidates])
     sample = rng.choice(nn.n_candidates, SAMPLE, replace=False)
     q = nn.candidates[sample]
     diff = np.abs(q[:, None, :] - pts[None, :, :])
@@ -66,24 +66,22 @@ def run(strategy):
 
             step = rng.normal(0, SIGMA, (nn.n_candidates, D))
             new = np.mod(nn.candidates + step, 1.0)
-            keys_before = (nn._impl.tables()["cand_keys"]
-                           if strategy == "selective" else None)
+            keys_before = nn._impl.tables()["cand_keys"] if strategy == "selective" else None
             t0 = time.perf_counter()
             if strategy == "refit":
-                pts = nn._arena[:nn.n_static].copy()
+                pts = nn._arena[: nn.n_static].copy()
                 nn = ToroidalNN(seed=1, backend="python")
                 nn.fit(pts, new, k=K)
             elif strategy == "tier-sort":
                 # full candidate-tier rebuild (python backend internals)
-                nn._arena[nn.n_static:] = new
+                nn._arena[nn.n_static :] = new
                 lsh = nn._impl
-                lsh._pts[lsh.n_static:] = new
-                lsh._pts32[lsh.n_static:] = new.astype(np.float32)
+                lsh._pts[lsh.n_static :] = new
+                lsh._pts32[lsh.n_static :] = new.astype(np.float32)
                 lsh._build_candidates()
             else:
                 nn.update(new)
-                moved.append(
-                    float((nn._impl.tables()["cand_keys"] != keys_before).mean()))
+                moved.append(float((nn._impl.tables()["cand_keys"] != keys_before).mean()))
             t_maint += time.perf_counter() - t0
         recalls.append(sample_recall(nn, rng))
 
@@ -103,19 +101,21 @@ def run(strategy):
 
 
 def main():
-    print(f"workload: static={N_STATIC} +{BATCHES}x{BATCH} candidates, "
-          f"d={D}, k={K}, {EPOCHS} epochs/batch, sigma={SIGMA}")
-    header = (f"{'strategy':>10} {'query(s)':>9} {'maint(s)':>9} {'total(s)':>9} "
-              f"{'keys moved':>10}  recall/batch")
+    print(
+        f"workload: static={N_STATIC} +{BATCHES}x{BATCH} candidates, d={D}, k={K}, {EPOCHS} epochs/batch, sigma={SIGMA}"
+    )
+    header = f"{'strategy':>10} {'query(s)':>9} {'maint(s)':>9} {'total(s)':>9} {'keys moved':>10}  recall/batch"
     print(header)
     print("-" * len(header))
     results = []
     for strategy in ("selective", "tier-sort", "refit"):
         r = run(strategy)
         results.append(r)
-        print(f"{r['strategy']:>10} {r['query_s']:>9.2f} {r['maint_s']:>9.2f} "
-              f"{r['total_s']:>9.2f} {r['keys_replaced']:>10.3f}  "
-              f"{r['recall_per_batch']}")
+        print(
+            f"{r['strategy']:>10} {r['query_s']:>9.2f} {r['maint_s']:>9.2f} "
+            f"{r['total_s']:>9.2f} {r['keys_replaced']:>10.3f}  "
+            f"{r['recall_per_batch']}"
+        )
 
     out_dir = os.path.join(os.path.dirname(__file__), "out")
     os.makedirs(out_dir, exist_ok=True)

@@ -77,7 +77,9 @@ def run(dim, anchors, candidates, epochs, seed=0):
         t_update += time.perf_counter() - t0
 
     return {
-        "dim": dim, "anchors": anchors, "candidates": candidates,
+        "dim": dim,
+        "anchors": anchors,
+        "candidates": candidates,
         "epochs": epochs,
         "query_ms": t_query / epochs * 1e3,
         "update_ms": t_update / epochs * 1e3,
@@ -88,33 +90,28 @@ def run(dim, anchors, candidates, epochs, seed=0):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--epochs", type=int, default=20,
-                    help="epochs per shape (fixed, not to convergence)")
-    ap.add_argument("--repeat", type=int, default=3,
-                    help="runs per shape; the fastest is reported")
-    ap.add_argument("--cases", type=int, nargs="+",
-                    help="1-based case numbers to run (default: all)")
+    ap.add_argument("--epochs", type=int, default=20, help="epochs per shape (fixed, not to convergence)")
+    ap.add_argument("--repeat", type=int, default=3, help="runs per shape; the fastest is reported")
+    ap.add_argument("--cases", type=int, nargs="+", help="1-based case numbers to run (default: all)")
     ap.add_argument("--json", help="write the raw rows here")
     args = ap.parse_args()
 
-    picked = ([CASES[i - 1] for i in args.cases] if args.cases else list(CASES))
+    picked = [CASES[i - 1] for i in args.cases] if args.cases else list(CASES)
     rows = []
     print("| d | anchors | cands | query ms/epoch | update ms/epoch | checksum |")
     print("|" + "---|" * 6)
     for dim, anchors, cands in picked:
-        best = min((run(dim, anchors, cands, args.epochs)
-                    for _ in range(args.repeat)),
-                   key=lambda r: r["query_ms"])
+        best = min((run(dim, anchors, cands, args.epochs) for _ in range(args.repeat)), key=lambda r: r["query_ms"])
         rows.append(best)
-        print(f"| {dim} | {anchors} | {cands} | {best['query_ms']:.2f} "
-              f"| {best['update_ms']:.2f} | {best['checksum']} |")
+        print(
+            f"| {dim} | {anchors} | {cands} | {best['query_ms']:.2f} | {best['update_ms']:.2f} | {best['checksum']} |"
+        )
 
     total = sum(r["query_ms"] for r in rows)
     print(f"\nquery total across shapes: {total:.2f} ms/epoch")
 
     if args.json:
-        os.makedirs(os.path.dirname(os.path.abspath(args.json)) or OUT,
-                    exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(args.json)) or OUT, exist_ok=True)
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(rows, fh, indent=1)
 

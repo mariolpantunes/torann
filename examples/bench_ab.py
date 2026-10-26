@@ -65,8 +65,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 ARMS = os.environ.get("TORANN_ARMS", os.path.join(HERE, "out", "arms"))
 
-ESS_SHAPES = ((2, 0, 256), (2, 256, 512), (8, 0, 1024), (8, 1024, 2048),
-              (32, 0, 10000), (32, 10000, 20000))
+ESS_SHAPES = ((2, 0, 256), (2, 256, 512), (8, 0, 1024), (8, 1024, 2048), (32, 0, 10000), (32, 10000, 20000))
 LOOP_EPOCHS = 20
 SWEEP_DIMS = (2, 8, 16, 32, 64, 100)
 SWEEP_N = 2048
@@ -78,6 +77,7 @@ RECALL_QUERIES = 128
 # --------------------------------------------------------------------- #
 # Arms
 # --------------------------------------------------------------------- #
+
 
 def _sha(path):
     h = hashlib.sha256()
@@ -108,8 +108,7 @@ def build_arm(name, rev=None, rustflags=None, profile=None, features=None):
     tmp = None
     if rev:
         tmp = tempfile.mkdtemp(prefix=f"arm-{name}-")
-        subprocess.run(["git", "-C", ROOT, "worktree", "add", "--detach", tmp, rev],
-                       check=True)
+        subprocess.run(["git", "-C", ROOT, "worktree", "add", "--detach", tmp, rev], check=True)
         src = tmp
     env = dict(os.environ)
     env.setdefault("CARGO_TARGET_DIR", os.path.join(ARMS, "_target"))
@@ -130,16 +129,31 @@ def build_arm(name, rev=None, rustflags=None, profile=None, features=None):
         # shared filesystem the worktree registration can be pulled out from
         # under a running build (an rsync --delete of `.git` will do it), and
         # the arm's identity must not depend on that.
-        head = subprocess.run(["git", "-C", ROOT, "rev-parse", rev or "HEAD"], check=True,
-                              capture_output=True, text=True).stdout.strip()
-        dirty = subprocess.run(["git", "-C", ROOT if rev else src, "status", "--porcelain",
-                                "src", "torann", "Cargo.toml", ".cargo"], capture_output=True,
-                               text=True, check=False).stdout.strip() if not rev else ""
+        head = subprocess.run(
+            ["git", "-C", ROOT, "rev-parse", rev or "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        dirty = (
+            subprocess.run(
+                ["git", "-C", ROOT if rev else src, "status", "--porcelain", "src", "torann", "Cargo.toml", ".cargo"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            if not rev
+            else ""
+        )
         so = _native_so(os.path.join(dest, "torann"))
-        meta = {"name": name, "rev": rev or "worktree", "head": head, "dirty": bool(dirty),
-                "so_sha256": _sha(so), "rustflags": rustflags, "profile": profile,
-                "features": features,
-                "built": time.strftime("%Y-%m-%d %H:%M:%S")}
+        meta = {
+            "name": name,
+            "rev": rev or "worktree",
+            "head": head,
+            "dirty": bool(dirty),
+            "so_sha256": _sha(so),
+            "rustflags": rustflags,
+            "profile": profile,
+            "features": features,
+            "built": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
         with open(os.path.join(dest, "arm.json"), "w") as fh:
             json.dump(meta, fh, indent=1)
         print(json.dumps(meta, indent=1))
@@ -152,6 +166,7 @@ def build_arm(name, rev=None, rustflags=None, profile=None, features=None):
 def _check_arm(arm_dir):
     """Refuse to measure anything but the arm we were launched for."""
     import torann
+
     with open(os.path.join(arm_dir, "arm.json")) as fh:
         meta = json.load(fh)
     pkg = os.path.dirname(os.path.realpath(torann.__file__))
@@ -167,8 +182,10 @@ def _check_arm(arm_dir):
 # Cases
 # --------------------------------------------------------------------- #
 
+
 def _fp(*arrays):
     import numpy as np
+
     h = hashlib.sha1()
     for a in arrays:
         a = np.ascontiguousarray(a)
@@ -199,6 +216,7 @@ def _knn_recall(arena, got_fn, k, seed=0):
     import numpy as np
 
     from torann.brute import exact_knn
+
     rng = np.random.default_rng(seed)
     take = min(RECALL_QUERIES, arena.shape[0])
     rows = rng.choice(arena.shape[0], take, replace=False)
@@ -216,8 +234,10 @@ def case_ess(dim, anchors, cands, mode, block, epochs=LOOP_EPOCHS, full=False):
     import numpy as np
 
     from torann import ToroidalNN
+
     sys.path.insert(1, HERE)
     import benchmark as bm
+
     rng = np.random.default_rng(0)
     A = rng.random((anchors, dim)) if anchors else np.empty((0, dim))
     index = ToroidalNN(seed=0, query_block_size=block)
@@ -226,18 +246,30 @@ def case_ess(dim, anchors, cands, mode, block, epochs=LOOP_EPOCHS, full=False):
     # equal work; quality runs (`full`) let the plateau detector stop.
     run_epochs, patience = (1024, 25) if full else (epochs, epochs + 1)
     t0 = time.perf_counter()
-    pts = ess.esa(A, np.array([[0.0, 1.0]] * dim), n=cands, index=index, seed=0, stats=stats,
-                  search_mode="k_nn" if mode == "knn" else "radius",
-                  epochs=run_epochs, patience=patience)
+    pts = ess.esa(
+        A,
+        np.array([[0.0, 1.0]] * dim),
+        n=cands,
+        index=index,
+        seed=0,
+        stats=stats,
+        search_mode="k_nn" if mode == "knn" else "radius",
+        epochs=run_epochs,
+        patience=patience,
+    )
     total = time.perf_counter() - t0
     used = max(1, stats.get("epochs_total") or epochs)
-    row = {"total_s": total, "epochs": used,
-           "ms_per_epoch": 1e3 * (total - stats.get("setup_s", 0.0)) / used,
-           "query_ms_per_epoch": 1e3 * stats.get("query_s", 0.0) / used,
-           "update_ms_per_epoch": 1e3 * stats.get("update_s", 0.0) / used,
-           "setup_s": stats.get("setup_s", 0.0),
-           "impl": "lsh" if index.is_approximate else "brute",
-           "native": _stats(index), "fingerprint": _fp(pts)}
+    row = {
+        "total_s": total,
+        "epochs": used,
+        "ms_per_epoch": 1e3 * (total - stats.get("setup_s", 0.0)) / used,
+        "query_ms_per_epoch": 1e3 * stats.get("query_s", 0.0) / used,
+        "update_ms_per_epoch": 1e3 * stats.get("update_s", 0.0) / used,
+        "setup_s": stats.get("setup_s", 0.0),
+        "impl": "lsh" if index.is_approximate else "brute",
+        "native": _stats(index),
+        "fingerprint": _fp(pts),
+    }
     if index.is_approximate:
         k = stats.get("k") or 5
         radius = bm.radius_for(dim, index.n_points, k)
@@ -253,10 +285,16 @@ def case_sweep(dim, start, mode, engine):
     """W3: `benchmark.run`, fixed epoch count, per epoch."""
     sys.path.insert(1, HERE)
     import benchmark as bm
+
     r = bm.run(dim, SWEEP_N, start, mode, engine, epochs=SWEEP_EPOCHS, seed=0)
-    return {"ms_per_epoch": r["ms_per_epoch"], "query_ms_per_epoch": r["query_ms_per_epoch"],
-            "recall": r["recall"], "impl": r["impl"], "fingerprint": str(r["fingerprint"]),
-            "separation": r["separation"]}
+    return {
+        "ms_per_epoch": r["ms_per_epoch"],
+        "query_ms_per_epoch": r["query_ms_per_epoch"],
+        "recall": r["recall"],
+        "impl": r["impl"],
+        "fingerprint": str(r["fingerprint"]),
+        "separation": r["separation"],
+    }
 
 
 def case_brute(kernel, n, d, k=5):
@@ -264,8 +302,10 @@ def case_brute(kernel, n, d, k=5):
     import numpy as np
 
     from torann import rust
+
     sys.path.insert(1, HERE)
     import benchmark as bm
+
     if rust.brute_knn is None or rust.brute_radius is None or rust.weighted_directions is None:
         raise RuntimeError("arm has no compiled brute kernels")
     brute_knn, brute_radius, directions = rust.brute_knn, rust.brute_radius, rust.weighted_directions
@@ -292,11 +332,12 @@ def _lsh_index(d):
     import numpy as np
 
     from torann import ToroidalNN
+
     if d not in _LSH:
         rng = np.random.default_rng(d)
         pts = rng.random((LSH_N, d))
         nn = ToroidalNN(seed=0, brute_threshold=0)
-        nn.fit(pts[: LSH_N // 2], pts[LSH_N // 2:], k=2 * d)
+        nn.fit(pts[: LSH_N // 2], pts[LSH_N // 2 :], k=2 * d)
         _LSH[d] = nn
     return _LSH[d]
 
@@ -304,8 +345,10 @@ def _lsh_index(d):
 def case_lsh(op, d, k, m, block):
     """W4: one LSH query shape; `m = 0` is the ESS self-join over candidates."""
     import numpy as np
+
     sys.path.insert(1, HERE)
     import benchmark as bm
+
     nn = _lsh_index(d)
     if m:
         rng = np.random.default_rng(1000 + m)
@@ -313,11 +356,12 @@ def case_lsh(op, d, k, m, block):
         q = np.ascontiguousarray(nn._arena[rows])
         ex = np.ascontiguousarray(rows, dtype=np.int64)
     else:
-        q = np.ascontiguousarray(nn._arena[nn.n_static:])
+        q = np.ascontiguousarray(nn._arena[nn.n_static :])
         ex = np.arange(nn.n_static, nn.n_points, dtype=np.int64)
     # Rebuild the native index with this block size: `block` is fixed at
     # construction on builds that predate the setter.
     from torann import rust
+
     if rust.RustLshIndex is None:
         raise RuntimeError("arm has no compiled LSH index")
     native = rust.RustLshIndex(nn._B, nn._K, nn._L, nn.probes, nn._S, nn._U, block)
@@ -329,15 +373,14 @@ def case_lsh(op, d, k, m, block):
     else:
         r = bm.radius_for(d, nn.n_points, k)
         sec, out = _timeit(lambda: native.query_radius(q, r, ex))
-    if hasattr(native, "stats"):   # instrumented builds only
+    if hasattr(native, "stats"):  # instrumented builds only
         native.reset_stats()
         if op == "knn":
             native.query_knn(q, k, ex)
         else:
             native.query_radius(q, r, ex)
         row["native"] = dict(native.stats())
-    row.update({"us_per_query": 1e6 * sec / q.shape[0], "ms_per_call": 1e3 * sec,
-                "fingerprint": _fp(*out)})
+    row.update({"us_per_query": 1e6 * sec / q.shape[0], "ms_per_call": 1e3 * sec, "fingerprint": _fp(*out)})
     return row
 
 
@@ -346,6 +389,7 @@ def case_lifecycle(d, n):
     import numpy as np
 
     from torann import ToroidalNN
+
     rng = np.random.default_rng(d + n)
     pts = rng.random((n, d))
     half = n // 2
@@ -366,9 +410,13 @@ def case_lifecycle(d, n):
         t = time.perf_counter()
         cur.promote(batch)
         prom.append(time.perf_counter() - t)
-    return {"fit_ms": 1e3 * fit_s, "update_ms": 1e3 * upd_s, "query_ms": 1e3 * q_s,
-            "promote_ms": 1e3 * statistics.median(prom),
-            "fingerprint": _fp(ids, dst, *[np.asarray(v) for v in nn._impl.tables().values()])}
+    return {
+        "fit_ms": 1e3 * fit_s,
+        "update_ms": 1e3 * upd_s,
+        "query_ms": 1e3 * q_s,
+        "promote_ms": 1e3 * statistics.median(prom),
+        "fingerprint": _fp(ids, dst, *[np.asarray(v) for v in nn._impl.tables().values()]),
+    }
 
 
 def case_python(d, mode):
@@ -376,8 +424,10 @@ def case_python(d, mode):
     import numpy as np
 
     from torann import ToroidalNN
+
     sys.path.insert(1, HERE)
     import benchmark as bm
+
     rng = np.random.default_rng(d)
     pts = rng.random((4096, d))
     nn = ToroidalNN(seed=0, brute_threshold=0, backend="python")
@@ -397,15 +447,21 @@ def cases():
         for mode, suite in (("knn", "W1"), ("radius", "W2")):
             for block, path in ((1, "perquery"), (None, "batched")):
                 reg[f"{suite}/d{dim}-a{a}-c{c}/{path}"] = (
-                    case_ess, {"dim": dim, "anchors": a, "cands": c, "mode": mode, "block": block})
+                    case_ess,
+                    {"dim": dim, "anchors": a, "cands": c, "mode": mode, "block": block},
+                )
         reg[f"WQ/d{dim}-a{a}-c{c}/knn"] = (
-            case_ess, {"dim": dim, "anchors": a, "cands": c, "mode": "knn", "block": None, "full": True})
+            case_ess,
+            {"dim": dim, "anchors": a, "cands": c, "mode": "knn", "block": None, "full": True},
+        )
     for dim in SWEEP_DIMS:
         for start in ("empty", "filled"):
             for mode in ("knn", "radius"):
                 for engine in ("brute", "lsh"):
                     reg[f"W3/d{dim}-{start}-{mode}-{engine}"] = (
-                        case_sweep, {"dim": dim, "start": start, "mode": mode, "engine": engine})
+                        case_sweep,
+                        {"dim": dim, "start": start, "mode": mode, "engine": engine},
+                    )
     for kernel in ("brute_knn", "brute_radius", "weighted_directions"):
         for n, d in ((400, 8), (400, 100), (4096, 8), (4096, 100)):
             reg[f"W4/{kernel}/n{n}-d{d}"] = (case_brute, {"kernel": kernel, "n": n, "d": d})
@@ -415,13 +471,19 @@ def cases():
             for k in sorted({5, 2 * d, 200}):
                 for block, path in ((1, "perquery"), (0, "batched")):
                     reg[f"W4/lsh_knn/d{d}-k{k}-m{m}/{path}"] = (
-                        case_lsh, {"op": "knn", "d": d, "k": k, "m": m, "block": block})
+                        case_lsh,
+                        {"op": "knn", "d": d, "k": k, "m": m, "block": block},
+                    )
             for block, path in ((1, "perquery"), (0, "batched")):
                 reg[f"W4/lsh_radius/d{d}-t5-m{m}/{path}"] = (
-                    case_lsh, {"op": "radius", "d": d, "k": 5, "m": m, "block": block})
+                    case_lsh,
+                    {"op": "radius", "d": d, "k": 5, "m": m, "block": block},
+                )
         for block, path in ((1, "perquery"), (0, "batched")):
             reg[f"W4/lsh_knn/d{d}-k512-m1024/{path}"] = (
-                case_lsh, {"op": "knn", "d": d, "k": 512, "m": 1024, "block": block})
+                case_lsh,
+                {"op": "knn", "d": d, "k": 512, "m": 1024, "block": block},
+            )
     for d in (8, 32):
         for n in (20000, 100000, 1000000):
             reg[f"W5/d{d}-n{n}"] = (case_lifecycle, {"d": d, "n": n})
@@ -475,9 +537,16 @@ def worker(arm_dir, ids):
             row["error"] = None
         except Exception as e:  # noqa: BLE001 -- recorded in the row, never dropped
             row = {"error": f"{type(e).__name__}: {e}"}
-        row.update({"case": cid, "arm": meta["name"], "so_sha256": meta["so_sha256"], **_host(),
-                    "wall_s": time.perf_counter() - t,
-                    "maxrss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024})
+        row.update(
+            {
+                "case": cid,
+                "arm": meta["name"],
+                "so_sha256": meta["so_sha256"],
+                **_host(),
+                "wall_s": time.perf_counter() - t,
+                "maxrss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+            }
+        )
         print("@@ROW " + json.dumps(row, default=float), flush=True)
 
 
@@ -499,9 +568,12 @@ def run(arms, suites, pattern, pairs, out, threads, shard=None):
     env = dict(os.environ, RAYON_NUM_THREADS=str(threads))
     t0 = time.perf_counter()
     if pairs % 2:
-        print(f"warning: {pairs} pairs is odd, so the two arms cannot run first "
-              f"equally often; the second arm measures ~0.3% faster on average "
-              f"(much more on some cases). Use an even number.", file=sys.stderr)
+        print(
+            f"warning: {pairs} pairs is odd, so the two arms cannot run first "
+            f"equally often; the second arm measures ~0.3% faster on average "
+            f"(much more on some cases). Use an even number.",
+            file=sys.stderr,
+        )
     slot = {id(b): i for i, b in enumerate(batches)}
     for p in range(pairs):
         rnd = random.Random(p)
@@ -524,19 +596,39 @@ def run(arms, suites, pattern, pairs, out, threads, shard=None):
             for arm in order:
                 arm_dir = os.path.join(ARMS, arm)
                 cmd = [sys.executable, os.path.abspath(__file__), "_worker", arm_dir, *batch]
-                res = subprocess.run(cmd, env=dict(env, PYTHONPATH=arm_dir), cwd=tempfile.gettempdir(),
-                                     capture_output=True, text=True, check=False)
+                res = subprocess.run(
+                    cmd,
+                    env=dict(env, PYTHONPATH=arm_dir),
+                    cwd=tempfile.gettempdir(),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
                 got = [json.loads(line[6:]) for line in res.stdout.splitlines() if line.startswith("@@ROW ")]
                 if res.returncode != 0 or len(got) != len(batch):
                     tail = (res.stderr or "")[-800:]
-                    got += [{"case": c, "arm": arm, "error": f"worker exit {res.returncode}: {tail}"}
-                            for c in batch[len(got):]]
+                    got += [
+                        {"case": c, "arm": arm, "error": f"worker exit {res.returncode}: {tail}"}
+                        for c in batch[len(got) :]
+                    ]
                 for g in got:
                     g["pair"] = p
                 rows.extend(got)
         with open(out, "w") as fh:
-            json.dump({"arms": arms, "suites": suites, "pattern": pattern, "pairs": pairs,
-                       "threads": threads, "shard": shard, **_host(), "rows": rows}, fh, indent=0)
+            json.dump(
+                {
+                    "arms": arms,
+                    "suites": suites,
+                    "pattern": pattern,
+                    "pairs": pairs,
+                    "threads": threads,
+                    "shard": shard,
+                    **_host(),
+                    "rows": rows,
+                },
+                fh,
+                indent=0,
+            )
         print(f"pair {p + 1}/{pairs} done, {len(ids)} cases, {time.perf_counter() - t0:.0f}s", flush=True)
 
 
@@ -544,8 +636,17 @@ def run(arms, suites, pattern, pairs, out, threads, shard=None):
 # Report
 # --------------------------------------------------------------------- #
 
-PRIMARY = ("query_ms_per_epoch", "ms_per_epoch", "us_per_call", "us_per_query",
-           "fit_ms", "update_ms", "promote_ms", "query_ms", "ms_per_call")
+PRIMARY = (
+    "query_ms_per_epoch",
+    "ms_per_epoch",
+    "us_per_call",
+    "us_per_query",
+    "fit_ms",
+    "update_ms",
+    "promote_ms",
+    "query_ms",
+    "ms_per_call",
+)
 HIGHER_BETTER = ("recall",)
 LOWER_BETTER_QUALITY = ("projection_discrepancy", "wrap_around_discrepancy")
 
@@ -572,19 +673,36 @@ def merge(paths, out):
         seen.setdefault(r["case"], set()).add((r.get("host"), r.get("cpu")))
     split = {c: h for c, h in seen.items() if len(h) > 1}
     if split:
-        raise SystemExit("cases measured on more than one machine: "
-                         + ", ".join(sorted(split)[:5]))
+        raise SystemExit("cases measured on more than one machine: " + ", ".join(sorted(split)[:5]))
     with open(out, "w") as fh:
-        json.dump({"arms": arms, "suites": suites, "pattern": None, "pairs": pairs,
-                   "threads": None, "shards": meta, "rows": rows}, fh, indent=0)
-    print(f"{out}: {len(rows)} rows, {len(seen)} cases, {len(paths)} shards, "
-          f"hosts {sorted({h for v in seen.values() for h, _ in v})}")
+        json.dump(
+            {
+                "arms": arms,
+                "suites": suites,
+                "pattern": None,
+                "pairs": pairs,
+                "threads": None,
+                "shards": meta,
+                "rows": rows,
+            },
+            fh,
+            indent=0,
+        )
+    print(
+        f"{out}: {len(rows)} rows, {len(seen)} cases, {len(paths)} shards, "
+        f"hosts {sorted({h for v in seen.values() for h, _ in v})}"
+    )
 
 
 def _log_ratios(ra, rb, pairs, metric):
-    return [math.log(rb[p][metric] / ra[p][metric]) for p in pairs
-            if isinstance(ra[p].get(metric), (int, float)) and ra[p][metric] > 0
-            and isinstance(rb[p].get(metric), (int, float)) and rb[p][metric] > 0]
+    return [
+        math.log(rb[p][metric] / ra[p][metric])
+        for p in pairs
+        if isinstance(ra[p].get(metric), (int, float))
+        and ra[p][metric] > 0
+        and isinstance(rb[p].get(metric), (int, float))
+        and rb[p][metric] > 0
+    ]
 
 
 def _spread(lr):
@@ -633,18 +751,16 @@ def summarise(path, aa=None, z_crit=3.0):
     cal = {}
     if aa:
         seen = {}
-        for path_aa in ([aa] if isinstance(aa, str) else aa):
+        for path_aa in [aa] if isinstance(aa, str) else aa:
             adata, aby = _paired(path_aa)
             a0, b0 = adata["arms"]
             for cid, arms in aby.items():
                 ra, rb = arms.get(a0, {}), arms.get(b0, {})
-                okp = [p for p in sorted(set(ra) & set(rb))
-                       if not ra[p].get("error") and not rb[p].get("error")]
+                okp = [p for p in sorted(set(ra) & set(rb)) if not ra[p].get("error") and not rb[p].get("error")]
                 for metric in PRIMARY:
                     lr = _log_ratios(ra, rb, okp, metric)
                     if len(lr) >= 2:
-                        seen.setdefault((cid, metric), []).append(
-                            (_spread(lr), statistics.median(lr), len(lr)))
+                        seen.setdefault((cid, metric), []).append((_spread(lr), statistics.median(lr), len(lr)))
         for key, obs in seen.items():
             within = max(sp for sp, _, _ in obs)
             if len(obs) >= 2:
@@ -672,26 +788,46 @@ def summarise(path, aa=None, z_crit=3.0):
             med = statistics.median(lr)
             z = med / (1.2533 * s / math.sqrt(len(lr)))
             if metric == "maxrss_mb":
-                verdict = "worse" if med > math.log(1.01) and z > z_crit else (
-                    "better" if med < math.log(0.99) and z < -z_crit else "same")
+                verdict = (
+                    "worse"
+                    if med > math.log(1.01) and z > z_crit
+                    else ("better" if med < math.log(0.99) and z < -z_crit else "same")
+                )
             else:
                 verdict = "REGRESSION" if z > z_crit else ("faster" if z < -z_crit else "same")
             row["metrics"][metric] = {
-                "median": math.exp(med), "z": z, "n": len(lr), "spread": s, "calibrated": band is not None,
-                "a_median": statistics.median(ra[p][metric] for p in okp), "verdict": verdict}
+                "median": math.exp(med),
+                "z": z,
+                "n": len(lr),
+                "spread": s,
+                "calibrated": band is not None,
+                "a_median": statistics.median(ra[p][metric] for p in okp),
+                "verdict": verdict,
+            }
         for metric in HIGHER_BETTER + LOWER_BETTER_QUALITY:
-            va = [ra[p][metric] for p in okp if isinstance(ra[p].get(metric), (int, float))
-                  and not math.isnan(ra[p][metric])]
-            vb = [rb[p][metric] for p in okp if isinstance(rb[p].get(metric), (int, float))
-                  and not math.isnan(rb[p][metric])]
+            va = [
+                ra[p][metric]
+                for p in okp
+                if isinstance(ra[p].get(metric), (int, float)) and not math.isnan(ra[p][metric])
+            ]
+            vb = [
+                rb[p][metric]
+                for p in okp
+                if isinstance(rb[p].get(metric), (int, float)) and not math.isnan(rb[p][metric])
+            ]
             if va and vb:
                 ma, mb = statistics.median(va), statistics.median(vb)
                 worse = mb < ma - 1e-12 if metric in HIGHER_BETTER else mb > ma + 1e-12
                 row["metrics"][metric] = {"a": ma, "b": mb, "verdict": "WORSE" if worse else "ok"}
         fa = {ra[p].get("fingerprint") for p in okp}
         fb = {rb[p].get("fingerprint") for p in okp}
-        row["fingerprint"] = ("identical" if fa == fb and len(fa) == 1 else
-                              "nondeterministic" if len(fa) > 1 or len(fb) > 1 else "DIFFERENT")
+        row["fingerprint"] = (
+            "identical"
+            if fa == fb and len(fa) == 1
+            else "nondeterministic"
+            if len(fa) > 1 or len(fb) > 1
+            else "DIFFERENT"
+        )
         out.append(row)
     return {"arms": [a, b], "cases": out}
 
@@ -704,8 +840,7 @@ def report(path, aa=None, only_flagged=False):
     print("|---|---|---|---|---|---|---|---|")
     counts = {}
     for row in s["cases"]:
-        acc = "; ".join(f"{m} {v['a']:.4g}->{v['b']:.4g} {v['verdict']}"
-                        for m, v in row["metrics"].items() if "a" in v)
+        acc = "; ".join(f"{m} {v['a']:.4g}->{v['b']:.4g} {v['verdict']}" for m, v in row["metrics"].items() if "a" in v)
         if row["errors"]:
             print(f"| {row['case']} | ERROR | | | | {row['errors'][0][:120]} | | |")
             counts["ERROR"] = counts.get("ERROR", 0) + 1
@@ -714,12 +849,14 @@ def report(path, aa=None, only_flagged=False):
             if "median" not in v:
                 continue
             counts[v["verdict"]] = counts.get(v["verdict"], 0) + 1
-            flagged = (v["verdict"] not in ("same",) or row["fingerprint"] == "DIFFERENT" or "WORSE" in acc)
+            flagged = v["verdict"] not in ("same",) or row["fingerprint"] == "DIFFERENT" or "WORSE" in acc
             if only_flagged and not flagged:
                 continue
             cal = "" if v["calibrated"] else " (uncal.)"
-            print(f"| {row['case']} | {metric} | {v['median']:.3f} | {v['z']:+.1f} | {v['spread']:.3f}{cal} "
-                  f"| {v['verdict']} | {row['fingerprint']} | {acc} |")
+            print(
+                f"| {row['case']} | {metric} | {v['median']:.3f} | {v['z']:+.1f} | {v['spread']:.3f}{cal} "
+                f"| {v['verdict']} | {row['fingerprint']} | {acc} |"
+            )
     diff = sum(1 for r in s["cases"] if r["fingerprint"] == "DIFFERENT")
     worse = sum(1 for r in s["cases"] for v in r["metrics"].values() if v.get("verdict") == "WORSE")
     print(f"\nverdicts: {counts}; fingerprints different: {diff}; accuracy worse: {worse}")

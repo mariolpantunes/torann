@@ -36,15 +36,14 @@ SAMPLE = 300
 
 def sample_recall(nn, rng):
     idx, _ = nn.query()  # fresh query against current positions
-    pts = np.vstack([nn._arena[:nn.n_static], nn.candidates])
+    pts = np.vstack([nn._arena[: nn.n_static], nn.candidates])
     sample = rng.choice(nn.n_candidates, SAMPLE, replace=False)
     q = nn.candidates[sample]
     diff = np.abs(q[:, None, :] - pts[None, :, :])
     Dm = np.minimum(diff, 1.0 - diff).sum(-1)
     Dm[np.arange(SAMPLE), nn.n_static + sample] = np.inf
     exact = np.argsort(Dm, axis=1)[:, :K]
-    hits = sum(len(np.intersect1d(idx[s], exact[i]))
-               for i, s in enumerate(sample))
+    hits = sum(len(np.intersect1d(idx[s], exact[i])) for i, s in enumerate(sample))
     return hits / exact.size
 
 
@@ -94,19 +93,24 @@ def main():
     ap.add_argument("--backends", default=",".join(available_backends()))
     args = ap.parse_args()
 
-    print(f"ESS workload: {N_STATIC} anchors +{BATCHES}x{BATCH} candidates, "
-          f"d={D}, k={K}, {EPOCHS} epochs/batch, sigma={SIGMA}")
-    header = (f"{'backend':>8} {'fit(s)':>7} {'query(s)':>9} {'maint(s)':>9} "
-              f"{'total(s)':>9} {'epoch(ms)':>10}  recall/batch")
+    print(
+        f"ESS workload: {N_STATIC} anchors +{BATCHES}x{BATCH} candidates, "
+        f"d={D}, k={K}, {EPOCHS} epochs/batch, sigma={SIGMA}"
+    )
+    header = (
+        f"{'backend':>8} {'fit(s)':>7} {'query(s)':>9} {'maint(s)':>9} {'total(s)':>9} {'epoch(ms)':>10}  recall/batch"
+    )
     print(header)
     print("-" * len(header))
     results = []
     for backend in args.backends.split(","):
         r = run(backend)
         results.append(r)
-        print(f"{r['backend']:>8} {r['fit_s']:>7.3f} {r['query_s']:>9.2f} "
-              f"{r['maint_s']:>9.2f} {r['total_s']:>9.2f} "
-              f"{r['epoch_ms']:>10.1f}  {r['recall_per_batch']}")
+        print(
+            f"{r['backend']:>8} {r['fit_s']:>7.3f} {r['query_s']:>9.2f} "
+            f"{r['maint_s']:>9.2f} {r['total_s']:>9.2f} "
+            f"{r['epoch_ms']:>10.1f}  {r['recall_per_batch']}"
+        )
 
     out_dir = os.path.join(os.path.dirname(__file__), "out")
     os.makedirs(out_dir, exist_ok=True)

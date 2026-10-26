@@ -33,6 +33,7 @@ try:
     import importlib
 
     import ess
+
     essmod = importlib.import_module("ess.ess")
 except ImportError:  # pragma: no cover - exploration-only dependency
     sys.exit("ess not importable: add ~/git/ess/src to PYTHONPATH")
@@ -56,7 +57,7 @@ def toroidal_lp(Q, pts, p):
     for j in range(Q.shape[1]):
         u = np.abs(Q[:, j, None] - pts[None, :, j])
         np.minimum(u, 1.0 - u, out=u)
-        acc += u ** p
+        acc += u**p
     np.power(acc, 1.0 / p, out=out)
     return out
 
@@ -64,8 +65,7 @@ def toroidal_lp(Q, pts, p):
 def contrast(points, p, kmax=KMAX, seed=0):
     """Relative spread over the kmax nearest, averaged over queries."""
     rng = np.random.default_rng(seed)
-    qi = rng.choice(points.shape[0], min(QUERIES, points.shape[0]),
-                    replace=False)
+    qi = rng.choice(points.shape[0], min(QUERIES, points.shape[0]), replace=False)
     D = toroidal_lp(points[qi], points, p)
     D[np.arange(len(qi)), qi] = np.inf
     part = np.partition(D, kmax, axis=1)[:, :kmax]
@@ -92,16 +92,14 @@ def force_sharpness(r1, rk, ratio=10.0):
 
 def run(points, label):
     print(f"\n=== {label} ===")
-    print("| d | p | r_1 | r_64 | contrast (r64-r1)/r1 | sigma/r_1 for "
-          "10:1 | power-law exponent for 10:1 |")
+    print("| d | p | r_1 | r_64 | contrast (r64-r1)/r1 | sigma/r_1 for 10:1 | power-law exponent for 10:1 |")
     print("|" + "---|" * 7)
     for dim in DIMS:
         pts = points(dim)
         for p in POWERS:
             c, r1, rk = contrast(pts, p)
             sig, q = force_sharpness(r1, rk)
-            print(f"| {dim} | {p} | {r1:.4f} | {rk:.4f} | {100 * c:.1f}% "
-                  f"| {sig:.3f} | {q:.0f} |")
+            print(f"| {dim} | {p} | {r1:.4f} | {rk:.4f} | {100 * c:.1f}% | {sig:.3f} | {q:.0f} |")
 
 
 if __name__ == "__main__":

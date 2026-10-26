@@ -38,6 +38,7 @@ try:
     import importlib
 
     import ess
+
     # `ess.ess` the attribute is the public *function*, not the module, so
     # the private helpers have to be reached through importlib.
     essmod = importlib.import_module("ess.ess")
@@ -45,21 +46,29 @@ except ImportError:  # pragma: no cover - exploration-only dependency
     sys.exit("ess not importable: add ~/git/ess/src to PYTHONPATH")
 
 # The suite's shapes, as (dim, total points).
-SHAPES = ((2, 512), (2, 768), (4, 2048), (8, 2048), (8, 3072),
-          (16, 2048), (32, 4000), (32, 10000), (32, 30000), (64, 2048))
+SHAPES = (
+    (2, 512),
+    (2, 768),
+    (4, 2048),
+    (8, 2048),
+    (8, 3072),
+    (16, 2048),
+    (32, 4000),
+    (32, 10000),
+    (32, 30000),
+    (64, 2048),
+)
 
 OCCUPANCY = 5.0  # points per cell we would want to visit
 
 
 def capture_vs_selectivity():
     """Where the two requirements cross, per shape."""
-    print("R          = ESS's interaction radius (toroidal L1, its own "
-          "heuristic)")
+    print("R          = ESS's interaction radius (toroidal L1, its own heuristic)")
     print("B_capture  = cells/dim allowed if +/-1 must cover R   (1/R)")
     print("B_occupy   = cells/dim needed for ~5 points per cell  ((n/c)^1/d)")
     print("cells      = 1 + 2d, the von Neumann neighbourhood\n")
-    head = ("d", "n", "R", "R/d", "B_capture", "B_occupy", "cells",
-            "occupancy at B_capture", "verdict")
+    head = ("d", "n", "R", "R/d", "B_capture", "B_occupy", "cells", "occupancy at B_capture", "verdict")
     print("| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for dim, n in SHAPES:
@@ -68,12 +77,13 @@ def capture_vs_selectivity():
         b_occ = (n / OCCUPANCY) ** (1.0 / dim)
         # Points per cell if we take the largest grid that still captures.
         b_use = max(int(math.floor(b_cap)), 1)
-        occ = n / (b_use ** dim) if b_use ** dim < 1e300 else 0.0
+        occ = n / (b_use**dim) if b_use**dim < 1e300 else 0.0
         ok = b_cap >= b_occ
-        verdict = "works" if ok else ("marginal" if b_cap >= 0.8 * b_occ
-                                      else "impossible")
-        print(f"| {dim} | {n} | {R:.4f} | {R / dim:.4f} | {b_cap:.2f} "
-              f"| {b_occ:.2f} | {1 + 2 * dim} | {occ:.3g} | {verdict} |")
+        verdict = "works" if ok else ("marginal" if b_cap >= 0.8 * b_occ else "impossible")
+        print(
+            f"| {dim} | {n} | {R:.4f} | {R / dim:.4f} | {b_cap:.2f} "
+            f"| {b_occ:.2f} | {1 + 2 * dim} | {occ:.3g} | {verdict} |"
+        )
 
 
 def force_share_by_rank(dim, n, kmax=64, seed=0):
@@ -90,24 +100,22 @@ def force_share_by_rank(dim, n, kmax=64, seed=0):
     pts = ess.esa(np.empty((0, dim)), bounds, n=n, seed=seed, stats=stats)
     R = stats["radius"]
 
-    _, dst = exact_knn(np.ascontiguousarray(pts), np.ascontiguousarray(pts),
-                       kmax + 1)
+    _, dst = exact_knn(np.ascontiguousarray(pts), np.ascontiguousarray(pts), kmax + 1)
     dst = dst[:, 1:]  # drop self
     w = np.exp(essmod.gaussian_force(dst / R))
     share = w.mean(axis=0)
     cum = np.cumsum(share) / share.sum()
 
     inside = float((dst <= R).sum(axis=1).mean())
-    print(f"\nd={dim}, n={n}, R={R:.4f}: mean neighbours inside R = "
-          f"{inside:.1f} (of {kmax} examined)")
+    print(f"\nd={dim}, n={n}, R={R:.4f}: mean neighbours inside R = {inside:.1f} (of {kmax} examined)")
     print("| rank | distance | d/R | force weight | cumulative share |")
     print("|---|---|---|---|---|")
     for j in list(range(5)) + [7, 9, 14, 19, 29, 49, kmax - 1]:
         if j >= kmax:
             continue
-        print(f"| {j + 1} | {dst[:, j].mean():.4f} "
-              f"| {dst[:, j].mean() / R:.2f} | {share[j]:.4g} "
-              f"| {100 * cum[j]:.2f}% |")
+        print(
+            f"| {j + 1} | {dst[:, j].mean():.4f} | {dst[:, j].mean() / R:.2f} | {share[j]:.4g} | {100 * cum[j]:.2f}% |"
+        )
 
 
 if __name__ == "__main__":

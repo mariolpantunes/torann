@@ -67,8 +67,7 @@ class TestExamplesImport(unittest.TestCase):
             sys.path.insert(0, cls._path)
 
     def test_every_example_imports(self):
-        scripts = sorted(p.stem for p in EXAMPLES.glob("*.py")
-                         if not p.stem.startswith("_"))
+        scripts = sorted(p.stem for p in EXAMPLES.glob("*.py") if not p.stem.startswith("_"))
         self.assertTrue(scripts, "no examples found — is the layout still right?")
         for name in scripts:
             with self.subTest(script=name):

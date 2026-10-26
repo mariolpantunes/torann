@@ -114,18 +114,23 @@ def run_ess(dim, anchors, candidates, seed, index_kwargs=None):
     stats: dict = {}
     pts = ess.esa(A, bounds, n=candidates, index=index, seed=seed, stats=stats)
     from bench_ess_suite import recall  # same measurement, self excluded
-    return (np.vstack([A, pts]) if anchors else pts,
-            {"recall": recall(index, 5), "tables": index.n_tables,
-             "epochs": stats.get("epochs_total"),
-             "mode": "lsh" if index.is_approximate else "brute"})
+
+    return (
+        np.vstack([A, pts]) if anchors else pts,
+        {
+            "recall": recall(index, 5),
+            "tables": index.n_tables,
+            "epochs": stats.get("epochs_total"),
+            "mode": "lsh" if index.is_approximate else "brute",
+        },
+    )
 
 
 def run_baseline(kind, dim, anchors, candidates, seed):
     """The same number of points from a sampler, with the anchors kept."""
     A = anchors_of(anchors, dim, seed)
     rng = np.random.default_rng(seed + 1)
-    sampler = (ess.samplers.LHCSampler() if kind == "lhs"
-               else ess.samplers.UniformSampler())
+    sampler = ess.samplers.LHCSampler() if kind == "lhs" else ess.samplers.UniformSampler()
     new = np.mod(sampler.sample(candidates, dim, rng).astype(np.float64), 1.0)
     return np.vstack([A, new]) if anchors else new
 
@@ -136,10 +141,13 @@ def report(rows):
     print("| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for r in rows:
-        cells = [str(r["dim"]), str(r["anchors"]), str(r["candidates"]),
-                 r["variant"],
-                 "-" if r.get("recall") is None or np.isnan(r["recall"])
-                 else f"{r['recall']:.3f}"]
+        cells = [
+            str(r["dim"]),
+            str(r["anchors"]),
+            str(r["candidates"]),
+            r["variant"],
+            "-" if r.get("recall") is None or np.isnan(r["recall"]) else f"{r['recall']:.3f}",
+        ]
         for key in keys:
             v = r["metrics"].get(key)
             cells.append("-" if v is None else f"{v:.4f}")
@@ -160,23 +168,44 @@ if __name__ == "__main__":
     for idx, (dim, anchors, cands) in picked:
         for seed in range(args.seeds):
             pts, info = run_ess(dim, anchors, cands, seed)
-            rows.append({"dim": dim, "anchors": anchors, "candidates": cands,
-                         "variant": "ess", "seed": seed, **info,
-                         "metrics": metrics(pts, dim)})
+            rows.append(
+                {
+                    "dim": dim,
+                    "anchors": anchors,
+                    "candidates": cands,
+                    "variant": "ess",
+                    "seed": seed,
+                    **info,
+                    "metrics": metrics(pts, dim),
+                }
+            )
             for kind in ("lhs", "random"):
                 b = run_baseline(kind, dim, anchors, cands, seed)
-                rows.append({"dim": dim, "anchors": anchors,
-                             "candidates": cands, "variant": kind,
-                             "seed": seed, "recall": None,
-                             "metrics": metrics(b, dim)})
+                rows.append(
+                    {
+                        "dim": dim,
+                        "anchors": anchors,
+                        "candidates": cands,
+                        "variant": kind,
+                        "seed": seed,
+                        "recall": None,
+                        "metrics": metrics(b, dim),
+                    }
+                )
             if dim >= 32:  # question 2: does more recall buy quality?
                 pts, info = run_ess(dim, anchors, cands, seed, HIGH_RECALL)
-                rows.append({"dim": dim, "anchors": anchors,
-                             "candidates": cands,
-                             "variant": "ess-high-recall", "seed": seed,
-                             **info, "metrics": metrics(pts, dim)})
-            print(f"  [shape {idx}: d={dim} {anchors}+{cands} seed={seed} done]",
-                  flush=True)
+                rows.append(
+                    {
+                        "dim": dim,
+                        "anchors": anchors,
+                        "candidates": cands,
+                        "variant": "ess-high-recall",
+                        "seed": seed,
+                        **info,
+                        "metrics": metrics(pts, dim),
+                    }
+                )
+            print(f"  [shape {idx}: d={dim} {anchors}+{cands} seed={seed} done]", flush=True)
 
     print()
     report(rows)

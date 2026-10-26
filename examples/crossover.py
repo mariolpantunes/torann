@@ -49,8 +49,7 @@ def main():
     dims = [int(x) for x in args.dims.split(",")]
     backends = args.backends.split(",")
 
-    header = (f"{'d':>3} {'n':>7} {'brute us/q':>11} "
-              + " ".join(f"{b + ' us/q':>12} {b + ' rec':>8}" for b in backends))
+    header = f"{'d':>3} {'n':>7} {'brute us/q':>11} " + " ".join(f"{b + ' us/q':>12} {b + ' rec':>8}" for b in backends)
     print(header)
     print("-" * len(header))
     results = []
@@ -72,16 +71,14 @@ def main():
                 nn.fit(pts, k=k)
                 fit_s = time.perf_counter() - t0
                 idx, lsh_us = bench_queries(nn, Q, k)
-                hits = sum(len(np.intersect1d(idx[i], exact_idx[i]))
-                           for i in range(M_Q))
+                hits = sum(len(np.intersect1d(idx[i], exact_idx[i])) for i in range(M_Q))
                 rec = hits / exact_idx.size
                 saving = brute_us - lsh_us
                 row[backend] = {
                     "fit_s": round(fit_s, 4),
                     "us_per_q": round(lsh_us, 1),
                     "recall": round(rec, 3),
-                    "breakeven_queries": (int(np.ceil(1e6 * fit_s / saving))
-                                          if saving > 0 else None),
+                    "breakeven_queries": (int(np.ceil(1e6 * fit_s / saving)) if saving > 0 else None),
                 }
                 cells.append(f"{lsh_us:>12.1f} {rec:>8.3f}")
             results.append(row)

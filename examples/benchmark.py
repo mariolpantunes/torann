@@ -59,6 +59,7 @@ from torann.metrics import toroidal_separation
 try:
     import ess
     import ess.utils
+
     HAVE_ESS = True
 except ImportError:  # pragma: no cover - the benchmark runs standalone too
     HAVE_ESS = False
@@ -66,11 +67,11 @@ except ImportError:  # pragma: no cover - the benchmark runs standalone too
 OUT = os.path.join(os.path.dirname(__file__), "out")
 
 DIMS = (2, 4, 8, 16, 32, 64)
-K = 5                      # ess.K_LOCAL: what the force kernel asks for
+K = 5  # ess.K_LOCAL: what the force kernel asks for
 EPOCHS = 30
 LR = 0.2
 STEP_CAP = 0.02
-AXIS_MAX = 0.5             # largest per-axis toroidal distance
+AXIS_MAX = 0.5  # largest per-axis toroidal distance
 RECALL_QUERIES = 128
 _CHECKED: list[bool] = []
 
@@ -78,6 +79,7 @@ _CHECKED: list[bool] = []
 # --------------------------------------------------------------------- #
 # Metrics — local, so this file has no hard dependency on ess
 # --------------------------------------------------------------------- #
+
 
 def quality(points: np.ndarray) -> float:
     """Toroidal separation of a design — the shared metric.
@@ -96,14 +98,13 @@ def quality(points: np.ndarray) -> float:
         The minimum pairwise toroidal-L1 distance; higher is better.
     """
     sep = toroidal_separation(points)
-    if HAVE_ESS and not _CHECKED:        # the two projects must agree
+    if HAVE_ESS and not _CHECKED:  # the two projects must agree
         _CHECKED.append(True)
         assert abs(sep - ess.utils.toroidal_separation(points)) < 1e-12
     return sep
 
 
-def recall(index: ToroidalNN, mode: str, k: int, radius: float,
-           seed: int = 0) -> float:
+def recall(index: ToroidalNN, mode: str, k: int, radius: float, seed: int = 0) -> float:
     """Fraction of the exact answer the index returns, self excluded.
 
     Args:
@@ -127,14 +128,13 @@ def recall(index: ToroidalNN, mode: str, k: int, radius: float,
     if mode == "knn":
         got, _ = index.query(k=k, queries=q, exclude_ids=ids)
         want, _ = exact_knn(arena, q, k, exclude_ids=ids)
-        hits = sum(len(set(got[i].tolist()) & set(want[i].tolist()))
-                   for i in range(take))
+        hits = sum(len(set(got[i].tolist()) & set(want[i].tolist())) for i in range(take))
         return hits / float(take * k)
     approx = index.query_radius(radius, queries=q)
     indptr, want_ids, _ = exact_radius(arena, q, radius, exclude_ids=ids)
     hits = total = 0
     for i in range(take):
-        want = set(want_ids[indptr[i]:indptr[i + 1]].tolist()) - {int(ids[i])}
+        want = set(want_ids[indptr[i] : indptr[i + 1]].tolist()) - {int(ids[i])}
         got = set(approx[i][0].tolist()) - {int(ids[i])}
         hits += len(want & got)
         total += len(want)
@@ -144,6 +144,7 @@ def recall(index: ToroidalNN, mode: str, k: int, radius: float,
 # --------------------------------------------------------------------- #
 # The loop
 # --------------------------------------------------------------------- #
+
 
 def radius_for(dim: int, n: int, target: int = K) -> float:
     r"""Interaction radius holding ``target`` neighbours on average.
@@ -161,8 +162,7 @@ def radius_for(dim: int, n: int, target: int = K) -> float:
         Radius in toroidal L1 units.
     """
     count = max(min(target, max(n - 1, 1)), 1)
-    dense = 0.5 * math.exp(
-        (math.lgamma(dim + 1) + math.log(count) - math.log(max(n, 2))) / dim)
+    dense = 0.5 * math.exp((math.lgamma(dim + 1) + math.log(count) - math.log(max(n, 2))) / dim)
     if dense <= 0.5:
         return dense
     z = statistics.NormalDist().inv_cdf(count / max(n, 2))
@@ -175,8 +175,8 @@ def _pad(results: list) -> tuple[np.ndarray, np.ndarray]:
     ids = np.full((len(results), width), -1, dtype=np.int64)
     dst = np.full((len(results), width), np.inf)
     for i, (row_ids, row_dst) in enumerate(results):
-        ids[i, :row_ids.shape[0]] = row_ids
-        dst[i, :row_dst.shape[0]] = row_dst
+        ids[i, : row_ids.shape[0]] = row_ids
+        dst[i, : row_dst.shape[0]] = row_dst
     return ids, dst
 
 
@@ -201,14 +201,15 @@ def _forces(active, arena, ids, dists, radius):
     valid = ids >= 0
     nb = arena[np.where(valid, ids, 0)]
     delta = active[:, None, :] - nb
-    delta -= np.round(delta)                       # shortest way round
+    delta -= np.round(delta)  # shortest way round
     dd = np.maximum(dists, 1e-9)[:, :, None]
     w = np.where(valid[:, :, None], (radius / dd) ** 2, 0.0)
     return (delta / dd * w).sum(axis=1)
 
 
-def run(dim: int, n: int, start: str, mode: str, engine: str,
-        epochs: int = EPOCHS, seed: int = 0, driver: str = "auto") -> dict:
+def run(
+    dim: int, n: int, start: str, mode: str, engine: str, epochs: int = EPOCHS, seed: int = 0, driver: str = "auto"
+) -> dict:
     """One configuration, driven through ESS when it is importable.
 
     Args:
@@ -241,11 +242,19 @@ def run(dim: int, n: int, start: str, mode: str, engine: str,
         # the L1 value used to be accepted silently below d = 32 -- where it
         # is under 1 and read as a normalised radius several times too wide
         # -- and to raise above it.
-        pts = ess.esa(A, np.array([[0.0, 1.0]] * dim), n=n, index=index,
-                      seed=seed, stats=stats, k=K,
-                      radius=radius / (dim * AXIS_MAX),
-                      search_mode="k_nn" if mode == "knn" else "radius",
-                      epochs=epochs, patience=epochs + 1)
+        pts = ess.esa(
+            A,
+            np.array([[0.0, 1.0]] * dim),
+            n=n,
+            index=index,
+            seed=seed,
+            stats=stats,
+            k=K,
+            radius=radius / (dim * AXIS_MAX),
+            search_mode="k_nn" if mode == "knn" else "radius",
+            epochs=epochs,
+            patience=epochs + 1,
+        )
         total = time.perf_counter() - t0
         used = stats.get("epochs_total") or epochs
         phases = {p: stats.get(p, 0.0) for p in keys}
@@ -253,8 +262,7 @@ def run(dim: int, n: int, start: str, mode: str, engine: str,
         fanout = float("nan")
     else:
         init = rng.random((n, dim))
-        index.fit(A if anchors else np.empty((0, dim)), init, k=K,
-                  radius=radius)
+        index.fit(A if anchors else np.empty((0, dim)), init, k=K, radius=radius)
         arena = index._arena
         active = arena[anchors:]
         phases = dict.fromkeys(keys, 0.0)
@@ -290,38 +298,72 @@ def run(dim: int, n: int, start: str, mode: str, engine: str,
         fanout = float(np.mean(fan)) if fan else float("nan")
 
     sep = quality(full)
-    return {"dim": dim, "n": n, "start": start, "mode": mode,
-            "engine": engine, "driver": "ess" if use_ess else "mimic",
-            "epochs": used, "total_s": total,
-            "ms_per_epoch": 1000.0 * total / max(used, 1),
-            "query_ms_per_epoch": 1000.0 * phases["query_s"] / max(used, 1),
-            **phases,
-            "impl": "lsh" if index.is_approximate else "brute",
-            "backend": index.backend_name or "brute",
-            "tables": index.n_tables, "radius": radius, "fanout": fanout,
-            "recall": recall(index, mode, K, radius),
-            "separation": sep,
-            "fingerprint": int(np.asarray(full * 1e9, dtype=np.int64).sum())}
+    return {
+        "dim": dim,
+        "n": n,
+        "start": start,
+        "mode": mode,
+        "engine": engine,
+        "driver": "ess" if use_ess else "mimic",
+        "epochs": used,
+        "total_s": total,
+        "ms_per_epoch": 1000.0 * total / max(used, 1),
+        "query_ms_per_epoch": 1000.0 * phases["query_s"] / max(used, 1),
+        **phases,
+        "impl": "lsh" if index.is_approximate else "brute",
+        "backend": index.backend_name or "brute",
+        "tables": index.n_tables,
+        "radius": radius,
+        "fanout": fanout,
+        "recall": recall(index, mode, K, radius),
+        "separation": sep,
+        "fingerprint": int(np.asarray(full * 1e9, dtype=np.int64).sum()),
+    }
 
 
 def table(rows: list[dict]) -> None:
     """Print one line per configuration."""
-    head = ["d", "n", "start", "mode", "engine", "impl", "L", "ms/epoch",
-            "query ms/ep", "q share", "recall", "CE", "separation", "fanout"]
+    head = [
+        "d",
+        "n",
+        "start",
+        "mode",
+        "engine",
+        "impl",
+        "L",
+        "ms/epoch",
+        "query ms/ep",
+        "q share",
+        "recall",
+        "CE",
+        "separation",
+        "fanout",
+    ]
     print("| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for r in rows:
-        share = (100.0 * r["query_ms_per_epoch"] / r["ms_per_epoch"]
-                 if r["ms_per_epoch"] else 0.0)
-        print("| " + " | ".join([
-            str(r["dim"]), str(r["n"]), r["start"], r["mode"], r["engine"],
-            r["impl"], str(r["tables"]),
-            f"{r['ms_per_epoch']:.2f}", f"{r['query_ms_per_epoch']:.2f}",
-            f"{share:.0f}%",
-            "exact" if np.isnan(r["recall"]) else f"{r['recall']:.3f}",
-            f"{r['separation']:.4f}",
-            "-" if np.isnan(r["fanout"]) else f"{r['fanout']:.1f}",
-        ]) + " |")
+        share = 100.0 * r["query_ms_per_epoch"] / r["ms_per_epoch"] if r["ms_per_epoch"] else 0.0
+        print(
+            "| "
+            + " | ".join(
+                [
+                    str(r["dim"]),
+                    str(r["n"]),
+                    r["start"],
+                    r["mode"],
+                    r["engine"],
+                    r["impl"],
+                    str(r["tables"]),
+                    f"{r['ms_per_epoch']:.2f}",
+                    f"{r['query_ms_per_epoch']:.2f}",
+                    f"{share:.0f}%",
+                    "exact" if np.isnan(r["recall"]) else f"{r['recall']:.3f}",
+                    f"{r['separation']:.4f}",
+                    "-" if np.isnan(r["fanout"]) else f"{r['fanout']:.1f}",
+                ]
+            )
+            + " |"
+        )
 
 
 def group(rows: list[dict], label: str = "suite") -> None:
@@ -330,25 +372,21 @@ def group(rows: list[dict], label: str = "suite") -> None:
         return
     q = sum(r["query_ms_per_epoch"] for r in rows)
     t = sum(r["ms_per_epoch"] for r in rows)
-    geo = statistics.geometric_mean([max(r["ms_per_epoch"], 1e-6)
-                                     for r in rows])
-    print(f"{label}: {len(rows):2} configs, {t:9.1f} ms/epoch summed "
-          f"({100 * q / t:3.0f}% query), geometric mean {geo:8.2f} ms/epoch")
+    geo = statistics.geometric_mean([max(r["ms_per_epoch"], 1e-6) for r in rows])
+    print(
+        f"{label}: {len(rows):2} configs, {t:9.1f} ms/epoch summed "
+        f"({100 * q / t:3.0f}% query), geometric mean {geo:8.2f} ms/epoch"
+    )
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dims", type=int, nargs="+", default=list(DIMS))
-    ap.add_argument("--n", type=int, default=2048,
-                    help="candidates per run (anchors match it when filled)")
-    ap.add_argument("--starts", nargs="+", default=["empty", "filled"],
-                    choices=["empty", "filled"])
-    ap.add_argument("--modes", nargs="+", default=["knn", "radius"],
-                    choices=["knn", "radius"])
-    ap.add_argument("--engines", nargs="+", default=["brute", "lsh"],
-                    choices=["auto", "brute", "lsh"])
-    ap.add_argument("--driver", default="auto",
-                    choices=["auto", "ess", "mimic"])
+    ap.add_argument("--n", type=int, default=2048, help="candidates per run (anchors match it when filled)")
+    ap.add_argument("--starts", nargs="+", default=["empty", "filled"], choices=["empty", "filled"])
+    ap.add_argument("--modes", nargs="+", default=["knn", "radius"], choices=["knn", "radius"])
+    ap.add_argument("--engines", nargs="+", default=["brute", "lsh"], choices=["auto", "brute", "lsh"])
+    ap.add_argument("--driver", default="auto", choices=["auto", "ess", "mimic"])
     ap.add_argument("--epochs", type=int, default=EPOCHS)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--json", default=os.path.join(OUT, "benchmark.json"))
@@ -361,20 +399,20 @@ if __name__ == "__main__":
         for start in args.starts:
             for mode in args.modes:
                 for engine in args.engines:
-                    r = run(dim, args.n, start, mode, engine,
-                            epochs=args.epochs, seed=args.seed,
-                            driver=args.driver)
+                    r = run(dim, args.n, start, mode, engine, epochs=args.epochs, seed=args.seed, driver=args.driver)
                     rows.append(r)
-                    print(f"  [d={dim:<3} {start:<6} {mode:<6} {engine:<5} "
-                          f"{r['ms_per_epoch']:9.2f} ms/epoch  "
-                          f"recall {r['recall']:.3f}]", flush=True)
+                    print(
+                        f"  [d={dim:<3} {start:<6} {mode:<6} {engine:<5} "
+                        f"{r['ms_per_epoch']:9.2f} ms/epoch  "
+                        f"recall {r['recall']:.3f}]",
+                        flush=True,
+                    )
 
     print()
     table(rows)
     print()
     for engine in args.engines:
-        group([r for r in rows if r["engine"] == engine],
-              f"engine={engine:<6}")
+        group([r for r in rows if r["engine"] == engine], f"engine={engine:<6}")
     for mode in args.modes:
         group([r for r in rows if r["mode"] == mode], f"mode={mode:<8}")
     group(rows, "all          ")

@@ -92,7 +92,7 @@ class FlatSim:
         self._rebuild()
 
     def query(self, k):
-        Q = self.arena[self.n_static:].astype(np.float32)
+        Q = self.arena[self.n_static :].astype(np.float32)
         idx = self.ix.search(Q, k + 1)[1]
         ex = np.arange(self.n_static, self.arena.shape[0])
         out = np.empty((Q.shape[0], k), dtype=np.int64)
@@ -102,7 +102,7 @@ class FlatSim:
         return out
 
     def update(self, coords):
-        self.arena[self.n_static:] = coords
+        self.arena[self.n_static :] = coords
         self._rebuild()
 
     def promote(self, new_cands):
@@ -144,8 +144,7 @@ class TorannSim:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--system", default="rust",
-                    choices=["rust", "python", "flat"])
+    ap.add_argument("--system", default="rust", choices=["rust", "python", "flat"])
     ap.add_argument("--label", default=None)
     ap.add_argument("--anchors", type=int, default=15_000)
     ap.add_argument("--batch", type=int, default=3_000)
@@ -154,8 +153,7 @@ def main():
     ap.add_argument("--dims", type=int, default=16)
     ap.add_argument("--sigma", type=float, default=0.01)
     ap.add_argument("--data", default="torus", choices=["torus", "box"])
-    ap.add_argument("--max-batches", type=int, default=0,
-                    help="stop after this many batches (0 = run to target)")
+    ap.add_argument("--max-batches", type=int, default=0, help="stop after this many batches (0 = run to target)")
     args = ap.parse_args()
 
     d, k = args.dims, 2 * args.dims
@@ -197,7 +195,7 @@ def main():
                 qi = np.arange(sim.n_static, sim.arena.shape[0])[:R_CHECK]
                 truth = exact_truth(sim.arena, qi, k, qi, args.data)
                 recalls.append(recall_of(idx[:R_CHECK], truth))
-            timed("update", sim.update, move(sim.arena[sim.n_static:]))
+            timed("update", sim.update, move(sim.arena[sim.n_static :]))
         nxt = gen(args.batch) if b + 1 < n_batches else np.empty((0, d))
         timed("promote", sim.promote, nxt)
 
@@ -205,12 +203,20 @@ def main():
     n_epochs = n_batches * args.epochs
     row = {
         "label": args.label or f"{args.system}-{args.data}-d{d}",
-        "system": args.system, "data": args.data, "d": d, "k": k,
-        "anchors": args.anchors, "batch": args.batch, "epochs": args.epochs,
-        "batches": n_batches, "final_points": int(sim.arena.shape[0]),
-        "build_s": round(t["build"], 3), "query_s": round(t["query"], 3),
+        "system": args.system,
+        "data": args.data,
+        "d": d,
+        "k": k,
+        "anchors": args.anchors,
+        "batch": args.batch,
+        "epochs": args.epochs,
+        "batches": n_batches,
+        "final_points": int(sim.arena.shape[0]),
+        "build_s": round(t["build"], 3),
+        "query_s": round(t["query"], 3),
         "update_s": round(t["update"], 3),
-        "promote_s": round(t["promote"], 3), "wall_s": round(wall, 3),
+        "promote_s": round(t["promote"], 3),
+        "wall_s": round(wall, 3),
         "epoch_ms": round(1e3 * (t["query"] + t["update"]) / n_epochs, 2),
         "recall_per_batch": [round(r, 4) for r in recalls],
     }

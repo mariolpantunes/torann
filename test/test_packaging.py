@@ -38,14 +38,12 @@ class TestPackaging(unittest.TestCase):
 
     def test_requirements_covers_every_runtime_dependency(self):
         missing = {_name_of(d) for d in self.dependencies} - set(self.declared)
-        self.assertFalse(
-            missing, f"in pyproject.toml but not requirements.txt: {sorted(missing)}")
+        self.assertFalse(missing, f"in pyproject.toml but not requirements.txt: {sorted(missing)}")
 
     def test_requirements_declares_nothing_extra(self):
         """It is the runtime dependency list, not a development environment."""
         extra = set(self.declared) - {_name_of(d) for d in self.dependencies}
-        self.assertFalse(
-            extra, f"in requirements.txt but not pyproject.toml: {sorted(extra)}")
+        self.assertFalse(extra, f"in requirements.txt but not pyproject.toml: {sorted(extra)}")
 
     def test_runtime_floors_agree_between_the_two_files(self):
         for spec in self.dependencies:

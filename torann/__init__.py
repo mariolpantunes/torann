@@ -131,5 +131,4 @@ from .base import DistArray, IdArray, Neighbours
 from .metrics import toroidal_separation
 from .wrapper import ToroidalNN, available_backends
 
-__all__ = ["DistArray", "IdArray", "Neighbours", "ToroidalNN",
-           "available_backends", "toroidal_separation"]
+__all__ = ["DistArray", "IdArray", "Neighbours", "ToroidalNN", "available_backends", "toroidal_separation"]

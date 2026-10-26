@@ -49,8 +49,7 @@ CELLS = [
 ]
 
 # exploration/exp_metric_contrast.py — (r64-r1)/r1 on ESS-converged points.
-CONTRAST = {8: (24.0, 49.0, 74.8), 16: (7.3, 21.6, 36.7),
-            32: (2.9, 11.5, 20.1), 64: (1.8, 6.4, 11.5)}
+CONTRAST = {8: (24.0, 49.0, 74.8), 16: (7.3, 21.6, 36.7), 32: (2.9, 11.5, 20.1), 64: (1.8, 6.4, 11.5)}
 POWERS = (1.0, 0.5, 0.25)
 
 # exploration/exp_metric_contrast.py — sigma/r1 for 10:1 rank-1 vs rank-64.
@@ -63,8 +62,10 @@ LP_RANKS = {"median": 18, "p90": 55, "max": 147}
 
 # Hubness: k-occurrence at k=5, n=2000. (label, d, p, mean, max, skew)
 HUBNESS = [
-    ("uniform", 8, 1.0, 5.0, 13, 0.32), ("ESS-converged", 8, 1.0, 5.0, 15, 0.47),
-    ("uniform", 32, 1.0, 5.0, 14, 0.36), ("ESS-converged", 32, 1.0, 5.0, 13, 0.40),
+    ("uniform", 8, 1.0, 5.0, 13, 0.32),
+    ("ESS-converged", 8, 1.0, 5.0, 15, 0.47),
+    ("uniform", 32, 1.0, 5.0, 14, 0.36),
+    ("ESS-converged", 32, 1.0, 5.0, 13, 0.40),
     ("ESS-converged", 32, 0.5, 5.0, 14, 0.37),
 ]
 
@@ -83,7 +84,7 @@ SUITE_TOTAL = (120.83, 79.16, 1.53, 1.65)  # per-query, batched, total x, query 
 # The tuner's own formula at d=32, for three collision targets.
 TUNER_L = [(0.05, 45, 23, 14), (0.10, 22, 12, 7)]
 
-SERIES = ("#2a78d6", "#eb6834", "#1baf7a")      # light: slots 1-3
+SERIES = ("#2a78d6", "#eb6834", "#1baf7a")  # light: slots 1-3
 SERIES_DARK = ("#3987e5", "#d95926", "#199e70")  # dark steps of the same hues
 
 EXTRA_CSS = """
@@ -124,88 +125,89 @@ def tiles(items):
     out = ['<div class="tiles">']
     for value, label, warn in items:
         cls = "n warn" if warn else "n"
-        out.append(f'<div class="tile"><div class="{cls}">{value}</div>'
-                   f'<div class="lab">{label}</div></div>')
+        out.append(f'<div class="tile"><div class="{cls}">{value}</div><div class="lab">{label}</div></div>')
     out.append("</div>")
     return "\n".join(out)
 
 
-def grouped_bars(cats, series_names, values, ymax, unit="%", width=760,
-                 height=250):
+def grouped_bars(cats, series_names, values, ymax, unit="%", width=760, height=250):
     """Grouped vertical bars: `values[s][c]`. One legend, direct labels."""
     left, bottom, top = 46, 34, 14
     plot_w, plot_h = width - left - 12, height - bottom - top
     ns, nc = len(series_names), len(cats)
     group_w = plot_w / nc
     bar_w = min(26, (group_w - 12) / ns)
-    svg = [(f'<svg viewBox="0 0 {width} {height}" role="img" '
-           f'aria-label="grouped bar chart">')]
+    svg = [(f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="grouped bar chart">')]
     for frac in (0, 0.25, 0.5, 0.75, 1.0):
         y = top + plot_h * (1 - frac)
-        svg.append(f'<line class="gridline" x1="{left}" y1="{y:.1f}" '
-                   f'x2="{width - 12}" y2="{y:.1f}"/>')
-        svg.append(f'<text class="axis" x="{left - 8}" y="{y + 4:.1f}" '
-                   f'text-anchor="end">{ymax * frac:.0f}{unit}</text>')
+        svg.append(f'<line class="gridline" x1="{left}" y1="{y:.1f}" x2="{width - 12}" y2="{y:.1f}"/>')
+        svg.append(
+            f'<text class="axis" x="{left - 8}" y="{y + 4:.1f}" text-anchor="end">{ymax * frac:.0f}{unit}</text>'
+        )
     for ci, cat in enumerate(cats):
         gx = left + ci * group_w
         for si in range(ns):
             v = values[si][ci]
             h = plot_h * (v / ymax)
-            x = gx + (group_w - ns * bar_w - (ns - 1) * 3) / 2 \
-                + si * (bar_w + 3)
+            x = gx + (group_w - ns * bar_w - (ns - 1) * 3) / 2 + si * (bar_w + 3)
             y = top + plot_h - h
-            svg.append(f'<rect class="s{si + 1}" x="{x:.1f}" y="{y:.1f}" '
-                       f'width="{bar_w:.1f}" height="{max(h, 1):.1f}" rx="2"/>')
-            svg.append(f'<text class="dlabel" x="{x + bar_w / 2:.1f}" '
-                       f'y="{y - 4:.1f}" text-anchor="middle">{v:g}</text>')
-        svg.append(f'<text class="axis" x="{gx + group_w / 2:.1f}" '
-                   f'y="{height - 12}" text-anchor="middle">{cat}</text>')
+            svg.append(
+                f'<rect class="s{si + 1}" x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{max(h, 1):.1f}" rx="2"/>'
+            )
+            svg.append(
+                f'<text class="dlabel" x="{x + bar_w / 2:.1f}" y="{y - 4:.1f}" text-anchor="middle">{v:g}</text>'
+            )
+        svg.append(f'<text class="axis" x="{gx + group_w / 2:.1f}" y="{height - 12}" text-anchor="middle">{cat}</text>')
     svg.append("</svg>")
-    legend = '<div class="legend">' + "".join(
-        f'<span class="key"><span class="swatch" '
-        f'style="background:var(--s{i + 1})"></span>{n}</span>'
-        for i, n in enumerate(series_names)) + "</div>"
+    legend = (
+        '<div class="legend">'
+        + "".join(
+            f'<span class="key"><span class="swatch" style="background:var(--s{i + 1})"></span>{n}</span>'
+            for i, n in enumerate(series_names)
+        )
+        + "</div>"
+    )
     return f'<div class="chart">{"".join(svg)}</div>{legend}'
 
 
-def line_chart(xs, ys, xlabels, ymax=100, width=760, height=240,
-               annotate=None):
+def line_chart(xs, ys, xlabels, ymax=100, width=760, height=240, annotate=None):
     """Single-series line with emphasised points and direct labels."""
     left, bottom, top = 46, 34, 16
     plot_w, plot_h = width - left - 16, height - bottom - top
     n = len(xs)
     px = [left + (plot_w * i / max(n - 1, 1)) for i in range(n)]
     py = [top + plot_h * (1 - y / ymax) for y in ys]
-    svg = [(f'<svg viewBox="0 0 {width} {height}" role="img" '
-           f'aria-label="retrieval curve">')]
+    svg = [(f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="retrieval curve">')]
     for frac in (0, 0.25, 0.5, 0.75, 1.0):
         y = top + plot_h * (1 - frac)
-        svg.append(f'<line class="gridline" x1="{left}" y1="{y:.1f}" '
-                   f'x2="{width - 16}" y2="{y:.1f}"/>')
-        svg.append(f'<text class="axis" x="{left - 8}" y="{y + 4:.1f}" '
-                   f'text-anchor="end">{ymax * frac:.0f}%</text>')
-    path = " ".join(f"{'M' if i == 0 else 'L'}{px[i]:.1f},{py[i]:.1f}"
-                    for i in range(n))
+        svg.append(f'<line class="gridline" x1="{left}" y1="{y:.1f}" x2="{width - 16}" y2="{y:.1f}"/>')
+        svg.append(f'<text class="axis" x="{left - 8}" y="{y + 4:.1f}" text-anchor="end">{ymax * frac:.0f}%</text>')
+    path = " ".join(f"{'M' if i == 0 else 'L'}{px[i]:.1f},{py[i]:.1f}" for i in range(n))
     svg.append(f'<path class="lineser" d="{path}" stroke="var(--s1)"/>')
     for i in range(n):
-        svg.append(f'<circle cx="{px[i]:.1f}" cy="{py[i]:.1f}" r="4.5" '
-                   f'fill="var(--s1)" stroke="var(--card)" stroke-width="2"/>')
-        svg.append(f'<text class="dlabel" x="{px[i]:.1f}" '
-                   f'y="{py[i] - 11:.1f}" text-anchor="middle">{ys[i]:g}%</text>')
-        svg.append(f'<text class="axis" x="{px[i]:.1f}" y="{height - 12}" '
-                   f'text-anchor="middle">{xlabels[i]}</text>')
+        svg.append(
+            f'<circle cx="{px[i]:.1f}" cy="{py[i]:.1f}" r="4.5" '
+            f'fill="var(--s1)" stroke="var(--card)" stroke-width="2"/>'
+        )
+        svg.append(f'<text class="dlabel" x="{px[i]:.1f}" y="{py[i] - 11:.1f}" text-anchor="middle">{ys[i]:g}%</text>')
+        svg.append(f'<text class="axis" x="{px[i]:.1f}" y="{height - 12}" text-anchor="middle">{xlabels[i]}</text>')
     if annotate:
         y = top + plot_h * (1 - annotate / ymax)
-        svg.append(f'<line class="gridline" x1="{left}" y1="{y:.1f}" '
-                   f'x2="{width - 16}" y2="{y:.1f}" '
-                   f'stroke="var(--critical)" stroke-dasharray="4 3"/>')
+        svg.append(
+            f'<line class="gridline" x1="{left}" y1="{y:.1f}" '
+            f'x2="{width - 16}" y2="{y:.1f}" '
+            f'stroke="var(--critical)" stroke-dasharray="4 3"/>'
+        )
     svg.append("</svg>")
     return f'<div class="chart">{"".join(svg)}</div>'
 
 
 def simple_table(head, rows, cls=""):
-    out = [f'<div class="tablewrap"><table class="{cls}"><thead><tr>'
-           + "".join(f"<th>{h}</th>" for h in head) + "</tr></thead><tbody>"]
+    out = [
+        f'<div class="tablewrap"><table class="{cls}"><thead><tr>'
+        + "".join(f"<th>{h}</th>" for h in head)
+        + "</tr></thead><tbody>"
+    ]
     for r in rows:
         out.append("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>")
     out.append("</tbody></table></div>")
@@ -218,8 +220,7 @@ def sweep_summary(rows):
     for engine in ("brute", "lsh"):
         v = [r["ms_per_epoch"] for r in rows if r["engine"] == engine]
         q = [r["query_ms_per_epoch"] for r in rows if r["engine"] == engine]
-        out[engine] = (len(v), float(np.exp(np.mean(np.log(v)))),
-                       100 * sum(q) / sum(v))
+        out[engine] = (len(v), float(np.exp(np.mean(np.log(v)))), 100 * sum(q) / sum(v))
     return out
 
 
@@ -242,31 +243,35 @@ def render(sweep, abl_rows):
         start = "filled start" if anchors else "empty start"
         facets.append(
             f'<div class="facet"><h3>d = {dim} <span>&nbsp;·&nbsp; {start}'
-            f'&nbsp;·&nbsp; {anchors}+{cands}</span></h3>'
-            f'{bars(stats[shape], "sep", stats[shape]["uniform"]["sep"])}</div>')
+            f"&nbsp;·&nbsp; {anchors}+{cands}</span></h3>"
+            f"{bars(stats[shape], 'sep', stats[shape]['uniform']['sep'])}</div>"
+        )
 
     abl_tables = "".join(
-        f'<section><h3>d = {d} &nbsp;·&nbsp; '
-        f'{"filled" if a else "empty"} start &nbsp;·&nbsp; {a}+{c}</h3>'
-        f'{table(stats[(d, a, c)])}</section>' for (d, a, c) in shapes)
+        f"<section><h3>d = {d} &nbsp;·&nbsp; "
+        f"{'filled' if a else 'empty'} start &nbsp;·&nbsp; {a}+{c}</h3>"
+        f"{table(stats[(d, a, c)])}</section>"
+        for (d, a, c) in shapes
+    )
 
     # --- charts ------------------------------------------------------------
     contrast_chart = grouped_bars(
         [f"d={d}" for d in sorted(CONTRAST)],
         [f"p = {p}" for p in POWERS],
         [[CONTRAST[d][i] for d in sorted(CONTRAST)] for i in range(3)],
-        ymax=80)
+        ymax=80,
+    )
 
     force_chart = grouped_bars(
         [f"d={d}" for d in sorted(FORCE_BY_RANK)],
         ["share of the vote from ranks 1–8"],
         [[FORCE_BY_RANK[d]["share_1_8"] for d in sorted(FORCE_BY_RANK)]],
-        ymax=100)
+        ymax=100,
+    )
 
-    lp_chart = line_chart([w for w, _ in LP_RECALL],
-                          [r for _, r in LP_RECALL],
-                          [f"k={w}" for w, _ in LP_RECALL],
-                          annotate=93.2)
+    lp_chart = line_chart(
+        [w for w, _ in LP_RECALL], [r for _, r in LP_RECALL], [f"k={w}" for w, _ in LP_RECALL], annotate=93.2
+    )
 
     return f"""<title>torann × ESS — session report</title>
 <style>{CSS}{EXTRA_CSS}</style>
@@ -295,19 +300,31 @@ def render(sweep, abl_rows):
 <hr class="rule">
 
 <section>
-  {tiles([
-      (f"{abs(pct(empty32, 'top2k')):.2f}%",
-       ("separation cost of halving recall at d=32, empty start — the "
-       "slack the index can spend"), False),
-      (f"{abs(pct(empty32, 'rank1-4k')):.0f}%",
-       ("separation cost of losing all true neighbours, though substitutes "
-       "are only 5% further away"), True),
-      ("86%",
-       ("how hard the 64th neighbour pushes relative to the 1st at d=32 — "
-       "the force law cannot discriminate"), True),
-      ("93.2%",
-       "ceiling on L^0.5 recall from the L1 hash, at any retrieval width", True),
-  ])}
+  {
+        tiles(
+            [
+                (
+                    f"{abs(pct(empty32, 'top2k')):.2f}%",
+                    ("separation cost of halving recall at d=32, empty start — the slack the index can spend"),
+                    False,
+                ),
+                (
+                    f"{abs(pct(empty32, 'rank1-4k')):.0f}%",
+                    ("separation cost of losing all true neighbours, though substitutes are only 5% further away"),
+                    True,
+                ),
+                (
+                    "86%",
+                    (
+                        "how hard the 64th neighbour pushes relative to the 1st at d=32 — "
+                        "the force law cannot discriminate"
+                    ),
+                    True,
+                ),
+                ("93.2%", "ceiling on L^0.5 recall from the L1 hash, at any retrieval width", True),
+            ]
+        )
+    }
 </section>
 
 <section class="prose" id="baseline">
@@ -318,9 +335,9 @@ def render(sweep, abl_rows):
   this branch. An earlier session lost an hour to measuring a 12-day-old
   build twice.</p>
   <p>The standing sweep, 48 configurations, reported per epoch:
-  <strong>brute {sw['brute'][1]:.1f} ms/epoch</strong> geometric mean
-  ({sw['brute'][2]:.0f}% of it query), <strong>LSH {sw['lsh'][1]:.2f}
-  ms/epoch</strong> ({sw['lsh'][2]:.0f}% query). One sweep run was
+  <strong>brute {sw["brute"][1]:.1f} ms/epoch</strong> geometric mean
+  ({sw["brute"][2]:.0f}% of it query), <strong>LSH {sw["lsh"][1]:.2f}
+  ms/epoch</strong> ({sw["lsh"][2]:.0f}% query). One sweep run was
   discarded and repeated because another job overlapped ~90 s of it.</p>
 </section>
 
@@ -328,16 +345,26 @@ def render(sweep, abl_rows):
   <div class="prose"><h3>The six ESS shapes, batched join vs per-query</h3>
   <p class="note">Every shape's trajectory fingerprint matched — results are
   bit-identical across the two paths.</p></div>
-  {simple_table(
-      ("d", "shape", "L", "per-query", "batched", "speed-up", "recall"),
-      [(d, f"{a}+{c}", ell or "—", f"{pq:.2f}s", f"{b:.2f}s",
-        f"{su:.2f}×" if su else "n/a", rec)
-       for d, a, c, ell, pq, b, su, rec in SUITE]
-      + [("<strong>all</strong>", "<strong>six shapes</strong>", "",
-          f"<strong>{SUITE_TOTAL[0]:.2f}s</strong>",
-          f"<strong>{SUITE_TOTAL[1]:.2f}s</strong>",
-          f"<strong>{SUITE_TOTAL[2]:.2f}×</strong>",
-          f"query {SUITE_TOTAL[3]:.2f}×")])}
+  {
+        simple_table(
+            ("d", "shape", "L", "per-query", "batched", "speed-up", "recall"),
+            [
+                (d, f"{a}+{c}", ell or "—", f"{pq:.2f}s", f"{b:.2f}s", f"{su:.2f}×" if su else "n/a", rec)
+                for d, a, c, ell, pq, b, su, rec in SUITE
+            ]
+            + [
+                (
+                    "<strong>all</strong>",
+                    "<strong>six shapes</strong>",
+                    "",
+                    f"<strong>{SUITE_TOTAL[0]:.2f}s</strong>",
+                    f"<strong>{SUITE_TOTAL[1]:.2f}s</strong>",
+                    f"<strong>{SUITE_TOTAL[2]:.2f}×</strong>",
+                    f"query {SUITE_TOTAL[3]:.2f}×",
+                )
+            ],
+        )
+    }
 </section>
 
 <section class="prose" id="recall">
@@ -356,19 +383,21 @@ def render(sweep, abl_rows):
     <div class="verdict">
       <p class="eyebrow">Answer</p>
       <p><strong>Recall has a floor, not a price.</strong> Half the true
-      neighbours can go almost free — {abs(pct(empty32, 'top2k')):.2f}%
-      separation at d=32{"" if not fill32 else
-      f", {abs(pct(fill32, 'top2k')):.2f}% from the filled start"} — but
+      neighbours can go almost free — {abs(pct(empty32, "top2k")):.2f}%
+      separation at d=32{"" if not fill32 else f", {abs(pct(fill32, 'top2k')):.2f}% from the filled start"} — but
       losing all of them collapses the result to the uniform null, even
       when the substitutes are only 5% further away. A distance
       <em>ranking</em> is the product. Redesigning the index around cost per
       <em>plausible local neighbour</em> is ruled out.</p>
-      {"" if not fill32 else
-       f'<p>The filled start — anchors that cannot be pushed, which is the '
-       f'case ESS is actually for — is uniformly <em>less</em> sensitive '
-       f'({abs(pct(fill32, "rank1-4k")):.1f}% at recall 0 against '
-       f'{abs(pct(empty32, "rank1-4k")):.1f}% empty), so the slack measured '
-       f'from an empty start is a lower bound on the slack in production.</p>'}
+      {
+        ""
+        if not fill32
+        else f"<p>The filled start — anchors that cannot be pushed, which is the "
+        f"case ESS is actually for — is uniformly <em>less</em> sensitive "
+        f"({abs(pct(fill32, 'rank1-4k')):.1f}% at recall 0 against "
+        f"{abs(pct(empty32, 'rank1-4k')):.1f}% empty), so the slack measured "
+        f"from an empty start is a lower bound on the slack in production.</p>"
+    }
     </div>
   </div>
   <div class="legend">
@@ -396,10 +425,15 @@ def render(sweep, abl_rows):
 
 <section>
   {force_chart}
-  {simple_table(
-      ("d", "rank 1 weight", "rank 8", "rank 64", "share from ranks 1–8"),
-      [(d, f"{v['r1']:.4g}", f"{v['r8']:.4g}", f"{v['r64']:.3g}",
-        f"{v['share_1_8']:.2f}%") for d, v in sorted(FORCE_BY_RANK.items())])}
+  {
+        simple_table(
+            ("d", "rank 1 weight", "rank 8", "rank 64", "share from ranks 1–8"),
+            [
+                (d, f"{v['r1']:.4g}", f"{v['r8']:.4g}", f"{v['r64']:.3g}", f"{v['share_1_8']:.2f}%")
+                for d, v in sorted(FORCE_BY_RANK.items())
+            ],
+        )
+    }
   <div class="prose stack">
     <p>At d=32 the 64th neighbour pushes <strong>86% as hard as the
     nearest</strong>, because all 64 distances lie in [6.13, 6.31] — a 3%
@@ -431,13 +465,23 @@ def render(sweep, abl_rows):
 </section>
 
 <section>
-  {simple_table(
-      ("d", "n", "R", "cells/dim allowed (capture)",
-       "needed (occupancy)", "1+2d", "verdict"),
-      [(d, n, f"{r:.4f}", f"{bc:.2f}", f"{bo:.2f}", cells,
-        f'<span style="color:var(--critical)">{v}</span>'
-        if v == "impossible" else v)
-       for d, n, r, bc, bo, cells, v in CELLS])}
+  {
+        simple_table(
+            ("d", "n", "R", "cells/dim allowed (capture)", "needed (occupancy)", "1+2d", "verdict"),
+            [
+                (
+                    d,
+                    n,
+                    f"{r:.4f}",
+                    f"{bc:.2f}",
+                    f"{bo:.2f}",
+                    cells,
+                    f'<span style="color:var(--critical)">{v}</span>' if v == "impossible" else v,
+                )
+                for d, n, r, bc, bo, cells, v in CELLS
+            ],
+        )
+    }
   <p class="note">At d≥16 the capturing cell is <em>larger than the whole
   domain</em>. This is the same wall as the measured geometry elsewhere,
   now in the force law's own terms — and it is why a ring-search engine
@@ -477,8 +521,8 @@ def render(sweep, abl_rows):
     recall</strong> (0.689 here). The missing ~7% never collide, so no
     rerank at any width reaches them.</p>
     <p>The mitigating fact is that the L^p-nearest are not <em>far</em> in
-    L1 — median L1 rank {LP_RANKS['median']}, 90th percentile
-    {LP_RANKS['p90']}, max {LP_RANKS['max']} — and the refine kernel already
+    L1 — median L1 rank {LP_RANKS["median"]}, 90th percentile
+    {LP_RANKS["p90"]}, max {LP_RANKS["max"]} — and the refine kernel already
     scores ~4118 candidates per query, so the rerank itself costs one
     <code>vsqrtps</code> per lane plus a bigger heap, not extra retrieval.
     <strong>But do not ship it as an L^p index.</strong> The cap is
@@ -496,11 +540,12 @@ def render(sweep, abl_rows):
 </section>
 
 <section>
-  {simple_table(
-      ("per-table collision p1", "L for 90% (current)",
-       "for 69% (delivered)", "for 50%"),
-      [(f"{p:.2f}", a, b, f"<strong>{c}</strong>")
-       for p, a, b, c in TUNER_L])}
+  {
+        simple_table(
+            ("per-table collision p1", "L for 90% (current)", "for 69% (delivered)", "for 50%"),
+            [(f"{p:.2f}", a, b, f"<strong>{c}</strong>") for p, a, b, c in TUNER_L],
+        )
+    }
   <div class="prose stack">
     <div class="verdict warn">
       <p class="eyebrow">The contradiction worth resolving first</p>
@@ -530,10 +575,12 @@ def render(sweep, abl_rows):
 </section>
 
 <section>
-  {simple_table(
-      ("condition", "d", "p", "mean k-occurrence", "max", "skew"),
-      [(lab, d, p, f"{m:.1f}", mx, f"+{sk:.2f}")
-       for lab, d, p, m, mx, sk in HUBNESS])}
+  {
+        simple_table(
+            ("condition", "d", "p", "mean k-occurrence", "max", "skew"),
+            [(lab, d, p, f"{m:.1f}", mx, f"+{sk:.2f}") for lab, d, p, m, mx, sk in HUBNESS],
+        )
+    }
   <div class="prose stack">
     <p><strong>Hubness.</strong> No runaway hubs anywhere — skew +0.32…+0.47
     with a maximum k-occurrence of 13–15 against a mean of 5, for uniform
@@ -589,9 +636,11 @@ def render(sweep, abl_rows):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--sweep", default=os.path.join(OUT, "bench_base.json"))
-    ap.add_argument("--ablation", nargs="+",
-                    default=[os.path.join(OUT, "recall_ablation.json"),
-                             os.path.join(OUT, "recall_ablation_anchored.json")])
+    ap.add_argument(
+        "--ablation",
+        nargs="+",
+        default=[os.path.join(OUT, "recall_ablation.json"), os.path.join(OUT, "recall_ablation_anchored.json")],
+    )
     ap.add_argument("--out", default=os.path.join(OUT, "session_report.html"))
     args = ap.parse_args()
 

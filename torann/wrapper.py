@@ -80,10 +80,10 @@ def _lsh_class(name: str):
         if rust.RustLshIndex is None:
             raise ImportError(
                 "torann._native is not available (not built, or this CPU is "
-                "below the AVX2 floor the published wheels are built with)")
+                "below the AVX2 floor the published wheels are built with)"
+            )
         return rust.RustLshIndex
-    raise ValueError(f"unknown backend {name!r}; expected 'auto', "
-                     f"{', '.join(map(repr, _AUTO_ORDER))}")
+    raise ValueError(f"unknown backend {name!r}; expected 'auto', {', '.join(map(repr, _AUTO_ORDER))}")
 
 
 def _resolve(name: str = "auto"):
@@ -224,15 +224,13 @@ class ToroidalNN:
         if probes < 0:
             raise ValueError("probes must be >= 0")
 
-        self.brute_threshold = None if brute_threshold is None \
-            else int(brute_threshold)
+        self.brute_threshold = None if brute_threshold is None else int(brute_threshold)
         self.num_tables = num_tables
         self.resolution = resolution
         self.dims_per_table = dims_per_table
         self.target_bucket_size = target_bucket_size
         self.probes = int(probes)
-        self.query_block_size = None if query_block_size is None \
-            else int(query_block_size)
+        self.query_block_size = None if query_block_size is None else int(query_block_size)
         self.backend = backend
         self.backend_name: str | None = None
 
@@ -271,11 +269,9 @@ class ToroidalNN:
         if S.ndim != 2:
             raise ValueError("static_points must be an (n, d) array")
         if S.shape[0] == 0:
-            C0 = np.atleast_2d(np.asarray(candidate_points, dtype=np.float64)) \
-                if candidate_points is not None else None
+            C0 = np.atleast_2d(np.asarray(candidate_points, dtype=np.float64)) if candidate_points is not None else None
             if C0 is None or C0.shape[0] == 0:
-                raise ValueError(
-                    "fit needs at least one point (static or candidate)")
+                raise ValueError("fit needs at least one point (static or candidate)")
             S = np.empty((0, C0.shape[1]))
         self._d = S.shape[1]
         C = self._as_batch(candidate_points)
@@ -306,9 +302,8 @@ class ToroidalNN:
         self._check_fitted()
         new = np.mod(np.atleast_2d(np.asarray(coordinates, dtype=np.float64)), 1.0)
         if new.shape != (self.n_candidates, self._d):
-            raise ValueError(
-                f"expected coordinates of shape {(self.n_candidates, self._d)}")
-        self._arena[self._n_static:] = new
+            raise ValueError(f"expected coordinates of shape {(self.n_candidates, self._d)}")
+        self._arena[self._n_static :] = new
         self._impl.update(np.ascontiguousarray(new))
 
     def promote(self, new_candidates: np.ndarray | None = None) -> None:
@@ -368,14 +363,21 @@ class ToroidalNN:
     # cast at each site to restate what the literal already says.
     @overload
     def query_radius(
-        self, radius: float, queries: np.ndarray | None = ...,
-        exact: bool = ..., *, pad: Literal[True],
+        self,
+        radius: float,
+        queries: np.ndarray | None = ...,
+        exact: bool = ...,
+        *,
+        pad: Literal[True],
     ) -> Neighbours: ...
 
     @overload
     def query_radius(
-        self, radius: float, queries: np.ndarray | None = ...,
-        exact: bool = ..., pad: Literal[False] = ...,
+        self,
+        radius: float,
+        queries: np.ndarray | None = ...,
+        exact: bool = ...,
+        pad: Literal[False] = ...,
     ) -> list[Neighbours]: ...
 
     def query_radius(
@@ -416,14 +418,11 @@ class ToroidalNN:
         if exact and self._use_lsh:
             indptr, ids, dst = radius_scan(self._arena, Q, float(radius), ex)
         else:
-            indptr, ids, dst = self._impl.query_radius(
-                np.ascontiguousarray(Q), float(radius), ex)
+            indptr, ids, dst = self._impl.query_radius(np.ascontiguousarray(Q), float(radius), ex)
         m = Q.shape[0]
         if pad:
             return csr_to_padded(indptr, ids, dst, m)
-        return [Neighbours(ids[indptr[i]:indptr[i + 1]],
-                           dst[indptr[i]:indptr[i + 1]])
-                for i in range(m)]
+        return [Neighbours(ids[indptr[i] : indptr[i + 1]], dst[indptr[i] : indptr[i + 1]]) for i in range(m)]
 
     # ------------------------------------------------------------------ #
     # Tuning and implementation selection
@@ -438,8 +437,7 @@ class ToroidalNN:
         else:
             # Neighbour scale: k-th NN distance of a sample against a sample.
             q = self._arena[self._rng.choice(n, min(_TUNE_QUERIES, n), replace=False)]
-            ref = self._arena[self._rng.choice(
-                n, min(_TUNE_REFERENCE, n), replace=False)]
+            ref = self._arena[self._rng.choice(n, min(_TUNE_REFERENCE, n), replace=False)]
             # This is a k-NN query, so it is served by the k-NN kernel.
             #
             # It used to compute the full (256 x 8192) distance block in
@@ -470,11 +468,9 @@ class ToroidalNN:
 
         # B: want per-dim collision 1-B*delta comfortably positive; high-d
         # concentration (large delta) pushes B to its coarsest value 2.
-        B = self.resolution if self.resolution is not None else \
-            int(np.clip(round(0.3 / delta), 2, 8))
+        B = self.resolution if self.resolution is not None else int(np.clip(round(0.3 / delta), 2, 8))
 
-        target = self.target_bucket_size if self.target_bucket_size is not None \
-            else max(32, k)
+        target = self.target_bucket_size if self.target_bucket_size is not None else max(32, k)
         if self.dims_per_table is not None:
             K = self.dims_per_table
         else:
@@ -485,15 +481,13 @@ class ToroidalNN:
             L = self.num_tables
         else:
             p1 = (1.0 - min(0.95, B * delta)) ** K  # per-table collision of a k-NN
-            L = int(np.clip(np.ceil(np.log(0.10) / np.log(1 - min(0.99, p1 + 1e-9))),
-                            4, 24)) if p1 < 1.0 else 4
+            L = int(np.clip(np.ceil(np.log(0.10) / np.log(1 - min(0.99, p1 + 1e-9))), 4, 24)) if p1 < 1.0 else 4
         self._B, self._K, self._L = B, K, L
 
         self._S = self._rng.integers(0, d, size=(L, K))
         self._U = self._rng.random((L, K))
         self._pw = B ** np.arange(K, dtype=np.int64)
-        logger.info("tuned: n=%d d=%d r_hat=%.3f -> B=%d K=%d L=%d",
-                    n, d, r_hat, B, K, L)
+        logger.info("tuned: n=%d d=%d r_hat=%.3f -> B=%d K=%d L=%d", n, d, r_hat, B, K, L)
 
     def _threshold(self) -> int:
         """Explicit brute_threshold, or the backend's measured crossover."""
@@ -506,8 +500,7 @@ class ToroidalNN:
         """Instantiate the LSH implementation and build both tiers."""
         name, cls = _resolve(self.backend)
         self.backend_name = name
-        self._impl = cls(self._B, self._K, self._L, self.probes,
-                         self._S, self._U, self.query_block_size or 0)
+        self._impl = cls(self._B, self._K, self._L, self.probes, self._S, self._U, self.query_block_size or 0)
         self._impl.build(np.ascontiguousarray(self._arena), self._n_static)
         logger.info("LSH implementation: %s", name)
 
@@ -519,7 +512,7 @@ class ToroidalNN:
         if queries is None:
             if self.n_candidates == 0:
                 raise ValueError("no candidate tier; pass explicit queries")
-            Q = self._arena[self._n_static:]
+            Q = self._arena[self._n_static :]
             ex = np.arange(self._n_static, self.n_points)
         else:
             Q = np.mod(np.atleast_2d(np.asarray(queries, dtype=np.float64)), 1.0)
@@ -562,7 +555,7 @@ class ToroidalNN:
     @property
     def candidates(self) -> np.ndarray:
         """Current candidate-tier coordinates (view)."""
-        return self._arena[self._n_static:]
+        return self._arena[self._n_static :]
 
     @property
     def dimensions(self) -> int:

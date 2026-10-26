@@ -73,39 +73,46 @@ def main():
         exact = torus_knn(pts, q_ids)
         fresh_keys = [keys_of(pts, S_all[t], U_all[t]) for t in range(L)]
         rec_stale.append(candidate_recall(pts, stale_keys, S_all, U_all, q_ids, exact))
-        rec_stale_np.append(candidate_recall(pts, stale_keys, S_all, U_all,
-                                             q_ids, exact, probes=False))
+        rec_stale_np.append(candidate_recall(pts, stale_keys, S_all, U_all, q_ids, exact, probes=False))
         rec_fresh.append(candidate_recall(pts, fresh_keys, S_all, U_all, q_ids, exact))
         churn.append(np.mean([np.mean(f != s) for f, s in zip(fresh_keys, stale_keys)]))
         pts = np.mod(pts + RNG.normal(0, SIGMA, (N, 2)), 1.0)
 
     fig, (axR, axC) = plt.subplots(1, 2, figsize=(11, 4.2))
-    axR.plot(epochs, rec_fresh, "o-", ms=5, color=vs.BLUE, mec=vs.SURFACE,
-             mew=0.8, label="rebuilt every epoch")
-    axR.plot(epochs, rec_stale, "o-", ms=5, color=vs.AQUA, mec=vs.SURFACE,
-             mew=0.8, label="stale, with probes")
-    axR.plot(epochs, rec_stale_np, "o-", ms=5, color=vs.RED, mec=vs.SURFACE,
-             mew=0.8, label="stale, no probes")
-    axR.set(title=f"H — recall under staleness (σ={SIGMA}/dim/epoch)",
-            xlabel="epochs since last rehash", ylabel="candidate-set recall",
-            ylim=(0, 1.03))
+    axR.plot(epochs, rec_fresh, "o-", ms=5, color=vs.BLUE, mec=vs.SURFACE, mew=0.8, label="rebuilt every epoch")
+    axR.plot(epochs, rec_stale, "o-", ms=5, color=vs.AQUA, mec=vs.SURFACE, mew=0.8, label="stale, with probes")
+    axR.plot(epochs, rec_stale_np, "o-", ms=5, color=vs.RED, mec=vs.SURFACE, mew=0.8, label="stale, no probes")
+    axR.set(
+        title=f"H — recall under staleness (σ={SIGMA}/dim/epoch)",
+        xlabel="epochs since last rehash",
+        ylabel="candidate-set recall",
+        ylim=(0, 1.03),
+    )
     axR.legend(loc="lower left")
 
-    axC.plot(epochs, churn, "o-", ms=5, color=vs.VIOLET, mec=vs.SURFACE, mew=0.8,
-             label="measured")
+    axC.plot(epochs, churn, "o-", ms=5, color=vs.VIOLET, mec=vs.SURFACE, mew=0.8, label="measured")
     drift = SIGMA * np.sqrt(2 * epochs / np.pi)  # E|N(0, sigma*sqrt(e))|
-    axC.plot(epochs, 1 - (1 - np.minimum(1, B * drift)) ** K, ls="--", lw=1.1,
-             color=vs.VIOLET, alpha=0.85, label="theory 1−(1−B·E|drift|)^K")
-    axC.set(title="H — stale keys: work an exact update would do",
-            xlabel="epochs since last rehash", ylabel="fraction of keys changed",
-            ylim=(0, 1.03))
+    axC.plot(
+        epochs,
+        1 - (1 - np.minimum(1, B * drift)) ** K,
+        ls="--",
+        lw=1.1,
+        color=vs.VIOLET,
+        alpha=0.85,
+        label="theory 1−(1−B·E|drift|)^K",
+    )
+    axC.set(
+        title="H — stale keys: work an exact update would do",
+        xlabel="epochs since last rehash",
+        ylabel="fraction of keys changed",
+        ylim=(0, 1.03),
+    )
     axC.legend(loc="upper left")
     fig.tight_layout()
     fig.savefig(os.path.join(OUT, "2d_staleness.png"), bbox_inches="tight")
 
     for e in (0, 1, 2, 4, 8, 12):
-        print(f"epoch {e:>2}: stale recall {rec_stale[e]:.3f} "
-              f"(fresh {rec_fresh[e]:.3f}), churn {churn[e]:.3f}")
+        print(f"epoch {e:>2}: stale recall {rec_stale[e]:.3f} (fresh {rec_fresh[e]:.3f}), churn {churn[e]:.3f}")
 
 
 if __name__ == "__main__":

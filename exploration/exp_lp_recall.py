@@ -27,6 +27,7 @@ try:
     import importlib
 
     import ess
+
     importlib.import_module("ess.ess")
 except ImportError:  # pragma: no cover - exploration-only dependency
     sys.exit("ess not importable: add ~/git/ess/src to PYTHONPATH")
@@ -45,7 +46,7 @@ def lp_matrix(Q, pts, p):
     for j in range(Q.shape[1]):
         u = np.abs(Q[:, j, None] - pts[None, :, j])
         np.minimum(u, 1.0 - u, out=u)
-        acc += u ** p
+        acc += u**p
     return acc
 
 
@@ -60,11 +61,11 @@ def cross_ranks(points, p, seed=0):
     D1[np.arange(len(qi)), qi] = np.inf
     Dp[np.arange(len(qi)), qi] = np.inf
 
-    r1 = np.argsort(np.argsort(D1, axis=1), axis=1)   # L1 rank of every point
-    rp = np.argsort(np.argsort(Dp, axis=1), axis=1)   # L^p rank
+    r1 = np.argsort(np.argsort(D1, axis=1), axis=1)  # L1 rank of every point
+    rp = np.argsort(np.argsort(Dp, axis=1), axis=1)  # L^p rank
 
-    top_p = np.argpartition(Dp, K, axis=1)[:, :K]     # true L^p nearest
-    top_1 = np.argpartition(D1, K, axis=1)[:, :K]     # true L1 nearest
+    top_p = np.argpartition(Dp, K, axis=1)[:, :K]  # true L^p nearest
+    top_1 = np.argpartition(D1, K, axis=1)[:, :K]  # true L1 nearest
 
     l1_rank_of_lp = np.take_along_axis(r1, top_p, axis=1).ravel()
     lp_rank_of_l1 = np.take_along_axis(rp, top_1, axis=1).ravel()
@@ -85,13 +86,16 @@ if __name__ == "__main__":
         for p in (0.5, 0.25):
             a, b, curve = cross_ranks(pts, p)
             print(f"\np={p}")
-            print(f"  L1 rank of the true L^p top-{K}:  "
-                  f"median {np.median(a):.0f}, "
-                  f"90th pct {np.percentile(a, 90):.0f}, max {a.max():.0f}")
-            print(f"  L^p rank of the true L1 top-{K}:  "
-                  f"median {np.median(b):.0f}, "
-                  f"90th pct {np.percentile(b, 90):.0f}, max {b.max():.0f}")
+            print(
+                f"  L1 rank of the true L^p top-{K}:  "
+                f"median {np.median(a):.0f}, "
+                f"90th pct {np.percentile(a, 90):.0f}, max {a.max():.0f}"
+            )
+            print(
+                f"  L^p rank of the true L1 top-{K}:  "
+                f"median {np.median(b):.0f}, "
+                f"90th pct {np.percentile(b, 90):.0f}, max {b.max():.0f}"
+            )
             print("  recall of L^p top-5 from an L1 query of width w:")
             for w, hit in curve:
-                print(f"    w={w:5d}  ->  {100 * hit:5.1f}%  "
-                      f"({100 * w / N:.0f}% of the set scanned)")
+                print(f"    w={w:5d}  ->  {100 * hit:5.1f}%  ({100 * w / N:.0f}% of the set scanned)")

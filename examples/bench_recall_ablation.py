@@ -207,8 +207,7 @@ class CorruptIndex(ToroidalNN):
 
         hit = (ids[:, :, None] == truth[:, None, :]).any(axis=2)
         self.diag["recall"].append(float(hit.mean()))
-        self.diag["ratio"].append(
-            float(np.mean(dists / np.maximum(kth[:, None], 1e-12))))
+        self.diag["ratio"].append(float(np.mean(dists / np.maximum(kth[:, None], 1e-12))))
         return ids, dists
 
 
@@ -232,14 +231,10 @@ def report(rows):
     """Per shape, the ladder with separation relative to the control."""
     shapes = sorted({(r["dim"], r["anchors"], r["candidates"]) for r in rows})
     for dim, anchors, cands in shapes:
-        sub = [r for r in rows if (r["dim"], r["anchors"], r["candidates"])
-               == (dim, anchors, cands)]
+        sub = [r for r in rows if (r["dim"], r["anchors"], r["candidates"]) == (dim, anchors, cands)]
         base = np.mean([r["separation"] for r in sub if r["arm"] == "exact"])
-        print(f"\nd={dim}, {anchors}+{cands}, "
-              f"{len({r['seed'] for r in sub})} seeds "
-              f"(paired: same seed across arms)")
-        head = ["arm", "recall", "mean_ratio", "separation",
-                "dsep vs exact", "epochs"]
+        print(f"\nd={dim}, {anchors}+{cands}, {len({r['seed'] for r in sub})} seeds (paired: same seed across arms)")
+        head = ["arm", "recall", "mean_ratio", "separation", "dsep vs exact", "epochs"]
         print("| " + " | ".join(head) + " |")
         print("|" + "---|" * len(head))
         for arm in ARMS:
@@ -249,11 +244,13 @@ def report(rows):
             sep_a = np.array([r["separation"] for r in a])
             sep = float(sep_a.mean())
             sd = sep_a.std(ddof=1) if len(sep_a) > 1 else 0.0
-            print(f"| {arm} | {np.mean([r['recall'] for r in a]):.3f} "
-                  f"| {np.mean([r['mean_ratio'] for r in a]):.2f} "
-                  f"| {sep:.4f} +/- {sd:.4f} "
-                  f"| {100 * (sep - base) / base:+.2f}% "
-                  f"| {np.mean([r['epochs'] for r in a]):.0f} |")
+            print(
+                f"| {arm} | {np.mean([r['recall'] for r in a]):.3f} "
+                f"| {np.mean([r['mean_ratio'] for r in a]):.2f} "
+                f"| {sep:.4f} +/- {sd:.4f} "
+                f"| {100 * (sep - base) / base:+.2f}% "
+                f"| {np.mean([r['epochs'] for r in a]):.0f} |"
+            )
 
 
 if __name__ == "__main__":
@@ -265,23 +262,33 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     import torann
+
     print(f"[torann: {torann.__file__}]")
-    picked = ([CASES[i - 1] for i in args.cases] if args.cases else list(CASES))
+    picked = [CASES[i - 1] for i in args.cases] if args.cases else list(CASES)
 
     rows = []
     for dim, anchors, cands in picked:
         for arm in args.arms:
             for seed in range(args.seeds):
                 pts, info = run(arm, dim, anchors, cands, seed)
-                rows.append({
-                    "dim": dim, "anchors": anchors, "candidates": cands,
-                    "arm": arm, "seed": seed, **info,
-                    "separation": float(ess.utils.toroidal_separation(pts)),
-                })
-                print(f"  [d={dim} {arm} seed={seed}: "
-                      f"sep {rows[-1]['separation']:.4f} "
-                      f"recall {info['recall']:.3f} "
-                      f"ratio {info['mean_ratio']:.2f}]", flush=True)
+                rows.append(
+                    {
+                        "dim": dim,
+                        "anchors": anchors,
+                        "candidates": cands,
+                        "arm": arm,
+                        "seed": seed,
+                        **info,
+                        "separation": float(ess.utils.toroidal_separation(pts)),
+                    }
+                )
+                print(
+                    f"  [d={dim} {arm} seed={seed}: "
+                    f"sep {rows[-1]['separation']:.4f} "
+                    f"recall {info['recall']:.3f} "
+                    f"ratio {info['mean_ratio']:.2f}]",
+                    flush=True,
+                )
 
     report(rows)
     os.makedirs(OUT, exist_ok=True)
