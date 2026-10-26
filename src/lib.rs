@@ -610,7 +610,7 @@ struct BWs {
     gids: Vec<i64>,         // ids of the bucket being scored
     tile: Vec<f32>,         // TILE * d gathered point coordinates
     tids: Vec<i64>,         // TILE ids, aligned to tile rows
-    rhits: Vec<Vec<(u32, i64)>>, // nq radius hit lists (radius join only)
+    rhits: Vec<Vec<u64>>,   // nq radius hit lists, packed (radius join only)
     rclean: Vec<u32>,       // nq list lengths at their last compaction
 }
 
@@ -650,12 +650,49 @@ const BATCH_MIN: usize = 64;
 /// measured, so the cut sits at the last one that won.
 const RADIUS_JOIN_MAX_D: usize = 32;
 
-/// Deduplicate one radius hit list by id, keeping each id's smallest
-/// distance, in `(distance, id)` order.
-fn dedup_hits(h: &mut Vec<(u32, i64)>) {
-    h.sort_unstable_by_key(|&(bits, id)| (id, bits));
-    h.dedup_by_key(|e| e.1);
+/// One radius hit packed as `bits << 32 | id`: the f32 distance bits above,
+/// the point id below. `u64` order is then exactly the `(distance, id)` order
+/// of the per-query scan, at half the size of a `(u32, i64)` pair -- and the
+/// join holds every query's list at once. Ids fit: the index is limited to
+/// `u32::MAX` points (its offset tables are `u32`), and the join is gated on it.
+#[inline(always)]
+fn pack_hit(bits: u32, id: i64) -> u64 {
+    debug_assert!((0..=u32::MAX as i64).contains(&id));
+    (u64::from(bits) << 32) | id as u64
+}
+
+/// Append a packed hit, growing the list by half rather than doubling: the
+/// join holds every query's list at once, so `Vec`'s 2x growth slack is
+/// what its peak memory is made of. Hits are ~0.5% of scored pairs, so the
+/// branch costs nothing measurable.
+#[inline(always)]
+fn push_hit(h: &mut Vec<u64>, x: u64) {
+    if h.len() == h.capacity() {
+        h.reserve_exact(h.len() / 2 + 16);
+    }
+    h.push(x);
+}
+
+/// Deduplicate one packed hit list by id, keeping each id's smallest
+/// distance, in `(distance, id)` order. Swapping the halves makes the id the
+/// sort key, so `dedup_by_key` on the high half keeps the smallest distance.
+fn dedup_hits(h: &mut Vec<u64>) {
+    for x in h.iter_mut() {
+        *x = x.rotate_left(32);
+    }
     h.sort_unstable();
+    h.dedup_by_key(|x| *x >> 32);
+    for x in h.iter_mut() {
+        *x = x.rotate_left(32);
+    }
+    h.sort_unstable();
+}
+
+/// What `query_radius` computed: the join's flat CSR parts, or the scan's
+/// per-query rows (kept as they were: flattening them saved nothing).
+enum RadiusOut {
+    Flat(RadiusRows),
+    Rows(Vec<(Vec<i64>, Vec<f64>)>),
 }
 
 /// Radius results in CSR parts: per-query hit counts, then every row's ids
@@ -1375,7 +1412,7 @@ impl RustLshIndex {
         tids: &[i64],
         q32: &[f32],
         exq: &[i64],
-        rhits: &mut [Vec<(u32, i64)>],
+        rhits: &mut [Vec<u64>],
         r32: f32,
     ) {
         let d = self.d;
@@ -1390,7 +1427,7 @@ impl RustLshIndex {
                 for r in 0..ROWS {
                     let id = tids[i + r];
                     if ds[r] <= r32 && id != ex {
-                        hits.push((ds[r].to_bits(), id));
+                        push_hit(hits, pack_hit(ds[r].to_bits(), id));
                     }
                 }
                 i += ROWS;
@@ -1399,7 +1436,7 @@ impl RustLshIndex {
                 let dd = l1::<D>(qrow, &tile[i * d..(i + 1) * d], d);
                 let id = tids[i];
                 if dd <= r32 && id != ex {
-                    hits.push((dd.to_bits(), id));
+                    push_hit(hits, pack_hit(dd.to_bits(), id));
                 }
                 i += 1;
             }
@@ -1538,12 +1575,14 @@ impl RustLshIndex {
             }
             // A hit arrives once per table it shares with the query, so left
             // alone a list holds up to `L` copies of each id until the block
-            // ends -- on a dense from-scratch ESS start (d=32) that was +30%
-            // peak RSS. Compact any list that has doubled since its last
-            // compaction: amortised O(1) per hit, and a list never holds more
-            // than about twice its distinct hits.
+            // ends, and every query's list is live at once: on a
+            // from-scratch ESS start (d=32, 60 hits per query) that was 2.5x
+            // the scan's peak memory. Compact any list grown by a quarter
+            // since its last compaction: amortised O(1) per hit, and with
+            // `push_hit`'s 1.5x growth a list's capacity stays under ~2x its
+            // distinct hits -- a packed hit is 8 bytes, the scan's row 16.
             for (h, clean) in rhits.iter_mut().zip(rclean.iter_mut()) {
-                if h.len() > 2 * *clean as usize + 32 {
+                if h.len() > *clean as usize + *clean as usize / 4 + 16 {
                     dedup_hits(h);
                     *clean = h.len() as u32;
                 }
@@ -1560,13 +1599,16 @@ impl RustLshIndex {
 
     /// Radius over blocks of queries: the batched join, one block per worker.
     ///
-    /// Each block is emitted as flat `(counts, ids, dists)` and its hit lists
-    /// are released straight away, so the join holds no more copies of the
-    /// result than the per-query scan does.
+    /// Two phases, so the result exists in one copy besides the hit lists:
+    /// the blocks hand their packed lists back (moved, not copied), then the
+    /// output is sized exactly and each block decodes straight into its own
+    /// slice. A per-block flat buffer in between measured 1.6x the scan's
+    /// peak RSS: the lists live in the workers' malloc arenas, are freed but
+    /// stay resident, and the large buffers after them are mapped fresh.
     fn radius_batched(&self, q: &[f64], d: usize, r32: f32, ex: Option<&[i64]>) -> RadiusRows {
         let m = q.len() / d;
         let qb = self.block_size(m);
-        let blocks: Vec<RadiusRows> = (0..m.div_ceil(qb))
+        let blocks: Vec<Vec<Vec<u64>>> = (0..m.div_ceil(qb))
             .into_par_iter()
             .map_init(BWs::default, |bws, bi| {
                 let (q0, q1) = (bi * qb, ((bi + 1) * qb).min(m));
@@ -1580,38 +1622,40 @@ impl RustLshIndex {
                     ex.map(|e| &e[q0..q1]),
                     &mut tally,
                 );
-                let t1 = Clock::start();
-                let total = bws.rhits[..nq].iter().map(Vec::len).sum();
-                let mut out = RadiusRows {
-                    counts: Vec::with_capacity(nq),
-                    ids: Vec::with_capacity(total),
-                    dists: Vec::with_capacity(total),
-                };
-                for h in &mut bws.rhits[..nq] {
-                    out.counts.push(h.len());
-                    out.ids.extend(h.iter().map(|e| e.1));
-                    out.dists
-                        .extend(h.iter().map(|e| f32::from_bits(e.0) as f64));
-                    *h = Vec::new();
-                }
-                tally.refine(t1);
                 tally.queries(nq);
                 self.stats.add(&tally);
-                out
+                bws.rhits[..nq].iter_mut().map(std::mem::take).collect()
             })
             .collect();
-        let total = blocks.iter().map(|b| b.ids.len()).sum();
-        let mut rows = RadiusRows {
-            counts: Vec::with_capacity(m),
-            ids: Vec::with_capacity(total),
-            dists: Vec::with_capacity(total),
-        };
-        for b in blocks {
-            rows.counts.extend(b.counts);
-            rows.ids.extend(b.ids);
-            rows.dists.extend(b.dists);
+
+        let counts: Vec<usize> = blocks.iter().flatten().map(Vec::len).collect();
+        let total = counts.iter().sum();
+        let mut ids = vec![0i64; total];
+        let mut dists = vec![0.0f64; total];
+        let t1 = Clock::start();
+        let mut parts = Vec::with_capacity(blocks.len());
+        let (mut ri, mut rd) = (&mut ids[..], &mut dists[..]);
+        for b in &blocks {
+            let n = b.iter().map(Vec::len).sum();
+            let (hi, ti) = std::mem::take(&mut ri).split_at_mut(n);
+            let (hd, td) = std::mem::take(&mut rd).split_at_mut(n);
+            parts.push((hi, hd));
+            (ri, rd) = (ti, td);
         }
-        rows
+        blocks
+            .into_par_iter()
+            .zip(parts)
+            .for_each(|(lists, (oi, od))| {
+                let hits = lists.iter().flatten();
+                for ((x, i), dd) in hits.zip(oi.iter_mut()).zip(od.iter_mut()) {
+                    *i = (x & u64::from(u32::MAX)) as i64;
+                    *dd = f32::from_bits((x >> 32) as u32) as f64;
+                }
+            });
+        let mut tally = Tally::new();
+        tally.refine(t1);
+        self.stats.add(&tally);
+        RadiusRows { counts, ids, dists }
     }
 
     /// Prefix relaxation for one under-filled query (see `lsh.py`).
@@ -2059,7 +2103,7 @@ impl RustLshIndex {
         };
         let r32 = radius as f32;
 
-        let rows: RadiusRows = py.detach(|| {
+        let out: RadiusOut = py.detach(|| {
             // BATCH_MIN queries *per block*, not per call as on the k-NN path.
             // Scan vs join in one build, interleaved (d = 8/16/32, the W4 and
             // ESS targets): the join wins from 64 queries per block (m = 1024
@@ -2067,24 +2111,23 @@ impl RustLshIndex {
             // 1.21x at d = 32). A radius hit list costs more than a k-NN heap
             // slot, so the join needs more reuse before it pays. block == 1
             // asks for the scan; above RADIUS_JOIN_MAX_D the scan always wins.
-            if self.block != 1 && d <= RADIUS_JOIN_MAX_D && self.block_size(m) >= BATCH_MIN {
+            if self.block != 1
+                && d <= RADIUS_JOIN_MAX_D
+                && self.block_size(m) >= BATCH_MIN
+                && self.n_points <= u32::MAX as usize
+            {
                 self.stats.set_path(Path::RadiusBatched);
-                return self.radius_batched(&q, d, r32, ex.as_deref());
+                return RadiusOut::Flat(self.radius_batched(&q, d, r32, ex.as_deref()));
             }
             self.stats.set_path(Path::Radius);
             let chunk = self.scan_chunk(m);
-            let chunks: Vec<RadiusRows> = (0..m.div_ceil(chunk))
+            let chunks = (0..m.div_ceil(chunk))
                 .into_par_iter()
                 .map(|c| {
                     let (lo, hi) = (c * chunk, ((c + 1) * chunk).min(m));
                     let mut ws = Ws::new(self.n_points, d, self.kdim);
                     let mut tally = Tally::new();
-                    let mut out = RadiusRows {
-                        counts: Vec::with_capacity(hi - lo),
-                        ids: Vec::new(),
-                        dists: Vec::new(),
-                    };
-                    let mut hits: Vec<(u32, i64)> = Vec::new();
+                    let mut out = Vec::with_capacity(hi - lo);
                     for qi in lo..hi {
                         let x = &q[qi * d..(qi + 1) * d];
                         for j in 0..d {
@@ -2095,7 +2138,7 @@ impl RustLshIndex {
                         let raw = self.gather_query(&mut ws, x);
                         tally.gather(t0);
                         let t1 = Clock::start();
-                        hits.clear();
+                        let mut hits: Vec<(u32, i64)> = Vec::new();
                         for &id in &ws.cand {
                             if id == exq {
                                 continue;
@@ -2107,41 +2150,51 @@ impl RustLshIndex {
                             }
                         }
                         hits.sort_unstable();
-                        out.counts.push(hits.len());
-                        out.ids.extend(hits.iter().map(|h| h.1));
-                        out.dists
-                            .extend(hits.iter().map(|h| f32::from_bits(h.0) as f64));
+                        let ids: Vec<i64> = hits.iter().map(|h| h.1).collect();
+                        let ds: Vec<f64> =
+                            hits.iter().map(|h| f32::from_bits(h.0) as f64).collect();
                         tally.refine(t1);
                         tally.cands(ws.cand.len());
                         tally.hits(raw, raw);
                         tally.queries(1);
+                        out.push((ids, ds));
                     }
                     self.stats.add(&tally);
                     out
                 })
-                .collect();
-            let total = chunks.iter().map(|c| c.ids.len()).sum();
-            let mut rows = RadiusRows {
-                counts: Vec::with_capacity(m),
-                ids: Vec::with_capacity(total),
-                dists: Vec::with_capacity(total),
-            };
-            for c in chunks {
-                rows.counts.extend(c.counts);
-                rows.ids.extend(c.ids);
-                rows.dists.extend(c.dists);
-            }
-            rows
+                .collect::<Vec<Vec<(Vec<i64>, Vec<f64>)>>>();
+            RadiusOut::Rows(chunks.into_iter().flatten().collect())
         });
+        let rows = match out {
+            RadiusOut::Flat(r) => {
+                let mut indptr = vec![0i64; m + 1];
+                for i in 0..m {
+                    indptr[i + 1] = indptr[i] + r.counts[i] as i64;
+                }
+                return Ok((
+                    PyArray1::from_vec(py, indptr),
+                    PyArray1::from_vec(py, r.ids),
+                    PyArray1::from_vec(py, r.dists),
+                ));
+            }
+            RadiusOut::Rows(rows) => rows,
+        };
 
         let mut indptr = vec![0i64; m + 1];
         for i in 0..m {
-            indptr[i + 1] = indptr[i] + rows.counts[i] as i64;
+            indptr[i + 1] = indptr[i] + rows[i].0.len() as i64;
+        }
+        let total = indptr[m] as usize;
+        let mut ids = Vec::with_capacity(total);
+        let mut ds = Vec::with_capacity(total);
+        for (ri, rd) in rows {
+            ids.extend(ri);
+            ds.extend(rd);
         }
         Ok((
             PyArray1::from_vec(py, indptr),
-            PyArray1::from_vec(py, rows.ids),
-            PyArray1::from_vec(py, rows.dists),
+            PyArray1::from_vec(py, ids),
+            PyArray1::from_vec(py, ds),
         ))
     }
 
