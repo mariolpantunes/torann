@@ -114,6 +114,15 @@ def _blocks(m: int, n: int, d: int):
         yield s, min(m, s + step)
 
 
+def _exclude(D, exclude_ids, s, e):
+    """Mask each query row's excluded id in the block ``[s, e)``; ``-1``
+    excludes nothing (it must not wrap to the last point)."""
+    if exclude_ids is None:
+        return
+    rows = np.flatnonzero(exclude_ids[s:e] >= 0)
+    D[rows, exclude_ids[s:e][rows]] = np.inf
+
+
 def exact_knn(pts, Q, k, exclude_ids=None):
     """Exact toroidal-L1 k-NN of ``Q`` against ``pts``.
 
@@ -135,8 +144,7 @@ def exact_knn(pts, Q, k, exclude_ids=None):
     kk = min(k, n)
     for s, e in _blocks(m, n, d):
         D = pairwise_l1(Q[s:e], pts)
-        if exclude_ids is not None:
-            D[np.arange(e - s), exclude_ids[s:e]] = np.inf
+        _exclude(D, exclude_ids, s, e)
         if kk == 1:
             # ESS asks for exactly this in `_smart_init` (the farthest of a
             # candidate pool), and it is worth splitting out: argpartition
@@ -149,7 +157,16 @@ def exact_knn(pts, Q, k, exclude_ids=None):
         else:
             part = np.argpartition(D, kk - 1, axis=1)[:, :kk]
             pd = np.take_along_axis(D, part, axis=1)
-            order = np.argsort(pd, axis=1, kind="stable")
+            # argpartition keeps an arbitrary subset of the distance tied at
+            # the k-th slot; the contract keeps the lowest ids, so rows with
+            # such a tie are re-selected from every point at or below it.
+            kth = pd.max(axis=1)
+            tied = np.flatnonzero((D == kth[:, None]).sum(axis=1) > (pd == kth[:, None]).sum(axis=1))
+            for row in tied:
+                pool = np.flatnonzero(D[row] <= kth[row])
+                part[row] = pool[np.lexsort((pool, D[row, pool]))][:kk]
+                pd[row] = D[row, part[row]]
+            order = np.lexsort((part, pd), axis=1)  # (distance, id)
             part = np.take_along_axis(part, order, axis=1)
             pd = np.take_along_axis(pd, order, axis=1)
         finite = np.isfinite(pd)
@@ -176,8 +193,7 @@ def exact_radius(pts, Q, radius, exclude_ids=None):
     counts, all_ids, all_dst = [], [], []
     for s, e in _blocks(m, n, d):
         D = pairwise_l1(Q[s:e], pts)
-        if exclude_ids is not None:
-            D[np.arange(e - s), exclude_ids[s:e]] = np.inf
+        _exclude(D, exclude_ids, s, e)
         for row in D:
             ids = np.flatnonzero(row <= radius)
             order = np.argsort(row[ids], kind="stable")

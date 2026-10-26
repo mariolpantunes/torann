@@ -103,6 +103,10 @@ nn.query_radius(0.25, pad=True)         # the same, dense and -1/inf padded
 nn.query(k=8, queries=Q)                # arbitrary external queries
 ```
 
+Inputs may be any finite coordinates (reduced mod 1; NaN or inf raises
+`ValueError` and leaves the index unchanged). Every result row is sorted by
+distance, ties by ascending id, on every backend.
+
 Knobs (all optional — tuning fills them in): `num_tables`, `resolution`,
 `dims_per_table`, `target_bucket_size`, `probes`, `brute_threshold`,
 `backend` (`"auto"` prefers the fastest installed of `rust`, `python`).

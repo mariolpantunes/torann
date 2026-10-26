@@ -46,6 +46,13 @@ crossover threshold, and above it an LSH implementation — Rust
 reference (``lsh.py``) otherwise — ``lsh.py`` is the specification the
 native core is validated against, byte-identical tables included.
 
+**Input contract** (checked here, before any state changes, so a rejected
+call leaves the index as it was): coordinates may be any finite real
+numbers and are reduced mod 1, with a result of exactly ``1.0`` stored as
+``0.0`` (the same torus point); NaN or inf raises ``ValueError``. Every
+result row is sorted by distance, equal distances by ascending id, on
+every backend and path -- callers may rely on that order.
+
 Note the compiled core is gated on AVX2 (see ``torann.rust``): published
 x86-64 wheels are built with that floor, and a CPU without it falls back
 to ``lsh.py`` rather than crashing.
@@ -62,6 +69,23 @@ from . import rust
 from .base import IdArray, Neighbours, csr_to_padded
 from .brute import BruteIndex, pairwise_l1, radius_scan
 from .lsh import PythonLshIndex
+
+
+def _to_torus(points: Any) -> np.ndarray:
+    """Coordinates as float64 on the unit torus, ``[0, 1)``.
+
+    Every input reaches the index through here. Non-finite values are
+    refused before anything is stored. ``np.mod`` returns exactly ``1.0``
+    for tiny negatives (``-1e-20``), which is the same torus point as
+    ``0.0``, so it is stored as ``0.0``: the arena never holds a ``1.0``.
+    """
+    X = np.asarray(points, dtype=np.float64)
+    if not np.isfinite(X).all():
+        raise ValueError("coordinates must be finite (no NaN or inf)")
+    X = np.mod(X, 1.0)
+    X[X == 1.0] = 0.0
+    return X
+
 
 logger = logging.getLogger(__name__)
 
@@ -274,17 +298,20 @@ class ToroidalNN:
             k: The k the workload will query (ESS: 2*d). Drives tuning.
             radius: Alternative tuning hint: the range-query radius.
         """
-        S = np.atleast_2d(np.asarray(static_points, dtype=np.float64))
+        S = np.atleast_2d(_to_torus(static_points))
         if S.ndim != 2:
             raise ValueError("static_points must be an (n, d) array")
+        C = np.atleast_2d(_to_torus(candidate_points)) if candidate_points is not None else None
         if S.shape[0] == 0:
-            C0 = np.atleast_2d(np.asarray(candidate_points, dtype=np.float64)) if candidate_points is not None else None
-            if C0 is None or C0.shape[0] == 0:
+            if C is None or C.shape[0] == 0:
                 raise ValueError("fit needs at least one point (static or candidate)")
-            S = np.empty((0, C0.shape[1]))
+            S = np.empty((0, C.shape[1]))
+        if C is None:
+            C = np.empty((0, S.shape[1]))
+        if C.ndim != 2 or C.shape[1] != S.shape[1]:
+            raise ValueError(f"points must have {S.shape[1]} dimensions")
         self._d = S.shape[1]
-        C = self._as_batch(candidate_points)
-        self._arena = np.mod(np.vstack([S, C]), 1.0)
+        self._arena = np.vstack([S, C])
         self._n_static = S.shape[0]
         self._k_hint = int(k) if k is not None else 2 * self._d
 
@@ -309,7 +336,7 @@ class ToroidalNN:
                 current candidate tier.
         """
         self._check_fitted()
-        new = np.mod(np.atleast_2d(np.asarray(coordinates, dtype=np.float64)), 1.0)
+        new = np.atleast_2d(_to_torus(coordinates))
         if new.shape != (self.n_candidates, self._d):
             raise ValueError(f"expected coordinates of shape {(self.n_candidates, self._d)}")
         self._arena[self._n_static :] = new
@@ -347,19 +374,25 @@ class ToroidalNN:
         queries the whole index (both tiers), excluding itself.
 
         Args:
-            k: Neighbours per query; defaults to the fit-time hint (2*d).
-            queries: Optional (m, d) explicit queries; default is the
-                candidate tier.
-            exclude_ids: Optional per-query point id to exclude (set
+            k: Neighbours per query, an integer >= 1 (``int`` or a NumPy
+                integer; a float or bool raises ``TypeError``); defaults
+                to the fit-time hint (2*d).
+            queries: Optional (m, d) explicit queries, or one (d,) query;
+                default is the candidate tier.
+            exclude_ids: Optional per-query point id to exclude, each in
+                ``[-1, n_points)``; ``-1`` excludes nothing (set
                 automatically for the default self-join).
 
         Returns:
-            `Neighbours` of shape (m, k), sorted by distance; rows are
-            padded with -1 / inf only when fewer than k points exist.
+            `Neighbours` of shape (m, k), sorted by distance with equal
+            distances in ascending id order; rows are padded with
+            -1 / inf only when fewer than k points exist.
             In LSH mode under-filled queries are completed by prefix
             relaxation, so k results are guaranteed without a brute scan.
         """
         self._check_fitted()
+        if k is not None and (isinstance(k, bool) or not isinstance(k, (int, np.integer))):
+            raise TypeError(f"k must be an integer, got {type(k).__name__}")
         kq = int(k) if k is not None else (self._k_hint or 2 * self._d)
         if kq < 1:
             raise ValueError("k must be >= 1")
@@ -403,7 +436,9 @@ class ToroidalNN:
         ``exact=True`` forces the exact path.
 
         Args:
-            radius: Inclusive toroidal-L1 cutoff.
+            radius: Inclusive toroidal-L1 cutoff (closed ball), ``>= 0``;
+                ``inf`` returns every point, NaN or a negative value
+                raises ``ValueError``.
             queries: Optional (m, d) explicit queries; default is the
                 candidate tier.
             exact: Force the exact scan even in LSH mode.
@@ -419,15 +454,18 @@ class ToroidalNN:
         Returns:
             With ``pad``: one `Neighbours` of shape ``(m, width)``.
             Otherwise one `Neighbours` per query, ragged and sorted by
-            distance. The querying candidate itself is excluded for the
-            default self-join.
+            distance, equal distances by ascending id. The querying
+            candidate itself is excluded for the default self-join.
         """
         self._check_fitted()
+        radius = float(radius)
+        if not radius >= 0.0:  # also catches NaN
+            raise ValueError(f"radius must be >= 0 (inf allowed), got {radius}")
         Q, ex = self._resolve_queries(queries, None)
         if exact and self._use_lsh:
-            indptr, ids, dst = radius_scan(self._arena, Q, float(radius), ex)
+            indptr, ids, dst = radius_scan(self._arena, Q, radius, ex)
         else:
-            indptr, ids, dst = self._impl.query_radius(np.ascontiguousarray(Q), float(radius), ex)
+            indptr, ids, dst = self._impl.query_radius(np.ascontiguousarray(Q), radius, ex)
         m = Q.shape[0]
         if pad:
             return csr_to_padded(indptr, ids, dst, m)
@@ -524,7 +562,9 @@ class ToroidalNN:
             Q = self._arena[self._n_static :]
             ex = np.arange(self._n_static, self.n_points)
         else:
-            Q = np.mod(np.atleast_2d(np.asarray(queries, dtype=np.float64)), 1.0)
+            Q = np.atleast_2d(_to_torus(queries))
+            if Q.ndim != 2:
+                raise ValueError(f"queries must be (m, d) or (d,); got shape {Q.shape}")
             if Q.shape[1] != self._d:
                 raise ValueError(f"queries must have {self._d} dimensions")
             ex = None
@@ -532,15 +572,17 @@ class ToroidalNN:
             ex = np.asarray(exclude_ids, dtype=np.int64)
             if ex.shape != (Q.shape[0],):
                 raise ValueError("exclude_ids must have one id per query")
+            if ex.size and (ex.min() < -1 or ex.max() >= self.n_points):
+                raise ValueError(f"exclude_ids must be in [-1, {self.n_points}); -1 excludes nothing")
         return Q, ex
 
     def _as_batch(self, points) -> np.ndarray:
         if points is None:
             return np.empty((0, self._d))
-        P = np.atleast_2d(np.asarray(points, dtype=np.float64))
-        if P.shape[1] != self._d:
+        P = np.atleast_2d(_to_torus(points))
+        if P.ndim != 2 or P.shape[1] != self._d:
             raise ValueError(f"points must have {self._d} dimensions")
-        return np.mod(P, 1.0)
+        return P
 
     def _check_fitted(self) -> None:
         if self._arena.size == 0:

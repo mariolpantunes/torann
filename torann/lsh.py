@@ -141,9 +141,9 @@ class PythonLshIndex(BaseIndex):
             ``ids[indptr[i]:indptr[i+1]]``, sorted by distance.
         """
         m = queries.shape[0]
-        counts = []
-        all_ids = []
-        all_dst = []
+        counts = [np.zeros(0, dtype=np.int64)]  # m = 0 still concatenates
+        all_ids = [np.empty(0, dtype=np.int64)]
+        all_dst = [np.empty(0)]
         for s in range(0, m, self.block):
             e = min(m, s + self.block)
             Qb = queries[s:e]
@@ -154,8 +154,7 @@ class PythonLshIndex(BaseIndex):
             dist = self._refine(Qb, qids, cands)
             keep = dist <= radius
             qids, cands, dist = qids[keep], cands[keep], dist[keep]
-            d = self._pts.shape[1]
-            order = np.argsort(qids * np.float64(d + 1) + dist)
+            order = np.lexsort((cands, dist, qids))  # (query, distance, id): ties by id
             counts.append(np.bincount(qids, minlength=Qb.shape[0]))
             all_ids.append(cands[order])
             all_dst.append(dist[order].astype(np.float64))
@@ -233,10 +232,9 @@ class PythonLshIndex(BaseIndex):
         if qids.size == 0:
             return
         dist = self._refine(Qb, qids, cands)
-        # Top-k per query: qids is ascending, so one composite float key
-        # replaces a two-pass lexsort (distances < d keep segments disjoint).
-        d = self._pts.shape[1]
-        order = np.argsort(qids * np.float64(d + 1) + dist)
+        # Top-k per query, ordered by (query, distance, id): equal distances
+        # come out in id order, the normative tie rule every backend follows.
+        order = np.lexsort((cands, dist, qids))
         sq, sc, sd = qids[order], cands[order], dist[order]
         counts = np.bincount(sq, minlength=Qb.shape[0])
         starts = np.concatenate(([0], np.cumsum(counts)[:-1]))

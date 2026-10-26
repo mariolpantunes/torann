@@ -527,8 +527,9 @@ class TestValidation(unittest.TestCase):
 @unittest.skipIf(len(BACKENDS) < 2, "only one backend installed")
 class TestBackendEquivalence(unittest.TestCase):
     """Native backends must reproduce the reference backend exactly:
-    byte-identical tables through the whole lifecycle, and matching query
-    results (identical ids up to float32 ties, distances within 1e-5)."""
+    byte-identical tables through the whole lifecycle, identical ids (ties
+    are ordered by id on every backend), and distances within two float32
+    refine bounds (``2 * d * 2**-23``: the backends sum in different orders)."""
 
     D = 8
 
@@ -562,9 +563,8 @@ class TestBackendEquivalence(unittest.TestCase):
                 for name in ref_tab:  # byte-identical tables
                     np.testing.assert_array_equal(tab[name], ref_tab[name], err_msg=name)
                 for (ai, ad), (bi, bd) in zip(ref_res, res):
-                    np.testing.assert_allclose(bd, ad, atol=1e-5)
-                    same = (ai == bi).mean()  # ids may differ only on ties
-                    self.assertGreater(same, 0.995)
+                    np.testing.assert_array_equal(bi, ai)
+                    np.testing.assert_allclose(bd, ad, rtol=0, atol=2 * self.D * 2.0**-23)
 
 
 class TestMetrics(unittest.TestCase):
