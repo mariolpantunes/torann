@@ -743,6 +743,10 @@ const BATCH_MIN: usize = 64;
 /// measured, so the cut sits at the last one that won.
 const RADIUS_JOIN_MAX_D: usize = 32;
 
+/// The radius join drops the 8-bit prefilter for the rest of a block once
+/// more than `1 / RADIUS_PREFILTER_OFF` of the pairs scored so far survive it.
+const RADIUS_PREFILTER_OFF: usize = 5;
+
 /// One radius hit packed as `bits << 32 | id`: the f32 distance bits above,
 /// the point id below. `u64` order is then exactly the `(distance, id)` order
 /// of the per-query scan, at half the size of a `(u32, i64)` pair -- and the
@@ -1670,6 +1674,80 @@ impl RustLshIndex {
         }
     }
 
+    /// [`Self::score_tile_radius`] behind the exact 8-bit prefilter.
+    ///
+    /// The cutoff is fixed, so `limit` (see [`lb_limit`]) is computed once per
+    /// block: a point whose cell bound exceeds it is farther than `r32` and
+    /// never pays for the float32 distance. Always runtime `d`, like the
+    /// unfiltered radius tile, so the surviving distances are the same f32s.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn score_tile_radius_pruned(
+        &self,
+        group: &[(i64, u32)],
+        tile: &[f32],
+        tile8: &[u8],
+        tids: &[i64],
+        q32: &[f32],
+        q8: &[u8],
+        exq: &[i64],
+        rhits: &mut [Vec<u64>],
+        r32: f32,
+        limit: u32,
+    ) -> usize {
+        let d = self.d;
+        let d8 = stride8(d);
+        let mut scored = 0;
+        for &(_, slot) in group {
+            let si = slot as usize;
+            let qrow = &q32[si * d..(si + 1) * d];
+            let qcode = &q8[si * d8..(si + 1) * d8];
+            let (ex, hits) = (exq[si], &mut rhits[si]);
+            for (i, &id) in tids.iter().enumerate() {
+                if lb_cells(qcode, &tile8[i * d8..(i + 1) * d8]) > limit {
+                    continue;
+                }
+                scored += 1;
+                let dd = l1::<0>(qrow, &tile[i * d..(i + 1) * d], d);
+                if dd <= r32 && id != ex {
+                    push_hit(hits, pack_hit(dd.to_bits(), id));
+                }
+            }
+        }
+        scored
+    }
+
+    /// Gather one tile of a bucket (coordinates and 8-bit codes) and score it
+    /// behind the radius prefilter; out of line for the reason given on
+    /// [`Self::score_chunk_pruned`].
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn score_chunk_radius_pruned(
+        &self,
+        group: &[(i64, u32)],
+        chunk: &[i64],
+        tile: &mut [f32],
+        tile8: &mut [u8],
+        tids: &mut [i64],
+        q32: &[f32],
+        q8: &[u8],
+        exq: &[i64],
+        rhits: &mut [Vec<u64>],
+        r32: f32,
+        limit: u32,
+    ) -> usize {
+        let (d, d8) = (self.d, stride8(self.d));
+        for (j, &id) in chunk.iter().enumerate() {
+            let (b, b8) = (id as usize * d, id as usize * d8);
+            tile[j * d..(j + 1) * d].copy_from_slice(&self.pts32[b..b + d]);
+            tile8[j * d8..(j + 1) * d8].copy_from_slice(&self.pts8[b8..b8 + d8]);
+            tids[j] = id;
+        }
+        let n = chunk.len();
+        let (tl, t8, ti) = (&tile[..n * d], &tile8[..n * d8], &tids[..n]);
+        self.score_tile_radius_pruned(group, tl, t8, ti, q32, q8, exq, rhits, r32, limit)
+    }
+
     /// One block of the batched radius join: [`Self::query_block`] with a
     /// cutoff in place of a heap.
     ///
@@ -1694,7 +1772,8 @@ impl RustLshIndex {
         tally: &mut Tally,
     ) {
         let (d, ns, nc) = (self.d, self.n_static, self.n_cand());
-        ws.reset(nq, d, 0, self.kdim, false);
+        let mut prefilter = self.prefilter();
+        ws.reset(nq, d, 0, self.kdim, prefilter);
         ws.rhits.resize_with(nq, Vec::new);
         for h in &mut ws.rhits[..nq] {
             h.clear();
@@ -1704,13 +1783,24 @@ impl RustLshIndex {
         for i in 0..nq * d {
             ws.q32[i] = q[i] as f32;
         }
+        let d8 = if prefilter { stride8(d) } else { 0 };
+        ws.q8.clear();
+        ws.q8.resize(nq * d8, 0);
+        for i in 0..nq * usize::from(prefilter) {
+            for j in 0..d {
+                ws.q8[i * d8 + j] = code8(ws.q32[i * d + j]);
+            }
+        }
         for i in 0..nq {
             ws.exq[i] = ex.map_or(-1, |e| e[i]);
         }
+        let limit = lb_limit(r32.to_bits(), d);
+        let (mut survived, mut tested) = (0usize, 0usize);
 
         let (mut pairs, mut loads) = (Count::new(), Count::new());
         let BWs {
             q32,
+            q8,
             exq,
             codes,
             frac,
@@ -1718,6 +1808,7 @@ impl RustLshIndex {
             probe,
             gids,
             tile,
+            tile8,
             tids,
             rhits,
             rclean,
@@ -1781,8 +1872,15 @@ impl RustLshIndex {
                 }
                 pairs.add(gids.len() * group.len());
                 loads.add(gids.len());
+                tested += gids.len() * group.len();
 
                 for chunk in gids.chunks(TILE) {
+                    if prefilter {
+                        survived += self.score_chunk_radius_pruned(
+                            group, chunk, tile, tile8, tids, q32, q8, exq, rhits, r32, limit,
+                        );
+                        continue;
+                    }
                     for (j, &id) in chunk.iter().enumerate() {
                         let base = id as usize * d;
                         tile[j * d..(j + 1) * d].copy_from_slice(&self.pts32[base..base + d]);
@@ -1813,6 +1911,14 @@ impl RustLshIndex {
                     dedup_hits(h);
                     *clean = h.len() as u32;
                 }
+            }
+            // The bound pays by sparing the float32 distance of the pairs it
+            // rules out. Measured (d = 24..32): survivors of 3% of the pairs
+            // run 22-36% faster, 12% still 3% faster, 47% (a radius that
+            // swallows a cluster) 10% slower. Once a table shows more than
+            // a fifth surviving, the rest of the block scores unfiltered.
+            if prefilter && survived * RADIUS_PREFILTER_OFF > tested {
+                prefilter = false;
             }
             tally.refine(t1);
         }
