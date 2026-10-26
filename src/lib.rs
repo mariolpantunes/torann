@@ -611,6 +611,7 @@ struct BWs {
     tile: Vec<f32>,         // TILE * d gathered point coordinates
     tids: Vec<i64>,         // TILE ids, aligned to tile rows
     rhits: Vec<Vec<(u32, i64)>>, // nq radius hit lists (radius join only)
+    rclean: Vec<u32>,       // nq list lengths at their last compaction
 }
 
 impl BWs {
@@ -648,6 +649,14 @@ const BATCH_MIN: usize = 64;
 /// more than the stamp dedup it saves. No shape between 32 and 64 was
 /// measured, so the cut sits at the last one that won.
 const RADIUS_JOIN_MAX_D: usize = 32;
+
+/// Deduplicate one radius hit list by id, keeping each id's smallest
+/// distance, in `(distance, id)` order.
+fn dedup_hits(h: &mut Vec<(u32, i64)>) {
+    h.sort_unstable_by_key(|&(bits, id)| (id, bits));
+    h.dedup_by_key(|e| e.1);
+    h.sort_unstable();
+}
 
 /// Radius results in CSR parts: per-query hit counts, then every row's ids
 /// and distances back to back.
@@ -1426,6 +1435,8 @@ impl RustLshIndex {
         for h in &mut ws.rhits[..nq] {
             h.clear();
         }
+        ws.rclean.clear();
+        ws.rclean.resize(nq, 0);
         for i in 0..nq * d {
             ws.q32[i] = q[i] as f32;
         }
@@ -1445,6 +1456,7 @@ impl RustLshIndex {
             tile,
             tids,
             rhits,
+            rclean,
             ..
         } = ws;
         let rhits = &mut rhits[..nq];
@@ -1524,14 +1536,23 @@ impl RustLshIndex {
                     self.score_tile_radius::<0>(group, tl, ti, q32, exq, rhits, r32);
                 }
             }
+            // A hit arrives once per table it shares with the query, so left
+            // alone a list holds up to `L` copies of each id until the block
+            // ends -- on a dense from-scratch ESS start (d=32) that was +30%
+            // peak RSS. Compact any list that has doubled since its last
+            // compaction: amortised O(1) per hit, and a list never holds more
+            // than about twice its distinct hits.
+            for (h, clean) in rhits.iter_mut().zip(rclean.iter_mut()) {
+                if h.len() > 2 * *clean as usize + 32 {
+                    dedup_hits(h);
+                    *clean = h.len() as u32;
+                }
+            }
             tally.refine(t1);
         }
         let t2 = Clock::start();
         for h in rhits.iter_mut() {
-            // By id, smallest distance first, so `dedup_by_key` keeps it.
-            h.sort_unstable_by_key(|&(bits, id)| (id, bits));
-            h.dedup_by_key(|e| e.1);
-            h.sort_unstable();
+            dedup_hits(h);
         }
         tally.refine(t2);
         tally.scored(pairs, loads);
@@ -2039,10 +2060,14 @@ impl RustLshIndex {
         let r32 = radius as f32;
 
         let rows: RadiusRows = py.detach(|| {
-            // The k-NN gate (below BATCH_MIN queries there is nothing for the
-            // join to amortise its bucket loads over, and block == 1 asks for
-            // the per-query path), plus the measured width limit.
-            if m >= BATCH_MIN && self.block != 1 && d <= RADIUS_JOIN_MAX_D {
+            // BATCH_MIN queries *per block*, not per call as on the k-NN path.
+            // Scan vs join in one build, interleaved (d = 8/16/32, the W4 and
+            // ESS targets): the join wins from 64 queries per block (m = 1024
+            // on 16 workers: 0.71-0.99x) and loses below 32 (m <= 512: up to
+            // 1.21x at d = 32). A radius hit list costs more than a k-NN heap
+            // slot, so the join needs more reuse before it pays. block == 1
+            // asks for the scan; above RADIUS_JOIN_MAX_D the scan always wins.
+            if self.block != 1 && d <= RADIUS_JOIN_MAX_D && self.block_size(m) >= BATCH_MIN {
                 self.stats.set_path(Path::RadiusBatched);
                 return self.radius_batched(&q, d, r32, ex.as_deref());
             }

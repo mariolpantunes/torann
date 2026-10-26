@@ -1058,7 +1058,7 @@ class TestNativeStats(unittest.TestCase):
                     native.query_radius(q, 0.5)
                 st = native.stats()
                 self.assertEqual(st["path"], path)
-                self.assertEqual(st["queries"], 256)
+                self.assertEqual(st["queries"], len(arena) if path == "radius_batched" else 256)
                 for key in ("gather_ns", "refine_ns", "cands", "pairs", "loads"):
                     self.assertGreater(st[key], 0, key)
                 self.assertLessEqual(st["cands"], st["pairs"])
@@ -1093,9 +1093,12 @@ class TestNativeStats(unittest.TestCase):
         self.assertEqual(native.stats()["path"], "per_query")
         native.query_knn(np.ascontiguousarray(arena[:64]), 5)
         self.assertEqual(native.stats()["path"], "batched")
-        native.query_radius(np.ascontiguousarray(arena[:63]), 0.5)
-        self.assertEqual(native.stats()["path"], "radius")
+        # Radius gates on queries *per block*: 64 queries split over the
+        # workers is too little reuse, the whole arena is enough on any
+        # machine with up to 64 workers.
         native.query_radius(np.ascontiguousarray(arena[:64]), 0.5)
+        self.assertEqual(native.stats()["path"], "radius")
+        native.query_radius(np.ascontiguousarray(arena), 0.5)
         self.assertEqual(native.stats()["path"], "radius_batched")
 
     def test_block_one_selects_the_per_query_path(self):
@@ -1161,10 +1164,14 @@ class TestRadiusJoin(unittest.TestCase):
         return a
 
     def test_identical_to_the_per_query_scan(self):
+        # d = 100 is above RADIUS_JOIN_MAX_D, so it pins that the gate keeps
+        # the scan there, not the join's arithmetic.
         for d in (2, 8, 16, 24, 32, 100):
             (per_query, batched), arena, rng = self._pair(d, 4096, seed=d)
-            q = np.ascontiguousarray(arena[rng.choice(len(arena), 300, replace=False)])
-            ex = rng.integers(0, len(arena), 300).astype(np.int64)
+            # Every point as a query: the join engages at 64 queries per block,
+            # which this reaches on machines with up to 64 workers.
+            q = np.ascontiguousarray(arena[rng.permutation(len(arena))])
+            ex = rng.integers(0, len(arena), len(arena)).astype(np.int64)
             for frac in (0.02, 0.06, 0.15):
                 with self.subTest(d=d, frac=frac):
                     indptr, _, dists = self._assert_same(per_query, batched, q, frac * d, ex)
@@ -1175,10 +1182,10 @@ class TestRadiusJoin(unittest.TestCase):
 
     def test_self_join_excludes_the_query_point(self):
         (per_query, batched), arena, _ = self._pair(8, 2048, seed=1)
-        q = np.ascontiguousarray(arena[:500])
-        ids = np.arange(500, dtype=np.int64)
+        q = np.ascontiguousarray(arena)
+        ids = np.arange(len(arena), dtype=np.int64)
         indptr, got, _ = self._assert_same(per_query, batched, q, 0.6, ids)
-        for i in range(500):
+        for i in range(len(arena)):
             self.assertNotIn(i, got[indptr[i] : indptr[i + 1]])
 
 
