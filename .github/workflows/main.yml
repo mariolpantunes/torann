@@ -3,7 +3,9 @@ name: CI
 # The gate. `.pre-commit-config.yaml` runs the same steps at commit time; if
 # one changes, the other changes in the same commit. Tool versions come from
 # pyproject.toml's dependency groups (`lint`, `test`, `build`) and the Rust
-# toolchain is pinned to the one the hooks run with locally (1.99.1).
+# toolchain is pinned to the one the hooks run with locally (1.99.1). Runner
+# images are pinned too (not `*-latest`), so a label migration never changes
+# the gate silently; bump them with the actions when a newer image ships.
 
 on:
   push:
@@ -16,11 +18,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       matrix:
         # The floor and the newest supported release; one abi3 wheel serves both.
-        python-version: ["3.12", "3.14"]
+        python-version: ["3.12", "3.14", "3.15"]
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -68,7 +70,7 @@ jobs:
   # The Rust core gets the same treatment: rustfmt, clippy as errors in both
   # the release and the instrumented (`--features stats`) build, cargo test.
   lint-rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -95,7 +97,7 @@ jobs:
   # It is also what backs the AVX2 gate in `torann/rust.py` — a CPU without
   # AVX2 lands on exactly this path, so it has to stay green.
   test-pure-python:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
 
