@@ -16,14 +16,16 @@ d=8, where a 512-bit vector is the wrong shape for a one-vector distance.
 the pure-Python backend instead of taking SIGILL on the first packed
 instruction — a slow index beats a crash with no traceback.
 
-From ``d = 17`` the batched k-NN join also runs behind an exact 8-bit
-prefilter: every coordinate is kept a second time as ``floor(256 x)`` (one byte
-per dimension, padded to 16 or 32; +25% of the float32 copy at ``d = 32``) and
-a candidate whose cell lower bound already exceeds the current k-th best is
-never scored in float32. The bound is exact, wrap-aware (cell 255 is next to
-cell 0) and slackened for float32 rounding, so results are bit-identical with
-and without it; it cuts the join by 15-46% at ``d = 17-64`` (pass rate 2-6%)
-and costs more than it saves below ``d = 17``, where it is off.
+From ``d = 17`` (to 4096) the batched k-NN join also runs behind an exact
+8-bit prefilter, for blocks of at least 64 queries (smaller blocks cannot repay
+its setup and keep the plain kernel): every coordinate is kept a second time as
+``floor(256 x)`` (one byte per dimension, padded to 16 or 32; about +3% peak
+memory) and a candidate whose circular cell lower bound already exceeds the
+current k-th best, widened for float32 rounding, is never scored in float32.
+Results are bit-identical with and without it (checked on millions of random
+rows). It cuts the all-pairs self-join by 7-47% at ``d = 17-64`` (2-6% of
+pairs survive) and is off below ``d = 17``, where it would cost more than it
+saves.
 
 ``STATS`` says whether the loaded extension carries the query
 instrumentation behind ``RustLshIndex.stats()``. Debug builds and builds with

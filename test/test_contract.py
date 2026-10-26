@@ -595,6 +595,103 @@ class TestPrefilterExactness(ContractCase):
                     self.assert_identical(got, want)
 
 
+class TestPrefilterEdges(ContractCase):
+    """N1 edge cases on continuous data against the float64 oracle.
+
+    Every point is a candidate on the exhaustive path, so the batched join
+    scores (and the prefilter prunes) real pairs; 80 external queries are past
+    the join's 64-query minimum. The cases are the ones a quantised bound can
+    get wrong: a tiny k-th distance (so a tiny slack), a zero one (duplicates),
+    f64 queries that round up to 1.0 in float32, ties on a coarse lattice,
+    mixed magnitudes across the seam, the largest width the filter serves and
+    the first one past it.
+    """
+
+    def check(self, P, Q, ks, dims_note, self_join=False):
+        P, Q = np.mod(P, 1.0), np.mod(Q, 1.0)
+        D = torus(Q, P)
+        for backend, path in self.each():
+            nn = make(backend, path).fit(P)
+            for k in ks:
+                with self.subTest(case=dims_note, backend=backend, path=path, k=k):
+                    self.assert_equivalent(nn.query(k, Q), P, Q, k, D=D)
+
+    def test_tight_clusters_on_the_seam(self):
+        """k-th distances ~1e-3: the smallest slack, coordinates 1 - 1e-4 against 1e-4."""
+        rng = np.random.default_rng(31)
+        for d in (17, 33):
+            c = np.zeros((4, d))
+            c[1] = 0.5
+            c[2, : d // 2] = 0.9999
+            lab = rng.integers(0, 4, 300)
+            P = c[lab] + rng.normal(0, 1e-4, (300, d))
+            Q = c[rng.integers(0, 4, 80)] + rng.normal(0, 1e-4, (80, d))
+            self.check(P, Q, (1, 5, 40), f"seam-cluster d={d}")
+
+    def test_duplicates_and_zero_distances(self):
+        rng = np.random.default_rng(32)
+        for d in (17, 32):
+            base = rng.random((20, d))
+            P = np.repeat(base, 15, axis=0)  # every point has 14 exact copies
+            Q = np.vstack([base, base + 1e-7, rng.random((40, d))])
+            self.check(P, Q, (1, 14, 15, 16, 60), f"duplicates d={d}")
+
+    def test_queries_that_round_up_to_one(self):
+        """f64 queries within 2**-30 of 1.0 become 1.0f32 (cell 0): points near 0 are close."""
+        rng = np.random.default_rng(33)
+        for d in (17, 33):
+            P = np.concatenate([rng.random((150, d)) * 1e-3, rng.random((150, d))])
+            Q = 1.0 - rng.random((80, d)) * 2.0**-30
+            Q[40:] = rng.random((40, d)) * 1e-4
+            self.check(P, Q, (1, 8, 40), f"rounds-to-1 d={d}")
+
+    def test_mixed_magnitudes_across_the_seam(self):
+        """a = 1 - j 2**-24 against tiny b: the inexact-subtraction terms."""
+        rng = np.random.default_rng(34)
+        for d in (17, 32, 33):
+            tiny = 10.0 ** rng.uniform(-9, -3, (200, d))
+            top = 1.0 - rng.integers(1, 40, (200, d)) * 2.0**-24
+            P = np.where(rng.random((200, d)) < 0.5, tiny, top)
+            Q = np.where(
+                rng.random((80, d)) < 0.5,
+                10.0 ** rng.uniform(-9, -3, (80, d)),
+                1.0 - rng.integers(1, 40, (80, d)) * 2.0**-24,
+            )
+            self.check(P, Q, (1, 8, 40), f"mixed-magnitude d={d}")
+
+    def test_lattice_ties_are_exact(self):
+        """A 1/8 lattice has hundreds of exact ties: ids must follow (distance, id)."""
+        rng = np.random.default_rng(35)
+        for d in (17, 32, 33):
+            P = rng.integers(0, 8, (300, d)) / 8.0
+            Q = rng.integers(0, 8, (80, d)) / 8.0
+            want = {k: oracle_knn(P, Q, k) for k in (1, 8, 40)}
+            for backend, path in self.each():
+                nn = make(backend, path).fit(P)
+                for k, ref in want.items():
+                    with self.subTest(case=f"lattice d={d}", backend=backend, path=path, k=k):
+                        self.assert_identical(nn.query(k, Q), ref)
+
+    def test_self_join_with_exclusion_in_the_batched_join(self):
+        rng = np.random.default_rng(36)
+        d = 24
+        P, C = rng.random((100, d)), rng.random((140, d))  # 140 candidates: batched
+        ids = np.arange(100, 240)
+        allp = np.vstack([P, C])
+        D = torus(C, allp)
+        for backend, path in self.each():
+            nn = make(backend, path).fit(P, C)
+            for k in (1, 8, 40):
+                with self.subTest(backend=backend, path=path, k=k):
+                    self.assert_equivalent(nn.query(k), allp, C, k, ids, D=D)
+
+    def test_widest_filtered_dimension_and_the_first_unfiltered_one(self):
+        rng = np.random.default_rng(37)
+        for d in (4096, 4097):
+            P, Q = rng.random((90, d)), rng.random((70, d))
+            self.check(P, Q, (1, 8), f"wide d={d}")
+
+
 @unittest.skipUnless(SLOW, "slow tier: set TORANN_SLOW=1")
 class TestSlowGeometry(ContractCase):
     """T6 hash law and T8 wrapped clusters (statistical; fixed seeds)."""

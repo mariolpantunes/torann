@@ -491,17 +491,27 @@ fn lb_cells(a: &[u8], b: &[u8]) -> u32 {
 }
 
 /// Largest [`lb_cells`] a candidate may have and still be able to beat a
-/// current k-th best of `worst` float32 bits at dimension `d`: the cell bound
-/// is scaled by 256 and compared against `worst` inflated by the worst-case
-/// relative error of a float32 sum of `d` non-negative terms (`(d + 2) 2^-24`,
-/// doubled for slack), so no candidate the float32 kernel would offer is cut.
+/// current k-th best of `worst` float32 bits at dimension `d`.
+///
+/// The float32 kernel's value `D` is not the real distance `S`: every term is
+/// rounded a few times (`|a - b|`, `1 - t`, and whatever order the compiler
+/// picks under the algebraic float methods), each time by at most `2^-24` in
+/// *absolute* size, and the `d` terms are then summed with `d - 1` more
+/// relative roundings. Absolute, not relative: near the seam a coordinate at
+/// `1 - j 2^-24` against a tiny one loses up to `2^-25` however small the
+/// term is. Bounding a term by `2^-22` and the sum's own error by
+/// `eps = d 2^-24` gives `S <= (D + d 2^-21) (1 + d 2^-23)` (valid for
+/// `eps <= 1/2`; derivation `l1`-`l4` in `.agents/notes/math/prefilter.md`).
+/// A cell bound of `LB / 256 <= S` can therefore only beat `worst` if
+/// `LB <= 256 (worst + d 2^-21) (1 + d 2^-23)`, which is what is returned.
 #[inline(always)]
 fn lb_limit(worst: u32, d: usize) -> u32 {
     if worst == u32::MAX {
         return u32::MAX;
     }
-    let slack = 1.0 + (d as f64 + 4.0) * (1.0 / 8388608.0);
-    (f32::from_bits(worst) as f64 * slack * 256.0) as u32
+    let d = d as f64;
+    ((f32::from_bits(worst) as f64 + d * (1.0 / 2097152.0)) * (1.0 + d * (1.0 / 8388608.0)) * 256.0)
+        as u32
 }
 
 /// Tile rows scored per call of [`dist_l1_rows`].
@@ -709,6 +719,11 @@ impl BWs {
 /// with the filter), and clearly more from 32 (-16% to -47%).
 const PREFILTER_MIN_D: usize = 17;
 
+/// Largest `d` the prefilter serves: the error bound of [`lb_limit`] needs
+/// `d 2^-24 <= 1/2`, and the cell sums are `u32` (`127 d` is far inside it).
+/// Nothing realistic is near it; it makes the proof unconditional.
+const PREFILTER_MAX_D: usize = 4096;
+
 /// Points per distance tile: one slice of a bucket, small enough that it
 /// stays in L1 while every query of the group scans it (128 * 32 f32 = 16 KiB).
 const TILE: usize = 128;
@@ -850,7 +865,7 @@ impl RustLshIndex {
     /// Whether the k-NN join runs behind the 8-bit prefilter.
     #[inline]
     fn prefilter(&self) -> bool {
-        self.d >= PREFILTER_MIN_D
+        (PREFILTER_MIN_D..=PREFILTER_MAX_D).contains(&self.d)
     }
 
     #[inline]
@@ -1424,11 +1439,14 @@ impl RustLshIndex {
         tally: &mut Tally,
     ) {
         let (d, ns, nc) = (self.d, self.n_static, self.n_cand());
-        ws.reset(nq, d, k, self.kdim, self.prefilter());
+        ws.reset(nq, d, k, self.kdim, self.prefilter() && nq >= BATCH_MIN);
         for i in 0..nq * d {
             ws.q32[i] = q[i] as f32;
         }
-        let prefilter = self.prefilter();
+        // The bound costs per-block setup (codes of the queries, a code tile)
+        // and a second gathered row per point, which only blocks with many
+        // queries per bucket repay: below BATCH_MIN a block is 7% slower.
+        let prefilter = self.prefilter() && nq >= BATCH_MIN;
         let d8 = if prefilter { stride8(d) } else { 0 };
         ws.q8.clear();
         ws.q8.resize(nq * d8, 0);
@@ -1521,6 +1539,12 @@ impl RustLshIndex {
                 loads.add(gids.len());
 
                 for chunk in gids.chunks(TILE) {
+                    if prefilter {
+                        self.score_chunk_pruned(
+                            group, chunk, tile, tile8, tids, q32, q8, exq, heaps, hlen, k,
+                        );
+                        continue;
+                    }
                     // Gather the scattered rows into one contiguous tile.
                     // This is where the block pays for random access, and it
                     // pays once per block rather than once per query, which
@@ -1531,18 +1555,10 @@ impl RustLshIndex {
                     for (j, &id) in chunk.iter().enumerate() {
                         let base = id as usize * d;
                         tile[j * d..(j + 1) * d].copy_from_slice(&self.pts32[base..base + d]);
-                        if prefilter {
-                            let b8 = id as usize * d8;
-                            tile8[j * d8..(j + 1) * d8].copy_from_slice(&self.pts8[b8..b8 + d8]);
-                        }
                         tids[j] = id;
                     }
                     let n = chunk.len();
-                    let (tl, t8, ti) = (
-                        &tile[..n * d],
-                        &tile8[..if prefilter { n * d8 } else { 0 }],
-                        &tids[..n],
-                    );
+                    let (tl, ti) = (&tile[..n * d], &tids[..n]);
                     // Dispatch the dimensionality into the kernel's type,
                     // once per tile (a few hundred pairs), so the match is
                     // free. **Only 8, 16 and 24 are specialized, and
@@ -1557,22 +1573,11 @@ impl RustLshIndex {
                     // loop the runtime-`d` instantiation gets. Below 8
                     // there is no vector loop to guard and const `D` costs
                     // 20% as well. Measured, all of it — see OPTIMIZE.md.
-                    if prefilter {
-                        match d {
-                            24 => self.score_tile_pruned::<24>(
-                                group, tl, t8, ti, q32, q8, exq, heaps, hlen, k,
-                            ),
-                            _ => self.score_tile_pruned::<0>(
-                                group, tl, t8, ti, q32, q8, exq, heaps, hlen, k,
-                            ),
-                        }
-                    } else {
-                        match d {
-                            8 => self.score_tile::<8>(group, tl, ti, q32, exq, heaps, hlen, k),
-                            16 => self.score_tile::<16>(group, tl, ti, q32, exq, heaps, hlen, k),
-                            24 => self.score_tile::<24>(group, tl, ti, q32, exq, heaps, hlen, k),
-                            _ => self.score_tile::<0>(group, tl, ti, q32, exq, heaps, hlen, k),
-                        }
+                    match d {
+                        8 => self.score_tile::<8>(group, tl, ti, q32, exq, heaps, hlen, k),
+                        16 => self.score_tile::<16>(group, tl, ti, q32, exq, heaps, hlen, k),
+                        24 => self.score_tile::<24>(group, tl, ti, q32, exq, heaps, hlen, k),
+                        _ => self.score_tile::<0>(group, tl, ti, q32, exq, heaps, hlen, k),
                     }
                 }
             }
@@ -1580,6 +1585,43 @@ impl RustLshIndex {
         }
         // No dedup on this path: every pair is scored.
         tally.scored(pairs, loads);
+    }
+
+    /// Gather one tile of a bucket (coordinates and 8-bit codes) and score it
+    /// behind the prefilter.
+    ///
+    /// Kept out of line: inlined next to the unfiltered gather and scoring in
+    /// `query_block`, it changed the register allocation of that hot loop and
+    /// cost the blocks that never use the filter 5%.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn score_chunk_pruned(
+        &self,
+        group: &[(i64, u32)],
+        chunk: &[i64],
+        tile: &mut [f32],
+        tile8: &mut [u8],
+        tids: &mut [i64],
+        q32: &[f32],
+        q8: &[u8],
+        exq: &[i64],
+        heaps: &mut [(u32, i64)],
+        hlen: &mut [u32],
+        k: usize,
+    ) {
+        let (d, d8) = (self.d, stride8(self.d));
+        for (j, &id) in chunk.iter().enumerate() {
+            let (b, b8) = (id as usize * d, id as usize * d8);
+            tile[j * d..(j + 1) * d].copy_from_slice(&self.pts32[b..b + d]);
+            tile8[j * d8..(j + 1) * d8].copy_from_slice(&self.pts8[b8..b8 + d8]);
+            tids[j] = id;
+        }
+        let n = chunk.len();
+        let (tl, t8, ti) = (&tile[..n * d], &tile8[..n * d8], &tids[..n]);
+        match d {
+            24 => self.score_tile_pruned::<24>(group, tl, t8, ti, q32, q8, exq, heaps, hlen, k),
+            _ => self.score_tile_pruned::<0>(group, tl, t8, ti, q32, q8, exq, heaps, hlen, k),
+        }
     }
 
     /// Score one tile against every query of a bucket group, keeping the
@@ -3109,6 +3151,122 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The float32 distance as the compiler is allowed to evaluate it: other
+    /// term forms (`(1 - a) + b` for `1 - (a - b)`, sign-flipped `t`) and other
+    /// summation orders. `lb_limit` must hold for every one of them, since the
+    /// kernel uses the algebraic float methods and may be lowered either way.
+    fn variants(a: &[f32], b: &[f32]) -> Vec<f32> {
+        let term = |x: f32, y: f32, alt: bool| {
+            let t = (x - y).abs();
+            let w = if alt {
+                (1.0 - x.max(y)) + x.min(y)
+            } else {
+                1.0 - t
+            };
+            if t < w {
+                t
+            } else {
+                w
+            }
+        };
+        let mut out = Vec::new();
+        for alt in [false, true] {
+            let ts: Vec<f32> = a.iter().zip(b).map(|(&x, &y)| term(x, y, alt)).collect();
+            out.push(ts.iter().sum());
+            out.push(ts.iter().rev().sum());
+            let mut sorted = ts.clone();
+            sorted.sort_by(f32::total_cmp);
+            out.push(sorted.iter().sum());
+            let mut level = ts;
+            while level.len() > 1 {
+                level = level.chunks(2).map(|c| c.iter().sum()).collect();
+            }
+            out.push(level[0]);
+        }
+        out
+    }
+
+    /// Seam pairs with the largest float32 term error (a coordinate at
+    /// `1 - j 2^-24` against a tiny one, where `a - b` is inexact) mixed with
+    /// pairs two cells apart at the cell edges (the bound's tightest case), at
+    /// every dimension across the stride boundaries and tolerant of every
+    /// evaluation order. The cell bound must never exceed `lb_limit` of any of
+    /// the computed distances.
+    #[test]
+    fn limit_covers_seam_rounding_and_evaluation_order() {
+        let tiny = [
+            1e-9f32,
+            3e-8,
+            6e-8,
+            1e-6,
+            1e-4,
+            2.0f32.powi(-25) * 1.01,
+            2.0f32.powi(-24) * 1.5,
+        ];
+        let mut x = 0xD1B54A32D192ED03u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for d in [17usize, 24, 32, 33, 64, 100, 256] {
+            for _ in 0..3000 {
+                let (mut a, mut b) = (vec![0.0f32; d], vec![0.0f32; d]);
+                for j in 0..d {
+                    match next() % 3 {
+                        0 => {
+                            // seam pair with an inexact subtraction
+                            a[j] = 1.0 - (1 + next() % 40) as f32 * 2.0f32.powi(-24);
+                            b[j] = tiny[(next() % tiny.len() as u64) as usize];
+                        }
+                        1 => {
+                            // two cells apart, at the cell edges
+                            let c = (next() % 250) as f32;
+                            a[j] = f32::from_bits(((c + 1.0) / 256.0).to_bits() - 1);
+                            b[j] = (c + 2.0) / 256.0;
+                        }
+                        _ => {
+                            a[j] = (next() % 65536) as f32 / 65536.0;
+                            b[j] = (next() % 65536) as f32 / 65536.0;
+                        }
+                    }
+                }
+                let (qa, pb) = (padded(&a, stride8(d)), padded(&b, stride8(d)));
+                let lb = lb_cells(&qa, &pb);
+                for dist in variants(&a, &b) {
+                    assert!(
+                        lb <= lb_limit(dist.to_bits(), d),
+                        "d={d} lb={lb} dist={dist}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `lb_limit` is at least the analytic bound `256 (w + d 2^-21)(1 + d 2^-23)`
+    /// rounded down, never smaller, and monotone in `worst`.
+    #[test]
+    fn limit_is_monotone_and_matches_the_bound() {
+        for d in [17usize, 32, 64, 4096] {
+            let mut prev = 0u32;
+            for step in 0..2000u32 {
+                let w = step as f32 * (d as f32 / 2.0) / 2000.0;
+                let got = lb_limit(w.to_bits(), d);
+                let want = 256.0
+                    * (w as f64 + d as f64 * 2.0f64.powi(-21))
+                    * (1.0 + d as f64 * 2.0f64.powi(-23));
+                assert!(
+                    got as f64 >= want.floor() - 1.0,
+                    "d={d} w={w} got={got} want={want}"
+                );
+                assert!(got >= prev, "not monotone at d={d} w={w}");
+                prev = got;
+            }
+        }
+        assert_eq!(lb_limit(0.0f32.to_bits(), 32), 0); // a zero k-th best prunes only beyond the slack
     }
 
     #[test]
