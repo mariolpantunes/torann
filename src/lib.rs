@@ -717,7 +717,29 @@ impl BWs {
 /// bound costs about 2 ns per pair whatever `d`; the float32 kernel costs less
 /// than that at `d = 8` and about the same at 16 (measured: +12% and +3% slower
 /// with the filter), and clearly more from 32 (-16% to -47%).
+#[cfg(not(feature = "bench-knobs"))]
 const PREFILTER_MIN_D: usize = 17;
+
+/// Benchmark-only build (`--features bench-knobs`): the cutoff is read at
+/// compile time from `TORANN_PREFILTER_MIN_D`, so the sweep builds one arm per
+/// value. A release wheel never carries the feature.
+#[cfg(feature = "bench-knobs")]
+const PREFILTER_MIN_D: usize = match option_env!("TORANN_PREFILTER_MIN_D") {
+    Some(v) => parse_usize(v),
+    None => 17,
+};
+
+#[cfg(feature = "bench-knobs")]
+const fn parse_usize(s: &str) -> usize {
+    let b = s.as_bytes();
+    let (mut i, mut n) = (0, 0);
+    while i < b.len() {
+        assert!(b[i].is_ascii_digit());
+        n = n * 10 + (b[i] - b'0') as usize;
+        i += 1;
+    }
+    n
+}
 
 /// Largest `d` the prefilter serves: the error bound of [`lb_limit`] needs
 /// `d 2^-24 <= 1/2`, and the cell sums are `u32` (`127 d` is far inside it).

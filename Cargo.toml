@@ -16,6 +16,10 @@ crate-type = ["cdylib"]
 # so a published wheel has no counters and exposes none of them.
 stats = []
 
+# Sweep builds only (examples/bench_ab.py --features bench-knobs): compile-time
+# overrides of tuning constants. Never enabled in a published wheel.
+bench-knobs = []
+
 [dependencies]
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311"] }
 numpy = "0.29"
