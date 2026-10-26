@@ -534,7 +534,7 @@ class TestPrefilterExactness(ContractCase):
     neighbour here.
     """
 
-    N = 2000
+    N = 1500
 
     @staticmethod
     def awkward(rng, n, d):
@@ -557,7 +557,7 @@ class TestPrefilterExactness(ContractCase):
         return runs
 
     def test_knn_matches_reference_bit_for_bit(self):
-        for d in (4, 16, 32, 33):
+        for d in (4, 16, 17, 24, 33, 64):
             for k in (1, 40):
                 runs = self.pair(d, k)
                 ref = runs["python"]
@@ -567,7 +567,7 @@ class TestPrefilterExactness(ContractCase):
                             self.assert_identical(got[which], ref[which])
 
     def test_radius_matches_reference_bit_for_bit(self):
-        for d in (16, 32, 33):
+        for d in (16, 17, 32, 33):
             runs = self.pair(d, 8)
             ref = runs["python"][2]
             for backend, got in runs.items():

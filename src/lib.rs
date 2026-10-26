@@ -437,6 +437,73 @@ fn dist_l1_32(a: &[f32], b: &[f32]) -> f32 {
     l1::<0>(a, b, a.len().min(b.len()))
 }
 
+/// The 8-bit cell of a coordinate: `floor(256 x) mod 256`. `x` is a float32 in
+/// `[0, 1]`; `1.0` lands in cell 0, exactly where the torus puts it (1.0 and
+/// 0.0 are one point), and `256 x` is exact, so no coordinate is mis-binned.
+#[inline(always)]
+fn code8(x: f32) -> u8 {
+    ((x * 256.0) as u32 & 255) as u8
+}
+
+/// Bytes per point of the 8-bit code arrays: `d` rounded up to whole chunks
+/// of 16 (up to `d = 16`) or 32 bytes, padded with cell 0. A padding byte is
+/// 0 on both sides, so its circular distance is 0 and it adds nothing.
+#[inline(always)]
+fn stride8(d: usize) -> usize {
+    d.next_multiple_of(if d <= 16 { 16 } else { 32 })
+}
+
+/// Exact lower bound, in cells of `1/256`, on the toroidal L1 distance of two
+/// points from their padded 8-bit codes (see [`stride8`]).
+///
+/// Per dimension the codes `a`, `b` are cells of width `1/256`, so two
+/// coordinates in them are at least `(c - 1)/256` apart on the circle, where
+/// `c = min(a - b, b - a) mod 256` is the circular cell distance (wrapping
+/// `u8` subtraction both ways, then the smaller). Cell 255 is adjacent to cell 0,
+/// which is why plain `|a - b|` would overstate the bound across the seam.
+///
+/// The per-chunk `[u8; W]` is what lets LLVM sum with a byte-wise
+/// sum-of-absolute-differences instead of widening every lane: a flat loop
+/// over the bytes costs 4.8 ns per pair at d = 32, this form 2.0 ns.
+#[inline(always)]
+fn lb_chunks<const W: usize>(a: &[u8], b: &[u8]) -> u32 {
+    let mut s = 0u32;
+    for (ca, cb) in a.as_chunks::<W>().0.iter().zip(b.as_chunks::<W>().0) {
+        let mut m = [0u8; W];
+        for j in 0..W {
+            m[j] = ca[j]
+                .wrapping_sub(cb[j])
+                .min(cb[j].wrapping_sub(ca[j]))
+                .saturating_sub(1);
+        }
+        s += m.iter().map(|&v| v as u32).sum::<u32>();
+    }
+    s
+}
+
+#[inline(always)]
+fn lb_cells(a: &[u8], b: &[u8]) -> u32 {
+    if a.len().is_multiple_of(32) {
+        lb_chunks::<32>(a, b)
+    } else {
+        lb_chunks::<16>(a, b)
+    }
+}
+
+/// Largest [`lb_cells`] a candidate may have and still be able to beat a
+/// current k-th best of `worst` float32 bits at dimension `d`: the cell bound
+/// is scaled by 256 and compared against `worst` inflated by the worst-case
+/// relative error of a float32 sum of `d` non-negative terms (`(d + 2) 2^-24`,
+/// doubled for slack), so no candidate the float32 kernel would offer is cut.
+#[inline(always)]
+fn lb_limit(worst: u32, d: usize) -> u32 {
+    if worst == u32::MAX {
+        return u32::MAX;
+    }
+    let slack = 1.0 + (d as f64 + 4.0) * (1.0 / 8388608.0);
+    (f32::from_bits(worst) as f64 * slack * 256.0) as u32
+}
+
 /// Tile rows scored per call of [`dist_l1_rows`].
 ///
 /// The kernel is bound by dependency-chain latency, not instruction count,
@@ -609,6 +676,8 @@ struct BWs {
     probe: Vec<(i64, u32)>, // (bucket key, query slot) of one table, key-sorted
     gids: Vec<i64>,         // ids of the bucket being scored
     tile: Vec<f32>,         // TILE * d gathered point coordinates
+    q8: Vec<u8>,            // nq * stride8(d), padded 8-bit cells of the block's queries
+    tile8: Vec<u8>,         // TILE * stride8(d), the same for the gathered points
     tids: Vec<i64>,         // TILE ids, aligned to tile rows
     rhits: Vec<Vec<u64>>,   // nq radius hit lists, packed (radius join only)
     rclean: Vec<u32>,       // nq list lengths at their last compaction
@@ -617,7 +686,7 @@ struct BWs {
 impl BWs {
     /// Size the buffers for a block of `nq` queries in `d` dimensions with
     /// `k` neighbours, and reset the heaps.
-    fn reset(&mut self, nq: usize, d: usize, k: usize, kdim: usize) {
+    fn reset(&mut self, nq: usize, d: usize, k: usize, kdim: usize, prefilter: bool) {
         self.q32.resize(nq * d, 0.0);
         self.exq.resize(nq, -1);
         self.heaps.resize(nq * k, (0, 0));
@@ -627,9 +696,18 @@ impl BWs {
         self.frac.resize(kdim, 0.0);
         self.clos.resize(kdim, 0.0);
         self.tile.resize(TILE * d, 0.0);
+        self.tile8.clear();
+        self.tile8
+            .resize(if prefilter { TILE * stride8(d) } else { 0 }, 0);
         self.tids.resize(TILE, 0);
     }
 }
+
+/// Smallest `d` at which the k-NN join runs behind the 8-bit prefilter. The
+/// bound costs about 2 ns per pair whatever `d`; the float32 kernel costs less
+/// than that at `d = 8` and about the same at 16 (measured: +12% and +3% slower
+/// with the filter), and clearly more from 32 (-16% to -47%).
+const PREFILTER_MIN_D: usize = 17;
 
 /// Points per distance tile: one slice of a bucket, small enough that it
 /// stays in L1 while every query of the group scans it (128 * 32 f32 = 16 KiB).
@@ -730,6 +808,8 @@ struct RustLshIndex {
     n_static: usize,
     pts: Vec<f64>,
     pts32: Vec<f32>,
+    /// `code8` of every coordinate: the quantised prefilter of the k-NN join.
+    pts8: Vec<u8>,
     skeys_s: Vec<i64>,
     sids_s: Vec<i64>,
     /// Direct-address bucket bounds for the static tier: per table,
@@ -753,6 +833,26 @@ struct RustLshIndex {
 const OFFS_BUDGET: usize = 64 << 20;
 
 impl RustLshIndex {
+    /// Append the padded 8-bit codes of points `rows` (which must be the next
+    /// rows of `pts8`) from `pts32`.
+    fn push_codes(&mut self, rows: std::ops::Range<usize>) {
+        if !self.prefilter() {
+            return;
+        }
+        let (d, d8) = (self.d, stride8(self.d));
+        for r in rows {
+            self.pts8
+                .extend(self.pts32[r * d..(r + 1) * d].iter().map(|&v| code8(v)));
+            self.pts8.resize((r + 1) * d8, 0);
+        }
+    }
+
+    /// Whether the k-NN join runs behind the 8-bit prefilter.
+    #[inline]
+    fn prefilter(&self) -> bool {
+        self.d >= PREFILTER_MIN_D
+    }
+
     #[inline]
     fn n_cand(&self) -> usize {
         self.n_points - self.n_static
@@ -1247,6 +1347,61 @@ impl RustLshIndex {
         }
     }
 
+    /// [`Self::score_tile`] behind the exact 8-bit prefilter ([`lb_cells`]).
+    ///
+    /// Only used from [`PREFILTER_MIN_D`]: below it the float32 kernel is
+    /// already about as cheap as the bound.
+    ///
+    /// The inner loop is the whole point of the batched shape: both
+    /// operands are contiguous and cache-resident, the id is only touched
+    /// when a candidate beats the query's k-th best, and the heap top is
+    /// held in a register across the tile.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn score_tile_pruned<const D: usize>(
+        &self,
+        group: &[(i64, u32)],
+        tile: &[f32],
+        tile8: &[u8],
+        tids: &[i64],
+        q32: &[f32],
+        q8: &[u8],
+        exq: &[i64],
+        heaps: &mut [(u32, i64)],
+        hlen: &mut [u32],
+        k: usize,
+    ) {
+        let d = self.d;
+        let d8 = stride8(d);
+        let nt = tids.len();
+        for &(_, slot) in group {
+            let si = slot as usize;
+            let qrow = &q32[si * d..(si + 1) * d];
+            let qcode = &q8[si * d8..(si + 1) * d8];
+            let h = &mut heaps[si * k..(si + 1) * k];
+            let mut len = hlen[si] as usize;
+            let ex = exq[si];
+            let mut worst = if len == k { h[0] } else { WORST };
+            let mut limit = lb_limit(worst.0, d);
+            for i in 0..nt {
+                // Exact prefilter: a candidate whose cell bound already
+                // exceeds the k-th best cannot be offered, so it never pays
+                // for the float32 distance. Nothing is approximated.
+                if lb_cells(qcode, &tile8[i * d8..(i + 1) * d8]) > limit {
+                    continue;
+                }
+                let bits = l1::<D>(qrow, &tile[i * d..(i + 1) * d], d).to_bits();
+                let id = tids[i];
+                if hless((bits, id), worst) && id != ex {
+                    heap_offer(h, &mut len, bits, id);
+                    worst = if len == k { h[0] } else { WORST };
+                    limit = lb_limit(worst.0, d);
+                }
+            }
+            hlen[si] = len as u32;
+        }
+    }
+
     /// One block of the batched, bucket-centric join.
     ///
     /// Table by table, the block's probe keys are grouped by bucket (a sort
@@ -1269,9 +1424,18 @@ impl RustLshIndex {
         tally: &mut Tally,
     ) {
         let (d, ns, nc) = (self.d, self.n_static, self.n_cand());
-        ws.reset(nq, d, k, self.kdim);
+        ws.reset(nq, d, k, self.kdim, self.prefilter());
         for i in 0..nq * d {
             ws.q32[i] = q[i] as f32;
+        }
+        let prefilter = self.prefilter();
+        let d8 = if prefilter { stride8(d) } else { 0 };
+        ws.q8.clear();
+        ws.q8.resize(nq * d8, 0);
+        for i in 0..nq * usize::from(prefilter) {
+            for j in 0..d {
+                ws.q8[i * d8 + j] = code8(ws.q32[i * d + j]);
+            }
         }
         for i in 0..nq {
             ws.exq[i] = ex.map_or(-1, |e| e[i]);
@@ -1280,6 +1444,7 @@ impl RustLshIndex {
         let (mut pairs, mut loads) = (Count::new(), Count::new());
         let BWs {
             q32,
+            q8,
             exq,
             heaps,
             hlen,
@@ -1289,6 +1454,7 @@ impl RustLshIndex {
             probe,
             gids,
             tile,
+            tile8,
             tids,
             ..
         } = ws;
@@ -1365,10 +1531,18 @@ impl RustLshIndex {
                     for (j, &id) in chunk.iter().enumerate() {
                         let base = id as usize * d;
                         tile[j * d..(j + 1) * d].copy_from_slice(&self.pts32[base..base + d]);
+                        if prefilter {
+                            let b8 = id as usize * d8;
+                            tile8[j * d8..(j + 1) * d8].copy_from_slice(&self.pts8[b8..b8 + d8]);
+                        }
                         tids[j] = id;
                     }
                     let n = chunk.len();
-                    let (tl, ti) = (&tile[..n * d], &tids[..n]);
+                    let (tl, t8, ti) = (
+                        &tile[..n * d],
+                        &tile8[..if prefilter { n * d8 } else { 0 }],
+                        &tids[..n],
+                    );
                     // Dispatch the dimensionality into the kernel's type,
                     // once per tile (a few hundred pairs), so the match is
                     // free. **Only 8, 16 and 24 are specialized, and
@@ -1383,11 +1557,22 @@ impl RustLshIndex {
                     // loop the runtime-`d` instantiation gets. Below 8
                     // there is no vector loop to guard and const `D` costs
                     // 20% as well. Measured, all of it — see OPTIMIZE.md.
-                    match d {
-                        8 => self.score_tile::<8>(group, tl, ti, q32, exq, heaps, hlen, k),
-                        16 => self.score_tile::<16>(group, tl, ti, q32, exq, heaps, hlen, k),
-                        24 => self.score_tile::<24>(group, tl, ti, q32, exq, heaps, hlen, k),
-                        _ => self.score_tile::<0>(group, tl, ti, q32, exq, heaps, hlen, k),
+                    if prefilter {
+                        match d {
+                            24 => self.score_tile_pruned::<24>(
+                                group, tl, t8, ti, q32, q8, exq, heaps, hlen, k,
+                            ),
+                            _ => self.score_tile_pruned::<0>(
+                                group, tl, t8, ti, q32, q8, exq, heaps, hlen, k,
+                            ),
+                        }
+                    } else {
+                        match d {
+                            8 => self.score_tile::<8>(group, tl, ti, q32, exq, heaps, hlen, k),
+                            16 => self.score_tile::<16>(group, tl, ti, q32, exq, heaps, hlen, k),
+                            24 => self.score_tile::<24>(group, tl, ti, q32, exq, heaps, hlen, k),
+                            _ => self.score_tile::<0>(group, tl, ti, q32, exq, heaps, hlen, k),
+                        }
                     }
                 }
             }
@@ -1467,7 +1652,7 @@ impl RustLshIndex {
         tally: &mut Tally,
     ) {
         let (d, ns, nc) = (self.d, self.n_static, self.n_cand());
-        ws.reset(nq, d, 0, self.kdim);
+        ws.reset(nq, d, 0, self.kdim, false);
         ws.rhits.resize_with(nq, Vec::new);
         for h in &mut ws.rhits[..nq] {
             h.clear();
@@ -1870,6 +2055,7 @@ impl RustLshIndex {
             n_static: 0,
             pts: Vec::new(),
             pts32: Vec::new(),
+            pts8: Vec::new(),
             skeys_s: Vec::new(),
             sids_s: Vec::new(),
             offs_s: Vec::new(),
@@ -1901,6 +2087,8 @@ impl RustLshIndex {
             self.n_points = n;
             self.n_static = n_static;
             self.pts32 = pts.iter().map(|&v| v as f32).collect();
+            self.pts8 = Vec::new();
+            self.push_codes(0..n);
             self.pts = pts;
             let keys = self.compute_keys(0, n_static);
             let (sk, si) = self.sort_tier(&keys, n_static, 0);
@@ -1922,6 +2110,8 @@ impl RustLshIndex {
             for (dst, &v) in self.pts32[off * d..].iter_mut().zip(c.iter()) {
                 *dst = v as f32;
             }
+            self.pts8.truncate(off * stride8(d));
+            self.push_codes(off..self.n_points);
             let new_keys = self.compute_keys(off, nc);
 
             let old_keys = std::mem::take(&mut self.keys_c);
@@ -2013,6 +2203,7 @@ impl RustLshIndex {
                 self.pts.extend_from_slice(&c);
                 self.pts32.extend(c.iter().map(|&v| v as f32));
                 self.n_points += m;
+                self.push_codes(self.n_points - m..self.n_points);
             }
             self.build_candidate_tier();
         });
@@ -2829,4 +3020,111 @@ fn torann_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(brute_radius, m)?)?;
     m.add_function(wrap_pyfunction!(weighted_directions, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Coordinates that stress the 8-bit grid: every cell wall `j/256`, one
+    /// float32 ulp either side of it, the seam values `0.0` and `1.0`, and
+    /// a few interior points.
+    fn awkward() -> Vec<f32> {
+        let mut v = vec![0.0f32, 1.0, 0.5, 0.3, 0.7, 1.0 - f32::EPSILON / 2.0];
+        for j in 0..=256u32 {
+            let w = j as f32 / 256.0;
+            v.extend([w, f32::from_bits(w.to_bits() + 1), w - 2.0f32.powi(-16)]);
+            if w > 0.0 {
+                v.push(f32::from_bits(w.to_bits() - 1));
+            }
+        }
+        v.retain(|&x| (0.0..=1.0).contains(&x));
+        v
+    }
+
+    #[test]
+    fn codes_wrap_the_seam() {
+        assert_eq!(code8(0.0), 0);
+        assert_eq!(code8(1.0), 0);
+        assert_eq!(code8(1.0 - f32::EPSILON / 2.0), 255);
+        assert_eq!(code8(0.5), 128);
+        assert_eq!(code8(1.0 / 256.0), 1);
+    }
+
+    /// The bound never exceeds the float32 distance the kernel computes, and
+    /// never prunes a candidate whose own distance is the k-th best: exhaustive
+    /// over every pair of awkward coordinates in one dimension.
+    #[test]
+    fn bound_is_a_lower_bound_exhaustive_1d() {
+        let vals = awkward();
+        for &a in &vals {
+            for &b in &vals {
+                let dist = l1::<0>(&[a], &[b], 1);
+                let lb = lb_cells(&padded(&[a], 16), &padded(&[b], 16));
+                assert!(
+                    lb as f64 / 256.0 <= dist as f64,
+                    "a={a} b={b} lb={lb} dist={dist}"
+                );
+                assert!(
+                    lb <= lb_limit(dist.to_bits(), 1),
+                    "a={a} b={b} lb={lb} dist={dist}"
+                );
+            }
+        }
+    }
+
+    /// The same in `d` dimensions across the stride boundaries (padding on
+    /// both sides), with the per-term rounding of the float32 sum in play.
+    #[test]
+    fn bound_is_a_lower_bound_multi_dim() {
+        let vals = awkward();
+        let mut x = 0x9E3779B97F4A7C15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for d in [1usize, 8, 16, 17, 24, 31, 32, 33, 64, 100] {
+            for _ in 0..4000 {
+                let a: Vec<f32> = (0..d)
+                    .map(|_| vals[(next() % vals.len() as u64) as usize])
+                    .collect();
+                let b: Vec<f32> = if next() % 4 == 0 {
+                    a.iter().map(|&v| (v + 0.5).fract()).collect() // antipodal
+                } else {
+                    (0..d)
+                        .map(|_| vals[(next() % vals.len() as u64) as usize])
+                        .collect()
+                };
+                let dist = l1::<0>(&a, &b, d);
+                let lb = lb_cells(&padded(&a, stride8(d)), &padded(&b, stride8(d)));
+                assert!(
+                    lb as f64 / 256.0 <= dist as f64 * (1.0 + 1e-6),
+                    "d={d} lb={lb} dist={dist}"
+                );
+                assert!(
+                    lb <= lb_limit(dist.to_bits(), d),
+                    "d={d} lb={lb} dist={dist}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn padding_adds_nothing_and_an_empty_heap_prunes_nothing() {
+        assert_eq!(stride8(1), 16);
+        assert_eq!(stride8(16), 16);
+        assert_eq!(stride8(17), 32);
+        assert_eq!(stride8(33), 64);
+        assert_eq!(lb_limit(u32::MAX, 32), u32::MAX);
+        let a = padded(&[0.25; 20], 32);
+        assert_eq!(lb_cells(&a, &a), 0);
+    }
+
+    fn padded(x: &[f32], stride: usize) -> Vec<u8> {
+        let mut v: Vec<u8> = x.iter().map(|&c| code8(c)).collect();
+        v.resize(stride, 0);
+        v
+    }
 }
