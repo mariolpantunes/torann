@@ -807,6 +807,64 @@ class TestRadiusPrefilter(ContractCase):
                                 self.assertTrue(np.isin(must, ids).all(), f"query {i} lost a hit")
 
 
+class TestPrefilterOnClusters(ContractCase):
+    """The k-NN prefilter must stay exact where it cannot prune.
+
+    Points that differ by far less than one ``u8`` cell (1/256) share cells,
+    so the bound is zero for nearly every pair; the join then has to notice
+    the filter is dead weight and run unfiltered, mid-block if need be. Data
+    is dyadic (cluster offsets are small multiples of ``2**-16``), so the
+    answer is exact and compared bit for bit with the float64 oracle. The
+    candidate count scales with the worker count so every block holds >= 64
+    queries, the join's gate for the filter.
+    """
+
+    SPREADS = (4, 40, 400)  # offsets in GRID steps; one u8 cell is 256 steps
+
+    def clusters(self, rng, n, d, spread, centres):
+        lab = rng.integers(0, len(centres), n)
+        off = rng.integers(-spread, spread + 1, (n, d)) * GRID
+        return np.clip(np.round((centres[lab] + off) / GRID) * GRID, 0.0, 1.0)
+
+    def check(self, P, C, k, note):
+        allp = np.vstack([P, C])
+        q = np.arange(len(P), len(allp))
+        want = oracle_knn(allp, C[:60], k, exclude=q[:60])
+        for backend in BACKENDS:
+            nn = ToroidalNN(
+                seed=2, backend=backend, brute_threshold=1, resolution=2, dims_per_table=1, probes=1, num_tables=1
+            ).fit(P, C, k=k)
+            with self.subTest(case=note, backend=backend):
+                got = nn.query(k)
+                self.assertEqual(got[0].shape[0], len(C))
+                self.assert_identical((got[0][:60], got[1][:60]), want)
+
+    def test_clusters_far_tighter_than_a_cell(self):
+        m = 70 * (os.cpu_count() or 1)
+        for d in (17, 24, 32, 64):
+            for spread in self.SPREADS:
+                rng = np.random.default_rng(1000 + d + spread)
+                centres = TestPrefilterExactness.awkward(rng, 6, d)
+                P = self.clusters(rng, 300, d, spread, centres)
+                C = self.clusters(rng, m, d, spread, centres)
+                self.check(P, C, 8, f"d={d} spread={spread}")
+
+    def test_tight_and_spread_data_in_one_block(self):
+        """Survival differs per query and per table: half the points sit in
+        tight clusters, half are uniform."""
+        m = 70 * (os.cpu_count() or 1)
+        for d in (17, 32):
+            rng = np.random.default_rng(2000 + d)
+            centres = TestPrefilterExactness.awkward(rng, 6, d)
+
+            def mixed(n):
+                tight = self.clusters(rng, n, d, 8, centres)
+                wide = TestPrefilterExactness.awkward(rng, n, d)
+                return np.where(rng.random((n, 1)) < 0.5, tight, wide)
+
+            self.check(mixed(300), mixed(m), 8, f"mixed d={d}")
+
+
 @unittest.skipUnless(SLOW, "slow tier: set TORANN_SLOW=1")
 class TestSlowGeometry(ContractCase):
     """T6 hash law and T8 wrapped clusters (statistical; fixed seeds)."""
