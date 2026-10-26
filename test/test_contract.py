@@ -692,6 +692,121 @@ class TestPrefilterEdges(ContractCase):
             self.check(P, Q, (1, 8), f"wide d={d}")
 
 
+class TestRadiusPrefilter(ContractCase):
+    """N1 on the radius join: a quantised bound may drop work, never a hit.
+
+    The batched radius join only runs with >= 64 queries *per block*, so the
+    query count scales with the worker count. ``scan`` (``query_block_size=1``)
+    is the per-query path the join must reproduce, ``join`` the batched one.
+    Data is the awkward dyadic set of :class:`TestPrefilterExactness` (cell
+    walls, the seam, 1.0), so results are exact and compared bit for bit; the
+    radius sits exactly on a pair distance (a closed ball keeps it) and one
+    grid step below it (nothing may sneak in).
+    """
+
+    def queries(self):
+        return 70 * (os.cpu_count() or 1)
+
+    def test_closed_ball_exact_on_awkward_dyadic_data(self):
+        for d in (17, 24, 32):
+            rng = np.random.default_rng(d)
+            P = TestPrefilterExactness.awkward(rng, 300, d)
+            Q = TestPrefilterExactness.awkward(rng, self.queries(), d)
+            D = torus(Q[:50], P)
+            for r in (float(np.sort(D[0])[25]), float(np.sort(D[7])[3]) - GRID, 0.0):
+                want = oracle_radius(P, Q, r)
+                for backend in BACKENDS:
+                    nn = make(backend, "lsh-exhaustive", query_block_size=1 << 20).fit(P)
+                    with self.subTest(d=d, r=r, backend=backend):
+                        for got, ref in zip(nn.query_radius(r, Q), want, strict=True):
+                            self.assert_identical(got, ref)
+
+    def test_join_equals_scan_on_awkward_dyadic_data(self):
+        for d in (17, 20, 32):
+            rng = np.random.default_rng(100 + d)
+            P = TestPrefilterExactness.awkward(rng, 2000, d)
+            Q = TestPrefilterExactness.awkward(rng, self.queries(), d)
+            r = float(np.quantile(torus(Q[:20], P), 0.02))
+            for backend in BACKENDS:
+                kw = {"seed": 4, "backend": backend, "brute_threshold": 1}
+                scan = ToroidalNN(query_block_size=1, **kw).fit(P).query_radius(r, Q, pad=True)
+                join = ToroidalNN(query_block_size=1 << 20, **kw).fit(P).query_radius(r, Q, pad=True)
+                with self.subTest(d=d, backend=backend):
+                    self.assertGreater((scan.ids >= 0).sum(), 0)
+                    self.assert_identical(join, scan)
+
+    def test_wide_radius_switches_the_filter_off_without_changing_results(self):
+        """A radius that swallows whole clusters leaves most pairs unpruned;
+        the join then drops the bound mid-block and must still equal the scan."""
+        for d in (17, 24):
+            rng = np.random.default_rng(60 + d)
+            centres = TestPrefilterExactness.awkward(rng, 8, d)
+            lab = rng.integers(0, 8, 3000)
+            P = np.clip(np.round((centres[lab] + rng.normal(0, 0.03, (3000, d))) / GRID) * GRID, 0, 1)
+            Q = P[rng.integers(0, 3000, self.queries())]
+            for frac in (0.02, 0.1, 0.4):
+                r = float(np.quantile(torus(Q[:20], P), frac))
+                for backend in BACKENDS:
+                    kw = {"seed": 6, "backend": backend, "brute_threshold": 1}
+                    scan = ToroidalNN(query_block_size=1, **kw).fit(P).query_radius(r, Q, pad=True)
+                    join = ToroidalNN(query_block_size=1 << 20, **kw).fit(P).query_radius(r, Q, pad=True)
+                    with self.subTest(d=d, frac=frac, backend=backend):
+                        self.assert_identical(join, scan)
+
+    def test_self_join_with_exclusion(self):
+        d = 24
+        rng = np.random.default_rng(41)
+        P = TestPrefilterExactness.awkward(rng, 100, d)
+        C = TestPrefilterExactness.awkward(rng, 70 * (os.cpu_count() or 1), d)
+        allp = np.vstack([P, C])
+        r = float(np.quantile(torus(C[:20], allp), 0.05))
+        want = oracle_radius(allp, C, r, exclude=np.arange(len(P), len(allp)))
+        for backend in BACKENDS:
+            nn = ToroidalNN(
+                seed=2,
+                backend=backend,
+                brute_threshold=1,
+                resolution=2,
+                dims_per_table=1,
+                probes=1,
+                num_tables=1,
+                query_block_size=1 << 20,
+            ).fit(P, C)
+            with self.subTest(backend=backend):
+                for got, ref in zip(nn.query_radius(r), want, strict=True):
+                    self.assert_identical(got, ref)
+
+    def test_continuous_edges_against_the_float64_oracle(self):
+        """Tiny radii, duplicates, seam mixes: the join must not lose a point
+        inside ``r - tol`` nor admit one outside ``r + tol``."""
+        rng = np.random.default_rng(42)
+        n = self.queries()
+        for d in (17, 32):
+            tiny = 10.0 ** rng.uniform(-9, -3, (400, d))
+            top = 1.0 - rng.integers(1, 40, (400, d)) * 2.0**-24
+            mixed = np.where(rng.random((400, d)) < 0.5, tiny, top)
+            base = rng.random((20, d))
+            sets = {
+                "mixed-seam": (mixed, np.mod(mixed[: n % 400 + 70] + rng.normal(0, 1e-6, (n % 400 + 70, d)), 1.0)),
+                "duplicates": (np.repeat(base, 20, axis=0), np.tile(base, (n // 20 + 1, 1))[:n]),
+                "uniform": (rng.random((400, d)), rng.random((n, d))),
+            }
+            for name, (P, Q) in sets.items():
+                P, Q = np.mod(P, 1.0), np.mod(Q, 1.0)
+                D = torus(Q[:30], P)
+                for r in (0.0, 1e-7, float(np.quantile(D, 0.01)), float(np.quantile(D, 0.2))):
+                    for backend in BACKENDS:
+                        nn = make(backend, "lsh-exhaustive", query_block_size=1 << 20).fit(P)
+                        with self.subTest(case=name, d=d, r=r, backend=backend):
+                            tol = tol32(d)
+                            Dq = torus(Q, P)
+                            for i, (ids, dst) in enumerate(nn.query_radius(r, Q)):
+                                self.assertTrue(np.all(Dq[i, ids] <= r + tol))
+                                np.testing.assert_allclose(dst, Dq[i, ids], rtol=0, atol=tol)
+                                must = np.flatnonzero(Dq[i] <= r - tol)
+                                self.assertTrue(np.isin(must, ids).all(), f"query {i} lost a hit")
+
+
 @unittest.skipUnless(SLOW, "slow tier: set TORANN_SLOW=1")
 class TestSlowGeometry(ContractCase):
     """T6 hash law and T8 wrapped clusters (statistical; fixed seeds)."""
