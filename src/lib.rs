@@ -1834,8 +1834,9 @@ impl RustLshIndex {
     ///     probes: Neighbour-cell probes per table per query.
     ///     s: `(L, K)` int64 sampled dimension indices.
     ///     u: `(L, K)` float64 per-dimension offsets in `[0, 1)`.
-    ///     block: Queries per block of the batched join; `1` selects the
-    ///         per-query path, `0` sizes blocks from the worker count.
+    ///     block: Queries per block of the batched join (k-NN and, at
+    ///         `d <= 32` with 64+ queries per block, radius); `1` selects the
+    ///         per-query paths, `0` sizes blocks from the worker count.
     #[pyo3(signature = (b, k, l, probes, s, u, block=1024))]
     fn new(
         b: i64,

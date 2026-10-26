@@ -150,6 +150,11 @@ class ToroidalNN:
             selects the per-query path (one deduplicated candidate list
             per query), which is what small batches want, and is also the
             independent reference the batched join is validated against.
+            The join serves `query` from 64 queries per call and
+            `query_radius` from 64 queries *per block* at ``d <= 32``; above
+            that width the radius scan stays faster (the join scores a point
+            once per table it shares with the query), and it returns
+            bit-identical results either way.
         backend: LSH implementation — ``"auto"`` (first installed of rust,
             python), or an explicit name.
     """
