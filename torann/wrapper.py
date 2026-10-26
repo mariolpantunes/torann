@@ -12,8 +12,12 @@ Contract:
 
   with collision probability **exactly**
   $P[c(x){=}c(y)] = \max(0,\, 1 - B\delta)$ — seamless on the torus. A
-  table concatenates $K$ sampled dimensions: collisions decay as
-  $\prod_j \max(0, 1-B\delta_j) \approx e^{-B \cdot L1}$, a uniformly
+  table concatenates $K$ sampled dimensions, each with its own offset:
+  a pair collides with probability $\prod_j \max(0, 1-B\delta_j) \le
+  e^{-B \sum_j \delta_j}$, the L1 over the table's own coordinates.
+  Averaged over the dimension draw, a pair at toroidal L1 distance $r$
+  collides with probability $(1 - Br/d)^K \le e^{-BKr/d}$ while every
+  $\delta_i \le 1/B$ (the `p1` that tunes $L$). A uniformly
   random pair collides per dimension with probability exactly $1/B$
   (bucket load $n/B^K$), and a point that moves by $s$ changes a cell
   with probability $B s$ (churn is proportional to movement).

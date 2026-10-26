@@ -143,8 +143,12 @@ grid has **no seam**, and the collision law is exact, not approximate
 ![the offset integer grid](https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/method_hash.png)
 ![the collision law is exact](https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/method_collision.png)
 
-A table concatenates $K$ sampled dimensions into a base-$B$ key, so
-collisions decay as $\prod_j \max(0, 1-B\delta_j) \approx e^{-B \cdot L1}$
+A table concatenates $K$ sampled dimensions into a base-$B$ key, each with
+its own offset, so a pair collides with probability
+$\prod_j \max(0, 1-B\delta_j) \le e^{-B \sum_j \delta_j}$ over the
+table's coordinates; averaged over which dimensions are drawn, a pair at
+toroidal L1 distance $r$ collides with probability
+$(1 - Br/d)^K \le e^{-BKr/d}$ while every $\delta_i \le 1/B$
 — inherently an **L1** guarantee, which is why L1 is the public contract
 and no other metric is offered. A uniformly random pair collides per
 dimension with probability exactly $1/B$ (closed-form bucket load
