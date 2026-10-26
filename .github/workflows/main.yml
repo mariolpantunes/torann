@@ -22,7 +22,7 @@ jobs:
     strategy:
       matrix:
         # The floor and the newest supported release; one abi3 wheel serves both.
-        python-version: ["3.12", "3.15"]
+        python-version: ["3.12", "3.14", "3.15"]
 
     steps:
       - uses: actions/checkout@v7.0.1
