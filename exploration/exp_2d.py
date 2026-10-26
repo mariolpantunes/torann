@@ -5,11 +5,10 @@ Run from the repository root:  python exploration/exp_2d.py
 
 import os
 
-import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
-
+import numpy as np
 import vizstyle as vs
+from matplotlib.colors import ListedColormap
 
 RNG = np.random.default_rng(1)
 OUT = os.path.join(os.path.dirname(__file__), "out")

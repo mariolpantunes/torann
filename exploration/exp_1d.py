@@ -11,9 +11,8 @@ Run from the repository root:  python exploration/exp_1d.py
 
 import os
 
-import numpy as np
 import matplotlib.pyplot as plt
-
+import numpy as np
 import vizstyle as vs
 
 RNG = np.random.default_rng(0)

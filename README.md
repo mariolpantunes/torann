@@ -1,4 +1,4 @@
-# <img src="assets/logo.svg" alt="logo" width="128" height="128" align="middle"> torann
+# <img src="https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/logo.svg" alt="logo" width="128" height="128" align="middle"> torann
 
 ## TORoidal Approximate Nearest Neighbours
 
@@ -117,11 +117,11 @@ the *nearest region* of a query is not where a seam-blind index looks —
 it wraps around every boundary it touches. The teal points are the true
 12-NN of the star:
 
-![the toroidal nearest region](assets/method_region.png)
+![the toroidal nearest region](https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/method_region.png)
 
 The region follows the query around the torus:
 
-<p align="center"><img src="assets/region.gif" alt="the nearest region wraps" width="420"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/region.gif" alt="the nearest region wraps" width="420"></p>
 
 At d=16, distance concentration makes wrapping the *common case*: almost
 every true neighbour pair wraps in at least one dimension, which is why a
@@ -140,8 +140,8 @@ Because $B$ is an integer, the $B$ arcs tile the circle exactly — the
 grid has **no seam**, and the collision law is exact, not approximate
 (dots are measured frequencies):
 
-![the offset integer grid](assets/method_hash.png)
-![the collision law is exact](assets/method_collision.png)
+![the offset integer grid](https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/method_hash.png)
+![the collision law is exact](https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/method_collision.png)
 
 A table concatenates $K$ sampled dimensions into a base-$B$ key, so
 collisions decay as $\prod_j \max(0, 1-B\delta_j) \approx e^{-B \cdot L1}$
@@ -156,7 +156,7 @@ in `exploration/`.
 
 ### The index
 
-![index representation](assets/method_index.svg)
+![index representation](https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/method_index.svg)
 
 Sorted key arrays make a bucket a contiguous range (an $O(1)$
 direct-address offset table serves the static tier), keys are digit
@@ -209,14 +209,14 @@ crossover and complexity tables with `python examples/benchmark.py`:
 > above; the numbers below have not been re-measured since.
 
 
-![queries vs n](assets/bench_query.png)
+![queries vs n](https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/bench_query.png)
 
 On the workload this library exists for — the ESS main loop, simulated
 end to end (`examples/ess_sim.py`) — torann is **1.7× faster than FAISS
 Flat rebuilt per epoch and correct**, where FAISS's exact seam-blind L1
 delivers 0.25–0.28 recall against the true toroidal neighbours:
 
-![the ESS main loop](assets/bench_ess.png)
+![the ESS main loop](https://raw.githubusercontent.com/mariolpantunes/torann/main/assets/bench_ess.png)
 
 Queries run 11–148 µs at 16 threads across n ∈ [20k, 1M] on torus data —
 60–120× the NumPy pipeline — with 0.9–2.1 ms selective updates and ~1 s
@@ -233,8 +233,14 @@ lifecycle, using the standard
 [unittest](https://docs.python.org/3/library/unittest.html) framework:
 
 ```bash
-python -m unittest discover -s test
+python3 -m venv venv
+VIRTUAL_ENV=$PWD/venv maturin develop --release --group test   # builds torann/_native*.so in place
+PYTHONPATH=. TORANN_REQUIRE_NATIVE=1 venv/bin/python -m unittest discover -s test
 ```
+
+`TORANN_REQUIRE_NATIVE=1` fails the run when the extension did not load
+(`0` asserts the pure-Python backend); without it, a missing `.so` makes
+every native test skip and the suite still passes.
 
 ## Documentation
 
@@ -252,14 +258,24 @@ pdoc --math -d google torann torann.wrapper torann.base torann.brute torann.lsh 
 The checks in CI also run at commit time:
 
 ```bash
-pip install pre-commit
 pre-commit install
+pre-commit run --all-files   # check the tree without committing
 ```
 
-That gates each commit on ruff, basedpyright, vulture, the unit tests, and --
-because the native core is held to the same standard -- `cargo fmt --check`
-and `cargo clippy --release -- -D warnings`. `pre-commit run --all-files`
-checks the tree without committing.
+The hooks call machine-installed tools (`language: system`) at exactly the
+versions pinned in `pyproject.toml`'s `lint`, `test` and `build` dependency
+groups, which is what `.github/workflows/main.yml` installs; Rust is pinned
+to 1.99.1 in all three workflows. Each commit is gated on: an in-place
+release build into `./venv` (`maturin develop`), `ruff check`, `ruff format
+--check`, basedpyright, vulture, the unit tests against the native build and
+against a copy without it, coverage (`--fail-under=93`), `cargo fmt --check`,
+`cargo clippy --release -D warnings` (plain and `--features stats`) and
+`cargo test`. Formatting-only commits are listed in `.git-blame-ignore-revs`
+(`git config blame.ignoreRevsFile .git-blame-ignore-revs`).
+
+`publish.yml` builds the wheels and sdist on a release, tests the installed
+Linux wheel from a tree with no sources, then uploads to PyPI; `docs.yml`
+builds the pdoc site on every push to `main`.
 
 ```bash
 python examples/ess_sim.py             # the ESS main loop end to end, vs FAISS

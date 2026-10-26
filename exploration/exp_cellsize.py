@@ -32,7 +32,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from torann.brute import exact_knn  # noqa: E402
+from torann.brute import exact_knn
 
 try:
     import importlib
@@ -76,7 +76,7 @@ def capture_vs_selectivity():
         b_cap = 1.0 / R
         b_occ = (n / OCCUPANCY) ** (1.0 / dim)
         # Points per cell if we take the largest grid that still captures.
-        b_use = max(int(math.floor(b_cap)), 1)
+        b_use = max(math.floor(b_cap), 1)
         occ = n / (b_use**dim) if b_use**dim < 1e300 else 0.0
         ok = b_cap >= b_occ
         verdict = "works" if ok else ("marginal" if b_cap >= 0.8 * b_occ else "impossible")

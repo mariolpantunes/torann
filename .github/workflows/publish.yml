@@ -10,12 +10,12 @@ permissions:
 # The wheels are built with maturin (mixed Rust/Python package).
 #
 # x86-64 wheels are built with an **AVX2 + FMA floor**, which the committed
-# .cargo/config.toml already applies, so these jobs leave it alone. That
-# floor is worth 17% and is not optional in practice: the distance kernel is
-# a scalar loop the compiler auto-vectorizes, and without AVX there is no
-# 256-bit register for it to lower to — the query goes 340 ms -> 408 ms on
-# the reference shape. AVX-512 is a further 4% at d=32 but nearly 2x *worse*
-# at d=8, so there is no third variant to build.
+# .cargo/config.toml already applies, so these jobs leave it alone. The floor
+# is worth 1.6-3x on the brute and direction kernels and 23-24% on the LSH
+# query (measured table in .cargo/config.toml): the distance kernel is a
+# scalar loop the compiler auto-vectorizes, and without AVX2 there is no
+# 256-bit register for it to lower to. AVX-512 measured worse in 12 of 14
+# shapes, so there is no third variant to build.
 #
 # These jobs previously did `rm -f .cargo/config.toml` to strip a
 # `target-cpu=native` setting. That removed the crash risk *and* the floor:
@@ -26,11 +26,13 @@ permissions:
 # aarch64 needs no flags: NEON is baseline on arm64 and the config section is
 # gated on x86, so it does not apply there.
 #
-# `rust-toolchain: stable` is pinned on every build job on purpose. The
-# distance kernel uses the algebraic float methods stabilized in Rust 1.98
-# (`Cargo.toml` declares the `rust-version`), and the manylinux container
-# ships whatever toolchain its image was built with — without this the
-# wheel build can fail on `algebraic_add` with no obvious cause.
+# `rust-toolchain` and `maturin-version` are pinned on every build job, to
+# the versions the CI gate and the local hooks use (Rust 1.99.1, maturin from
+# pyproject.toml's `build` group). The distance kernel needs Rust >= 1.98 (the
+# algebraic float methods; `Cargo.toml` declares the `rust-version`), and the
+# manylinux container ships whatever toolchain its image was built with --
+# unpinned, the wheel build can fail on `algebraic_add` with no obvious cause,
+# or a published wheel comes from a compiler no gate ever ran.
 #
 # **One wheel per platform, not one per interpreter.** `Cargo.toml` builds
 # against the stable ABI (`abi3-py311`), so a single `cp311-abi3` wheel is
@@ -54,14 +56,15 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.51.0
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --interpreter 3.12
           manylinux: auto
-          rust-toolchain: stable
+          rust-toolchain: "1.99.1"
+          maturin-version: "1.15.0"
       # The bug this replaced was a wheel that silently lost its AVX2 floor,
       # so assert the floor is in the artifact rather than trusting the
       # config to have been picked up through maturin's container. The loop
@@ -83,7 +86,7 @@ jobs:
               fi
             done
           done
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: wheels-linux-${{ matrix.target }}
           path: dist
@@ -95,14 +98,15 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.51.0
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --interpreter 3.12
-          rust-toolchain: stable
-      - uses: actions/upload-artifact@v7
+          rust-toolchain: "1.99.1"
+          maturin-version: "1.15.0"
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: wheels-macos-${{ matrix.target }}
           path: dist
@@ -110,14 +114,15 @@ jobs:
   wheels-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.51.0
         with:
           target: x64
           args: --release --out dist --interpreter 3.12
-          rust-toolchain: stable
-      - uses: actions/upload-artifact@v7
+          rust-toolchain: "1.99.1"
+          maturin-version: "1.15.0"
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: wheels-windows-x64
           path: dist
@@ -125,28 +130,60 @@ jobs:
   sdist:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@v1.51.0
         with:
           command: sdist
           args: --out dist
-          rust-toolchain: stable
-      - uses: actions/upload-artifact@v7
+          rust-toolchain: "1.99.1"
+          maturin-version: "1.15.0"
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: sdist
           path: dist
 
+  # The artifact, not the source tree, is what users get: install the x86-64
+  # Linux wheel into a clean venv and run the suite from a directory with no
+  # `torann/` in it, so the import can only resolve to the wheel.
+  # TORANN_REQUIRE_NATIVE=1 fails the run if the extension does not load.
+  test-wheel:
+    needs: [wheels-linux]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: wheels-linux-x86_64
+          path: dist
+      - name: Test the installed wheel
+        env:
+          TORANN_REQUIRE_NATIVE: "1"
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q dist/*.whl
+          mkdir /tmp/suite
+          cp -r test examples pyproject.toml README.md /tmp/suite/
+          cd /tmp/suite
+          /tmp/venv/bin/python -m unittest discover -s test
+
   publish:
-    needs: [wheels-linux, wheels-macos, wheels-windows, sdist]
+    needs: [wheels-linux, wheels-macos, wheels-windows, sdist, test-wheel]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.2
         with:
           path: dist
           merge-multiple: true
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@v1.14.3
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}

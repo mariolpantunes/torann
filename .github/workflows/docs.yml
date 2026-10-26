@@ -24,22 +24,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
           cache: "pip"
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pdoc numpy
-          pip install .
+          # pdoc pinned in pyproject.toml's `docs` group; `.` builds the wheel,
+          # so the pages document the compiled module's docstrings too.
+          pip install . --group docs
 
       - name: Generate Docs
         run: |
@@ -75,13 +76,13 @@ jobs:
           PY
 
       - name: Setup Pages
-        uses: actions/configure-pages@v6
+        uses: actions/configure-pages@v6.0.0
 
       - name: Upload Artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: 'docs_build'
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@v5.0.1

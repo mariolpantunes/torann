@@ -1,39 +1,20 @@
-# The CI gate, moved to commit time.
+# The CI gate, moved to commit time. Mirrors `.github/workflows/main.yml`
+# step for step; if one changes, the other changes in the same commit.
 #
-# Every Python hook below is `language: system`, not a pinned mirror. A mirror
-# would fetch its own copy of ruff or basedpyright and run it against a config
-# that pre-commit chose, which is how a repository ends up with hooks that pass
-# and CI that fails. These call the tools already installed in the environment
-# and let them read `pyproject.toml`, so `git commit` and `.github/workflows`
-# are running the same check with the same settings by construction.
+# Every hook is `language: system`, not a pinned mirror: a mirror runs its own
+# copy of the tool against a config pre-commit chose, so hooks pass while CI
+# fails. The lint tools are machine installs (ruff from its SlackBuild,
+# basedpyright, vulture and coverage via `uv tool`) at exactly the versions
+# pyproject.toml's `lint` and `test` dependency groups pin for CI.
 #
-# `pass_filenames: false` on the whole-project tools is deliberate. basedpyright
-# and vulture both need to see every file to be correct -- vulture calls a
-# function dead when nothing references it, and handing it only the staged files
-# means everything they reference looks unreferenced. Type-checking one file in
-# isolation fails the same way.
+# `pass_filenames: false` on whole-project tools: basedpyright, vulture and
+# cargo need to see everything, or results are wrong (false "dead code",
+# partial builds).
 #
-# The Rust hooks trigger on Cargo.toml as well as *.rs, for the same reason
-# the Python ones trigger on pyproject.toml: a dependency or lint change in
-# the manifest can break the build or surface new clippy warnings without any
-# .rs file being touched.
+# `files` rather than `types`: the hooks are driven by pyproject.toml and
+# Cargo.toml, so a commit that changes only a manifest must still run them.
 #
-# The two Rust hooks mirror the `lint-rust` job. They match on `files` rather
-# than `types: [rust]` plus a manual stage, because cargo has to see the whole
-# crate either way -- the trigger is "something cargo builds from changed", the
-# check is always crate-wide. clippy runs `--release` to match CI: the debug and release
-# profiles do not enable the same lints, and a warning that only appears in one
-# of them is exactly the kind that reaches main.
-#
-# Note the ruff target is `torann`, not `src`: in this repository `src/` is the
-# Rust crate and the Python package sits at `torann/`. The other two repos lint
-# `src` for the same reason -- it is where their Python lives.
-#
-# `files` rather than `types: [python]` on the project-wide hooks: they are
-# driven by pyproject.toml (ruff rules, basedpyright mode, vulture paths, any
-# coverage threshold), so a commit that changes only that file must still run
-# them. Filtering on file *type* skipped them all at exactly the moment the
-# configuration governing them was being edited.
+# Layout: `src/` is the Rust crate, the Python package sits at `torann/`.
 #
 # Install with: pre-commit install
 # Run over everything once: pre-commit run --all-files
@@ -52,9 +33,41 @@ repos:
 
   - repo: local
     hooks:
+      # Build the extension *in place* into ./venv, the way CI does, before
+      # anything imports the package. The tests import the working tree
+      # (PYTHONPATH=.), and a tree without a fresh `torann/_native*.so` falls
+      # back to the pure-Python backend and skips every native test -- green,
+      # and testing none of the Rust. `maturin develop` writes the `.so` next
+      # to the sources (mixed layout) and installs the runtime dependencies plus
+      # the `test` group. Editable installs of other packages (ess, pulled in by
+      # cross-repo work) are removed first: they satisfy a requirement, so pip
+      # never replaces them, and the venv would stop being what CI is.
+      # Incremental cargo: ~2 s when no Rust changed, ~30 s when it did.
+      - id: venv-matches-ci
+        name: venv matches CI (maturin develop --release)
+        entry: >-
+          bash -c '
+          [ -d venv ] || python3 -m venv venv;
+          eds=$(venv/bin/pip list --editable --format=freeze 2>/dev/null
+          | sed "s/[=@ ].*//" | grep -vix torann || true);
+          [ -n "$eds" ] && venv/bin/pip uninstall -y -q $eds;
+          VIRTUAL_ENV=$PWD/venv maturin develop --release --quiet --group test'
+        language: system
+        files: '(\.py$|\.rs$|^pyproject\.toml$|^Cargo\.(toml|lock)$)'
+        pass_filenames: false
+
       - id: ruff
-        name: ruff (torann, test, examples)
-        entry: ruff check torann test examples
+        name: ruff (torann, test, examples, exploration)
+        entry: ruff check torann test examples exploration
+        language: system
+        files: '(\.py$|^pyproject\.toml$)'
+        pass_filenames: false
+
+      # Check-only: a hook that rewrites files mid-commit leaves the staged and
+      # working trees different. Fix with `ruff format .` in a commit of its own.
+      - id: ruff-format
+        name: ruff format --check (torann, test, examples, exploration)
+        entry: ruff format --check torann test examples exploration
         language: system
         files: '(\.py$|^pyproject\.toml$)'
         pass_filenames: false
@@ -73,22 +86,40 @@ repos:
         files: '(\.py$|^pyproject\.toml$)'
         pass_filenames: false
 
+      # venv/bin/python, not the PATH interpreter (lacks the project's
+      # dependencies). TORANN_REQUIRE_NATIVE=1 fails the run if the extension
+      # did not load, instead of letting every native test skip.
       - id: unittest
-        name: unittest
-        entry: python -m unittest discover -s test
+        name: unittest (native)
+        entry: env PYTHONPATH=. TORANN_REQUIRE_NATIVE=1 venv/bin/python -m unittest discover -s test
         language: system
-        files: '(\.py$|^pyproject\.toml$)'
+        files: '(\.py$|\.rs$|^pyproject\.toml$|^Cargo\.(toml|lock)$)'
         pass_filenames: false
 
       - id: coverage
         name: coverage (unittest, --fail-under)
-        # The same run as the `unittest` hook, measured. Kept as a separate
-        # hook so a coverage drop reads as a coverage failure rather than a
-        # test failure. The floor ratchets: raise it when the number rises,
-        # never lower it to make a commit pass.
+        # Same run as `unittest`, measured, kept separate so a coverage drop
+        # reads as a coverage failure. The floor ratchets: never lower it to
+        # make a commit pass.
         entry: >-
-          bash -c 'python -m coverage run --source=torann -m unittest
-          discover -s test -q && python -m coverage report --fail-under=90'
+          bash -c 'PYTHONPATH=. TORANN_REQUIRE_NATIVE=1 venv/bin/python -m coverage
+          run -m unittest discover -s test -q && venv/bin/python -m coverage report
+          --fail-under=93'
+        language: system
+        files: '(\.py$|\.rs$|^pyproject\.toml$|^Cargo\.(toml|lock)$)'
+        pass_filenames: false
+
+      # CI's `test-pure-python` job: the package must keep working without the
+      # compiled module (a CPU without AVX2 lands on exactly this path). The
+      # tree here has a `.so`, so the suite runs on a copy without one.
+      - id: unittest-pure-python
+        name: unittest (pure Python, no extension)
+        entry: >-
+          bash -c 'set -e; d=$(mktemp -d); trap "rm -rf $d" EXIT;
+          cp -r torann test examples pyproject.toml README.md "$d";
+          find "$d" \( -name "*.so" -o -name __pycache__ \) -prune -exec rm -rf {} +;
+          cd "$d" && PYTHONPATH=. TORANN_REQUIRE_NATIVE=0
+          "$OLDPWD"/venv/bin/python -m unittest discover -s test -q'
         language: system
         files: '(\.py$|^pyproject\.toml$)'
         pass_filenames: false
@@ -100,9 +131,26 @@ repos:
         files: '(\.rs$|^Cargo\.toml$)'
         pass_filenames: false
 
+      # clippy runs `--release` to match CI: debug and release do not enable
+      # the same lints. The instrumented build (`--features stats`) compiles
+      # different code (`mod instrument`), so it is linted too.
       - id: cargo-clippy
         name: cargo clippy (release, warnings are errors)
-        entry: cargo clippy --release -- -D warnings
+        entry: cargo clippy --release --all-targets -- -D warnings
         language: system
-        files: '(\.rs$|^Cargo\.toml$)'
+        files: '(\.rs$|^Cargo\.(toml|lock)$)'
+        pass_filenames: false
+
+      - id: cargo-clippy-stats
+        name: cargo clippy (release, --features stats)
+        entry: cargo clippy --release --all-targets --features stats -- -D warnings
+        language: system
+        files: '(\.rs$|^Cargo\.(toml|lock)$)'
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test
+        language: system
+        files: '(\.rs$|^Cargo\.(toml|lock)$)'
         pass_filenames: false
