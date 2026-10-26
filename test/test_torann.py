@@ -1054,6 +1054,9 @@ class TestNativeStats(unittest.TestCase):
                 q = np.ascontiguousarray(arena[rng.choice(len(arena), 256, replace=False)])
                 if op == "knn":
                     native.query_knn(q, 10)
+                elif block == 0:
+                    # Enough queries per block for the radius join to engage.
+                    native.query_radius(np.ascontiguousarray(arena), 0.5)
                 else:
                     native.query_radius(q, 0.5)
                 st = native.stats()
