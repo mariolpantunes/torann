@@ -521,6 +521,80 @@ class TestCornerContract(ContractCase):
                         call()
 
 
+class TestPrefilterExactness(ContractCase):
+    """N1 guard: a quantised lower-bound prefilter may drop work, never answers.
+
+    Native results on the tuned LSH path are compared bit for bit with the
+    pure-Python reference. The data is dyadic (multiples of ``2**-16``, so
+    float32 is exact and summation order cannot matter) and deliberately
+    awkward for a ``u8`` grid: a third of the coordinates sit on cell walls
+    (``j/256`` and its two grid neighbours), on the 0/1 seam, or at 1.0.
+    The point set is large enough that every heap fills, so a bound is
+    actually consulted; a bound that is even one cell too large loses a
+    neighbour here.
+    """
+
+    N = 2000
+
+    @staticmethod
+    def awkward(rng, n, d):
+        X = dyadic(rng, (n, d))
+        walls = rng.integers(0, 256, (n, d)) / 256.0 + rng.integers(-1, 2, (n, d)) * GRID
+        special = rng.choice([0.0, 1.0, GRID, 1.0 - GRID, 0.5], (n, d))
+        pick = rng.random((n, d))
+        X = np.where(pick < 0.2, walls, np.where(pick < 0.35, special, X))
+        return np.clip(X, 0.0, 1.0)
+
+    def pair(self, d, k, **kw):
+        rng = np.random.default_rng(d * 7 + k)
+        P = self.awkward(rng, self.N, d)
+        C = self.awkward(rng, 600, d)
+        Q = self.awkward(rng, 200, d)
+        runs = {}
+        for backend in BACKENDS:
+            nn = ToroidalNN(seed=3, backend=backend, brute_threshold=1, **kw).fit(P, C, k=k)
+            runs[backend] = (nn.query(k), nn.query(k, Q), nn.query_radius(0.05 * d, Q, pad=True))
+        return runs
+
+    def test_knn_matches_reference_bit_for_bit(self):
+        for d in (4, 16, 32, 33):
+            for k in (1, 40):
+                runs = self.pair(d, k)
+                ref = runs["python"]
+                for backend, got in runs.items():
+                    for which in (0, 1):
+                        with self.subTest(backend=backend, d=d, k=k, which=which):
+                            self.assert_identical(got[which], ref[which])
+
+    def test_radius_matches_reference_bit_for_bit(self):
+        for d in (16, 32, 33):
+            runs = self.pair(d, 8)
+            ref = runs["python"][2]
+            for backend, got in runs.items():
+                with self.subTest(backend=backend, d=d):
+                    self.assert_identical(got[2], ref)
+
+    def test_after_moves_across_the_seam(self):
+        d, k = 32, 8
+        rng = np.random.default_rng(21)
+        P, C = self.awkward(rng, 2000, d), self.awkward(rng, 600, d)
+        fresh = self.awkward(rng, 200, d)
+        out = {}
+        for backend in BACKENDS:
+            nn = ToroidalNN(seed=5, backend=backend, brute_threshold=1).fit(P, C, k=k)
+            res = [nn.query(k)]
+            for step in (GRID * 300, -GRID * 700, 0.5):
+                nn.update(np.mod(nn.candidates + step, 1.0))
+                res.append(nn.query(k))
+            nn.promote(fresh)
+            res.append(nn.query(k))
+            out[backend] = res
+        for backend, res in out.items():
+            for i, (got, want) in enumerate(zip(res, out["python"], strict=True)):
+                with self.subTest(backend=backend, step=i):
+                    self.assert_identical(got, want)
+
+
 @unittest.skipUnless(SLOW, "slow tier: set TORANN_SLOW=1")
 class TestSlowGeometry(ContractCase):
     """T6 hash law and T8 wrapped clusters (statistical; fixed seeds)."""
