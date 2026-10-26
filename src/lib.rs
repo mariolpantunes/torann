@@ -743,9 +743,28 @@ const BATCH_MIN: usize = 64;
 /// measured, so the cut sits at the last one that won.
 const RADIUS_JOIN_MAX_D: usize = 32;
 
-/// The radius join drops the 8-bit prefilter for the rest of a block once
-/// more than `1 / RADIUS_PREFILTER_OFF` of the pairs scored so far survive it.
-const RADIUS_PREFILTER_OFF: usize = 5;
+/// A join drops the 8-bit prefilter for the rest of a block once more than
+/// this share `(numerator, denominator)` of the pairs it judged survive it:
+/// the bound then costs more than the float32 distances it spares. The
+/// radius join looks after every table; the k-NN join after every
+/// [`PREFILTER_WINDOW`] pairs.
+const RADIUS_PREFILTER_DEAD: (usize, usize) = (1, 5);
+const KNN_PREFILTER_DEAD: (usize, usize) = (2, 5);
+
+/// Pairs the k-NN join judges between two looks at the filter's survival.
+const PREFILTER_WINDOW: usize = 1 << 17;
+
+/// Consecutive dead windows that turn the k-NN filter off. One is not enough:
+/// the first window of a block sees heaps that have just filled, so their
+/// k-th best is still loose and up to half the pairs survive on data where
+/// the filter later prunes 95% (uniform d = 32, k = 64: 16 of 880 windows).
+const PREFILTER_DEAD_RUN: usize = 3;
+
+/// `true` when more than `max.0 / max.1` of `tested` pairs `survived`.
+#[inline]
+fn filter_dead(survived: usize, tested: usize, max: (usize, usize)) -> bool {
+    survived as u128 * max.1 as u128 > tested as u128 * max.0 as u128
+}
 
 /// One radius hit packed as `bits << 32 | id`: the f32 distance bits above,
 /// the point id below. `u64` order is then exactly the `(distance, id)` order
@@ -1389,10 +1408,11 @@ impl RustLshIndex {
         heaps: &mut [(u32, i64)],
         hlen: &mut [u32],
         k: usize,
-    ) {
+    ) -> (usize, usize) {
         let d = self.d;
         let d8 = stride8(d);
         let nt = tids.len();
+        let (mut applied, mut passed) = (0usize, 0usize);
         for &(_, slot) in group {
             let si = slot as usize;
             let qrow = &q32[si * d..(si + 1) * d];
@@ -1405,9 +1425,16 @@ impl RustLshIndex {
             for i in 0..nt {
                 // Exact prefilter: a candidate whose cell bound already
                 // exceeds the k-th best cannot be offered, so it never pays
-                // for the float32 distance. Nothing is approximated.
-                if lb_cells(qcode, &tile8[i * d8..(i + 1) * d8]) > limit {
-                    continue;
+                // for the float32 distance. Nothing is approximated. An
+                // unfilled heap has no k-th best to beat, so the bound is
+                // not even computed; those pairs also stay out of the
+                // counts, which judge the filter on pairs it could prune.
+                if limit != u32::MAX {
+                    applied += 1;
+                    if lb_cells(qcode, &tile8[i * d8..(i + 1) * d8]) > limit {
+                        continue;
+                    }
+                    passed += 1;
                 }
                 let bits = l1::<D>(qrow, &tile[i * d..(i + 1) * d], d).to_bits();
                 let id = tids[i];
@@ -1419,6 +1446,7 @@ impl RustLshIndex {
             }
             hlen[si] = len as u32;
         }
+        (applied, passed)
     }
 
     /// One block of the batched, bucket-centric join.
@@ -1450,7 +1478,9 @@ impl RustLshIndex {
         // The bound costs per-block setup (codes of the queries, a code tile)
         // and a second gathered row per point, which only blocks with many
         // queries per bucket repay: below BATCH_MIN a block is 7% slower.
-        let prefilter = self.prefilter() && nq >= BATCH_MIN;
+        let mut prefilter = self.prefilter() && nq >= BATCH_MIN;
+        let (mut survived, mut tested) = (0usize, 0usize);
+        let (mut mark_s, mut mark_t, mut dead_run) = (0usize, 0usize, 0usize);
         let d8 = if prefilter { stride8(d) } else { 0 };
         ws.q8.clear();
         ws.q8.resize(nq * d8, 0);
@@ -1544,9 +1574,11 @@ impl RustLshIndex {
 
                 for chunk in gids.chunks(TILE) {
                     if prefilter {
-                        self.score_chunk_pruned(
+                        let (applied, passed) = self.score_chunk_pruned(
                             group, chunk, tile, tile8, tids, q32, q8, exq, heaps, hlen, k,
                         );
+                        tested += applied;
+                        survived += passed;
                         continue;
                     }
                     // Gather the scattered rows into one contiguous tile.
@@ -1584,6 +1616,18 @@ impl RustLshIndex {
                         _ => self.score_tile::<0>(group, tl, ti, q32, exq, heaps, hlen, k),
                     }
                 }
+                // Judge the bound on the pairs it was applied to since the last
+                // look. Pairs met while a heap is unfilled are not counted
+                // (see `score_tile_pruned`).
+                if prefilter && tested - mark_t >= PREFILTER_WINDOW {
+                    if filter_dead(survived - mark_s, tested - mark_t, KNN_PREFILTER_DEAD) {
+                        dead_run += 1;
+                        prefilter = dead_run < PREFILTER_DEAD_RUN;
+                    } else {
+                        dead_run = 0;
+                    }
+                    (mark_s, mark_t) = (survived, tested);
+                }
             }
             tally.refine(t1);
         }
@@ -1612,7 +1656,7 @@ impl RustLshIndex {
         heaps: &mut [(u32, i64)],
         hlen: &mut [u32],
         k: usize,
-    ) {
+    ) -> (usize, usize) {
         let (d, d8) = (self.d, stride8(self.d));
         for (j, &id) in chunk.iter().enumerate() {
             let (b, b8) = (id as usize * d, id as usize * d8);
@@ -1917,7 +1961,7 @@ impl RustLshIndex {
             // run 22-36% faster, 12% still 3% faster, 47% (a radius that
             // swallows a cluster) 10% slower. Once a table shows more than
             // a fifth surviving, the rest of the block scores unfiltered.
-            if prefilter && survived * RADIUS_PREFILTER_OFF > tested {
+            if prefilter && filter_dead(survived, tested, RADIUS_PREFILTER_DEAD) {
                 prefilter = false;
             }
             tally.refine(t1);
@@ -3373,6 +3417,26 @@ mod tests {
             }
         }
         assert_eq!(lb_limit(0.0f32.to_bits(), 32), 0); // a zero k-th best prunes only beyond the slack
+    }
+
+    #[test]
+    fn filter_is_dead_only_above_its_share() {
+        // exactly at the share is alive; one pair over is dead
+        assert!(!filter_dead(40, 100, KNN_PREFILTER_DEAD));
+        assert!(filter_dead(41, 100, KNN_PREFILTER_DEAD));
+        assert!(!filter_dead(20, 100, RADIUS_PREFILTER_DEAD));
+        assert!(filter_dead(21, 100, RADIUS_PREFILTER_DEAD));
+        // nothing judged, nothing dead; everything survived, dead
+        assert!(!filter_dead(0, 0, KNN_PREFILTER_DEAD));
+        assert!(filter_dead(
+            PREFILTER_WINDOW,
+            PREFILTER_WINDOW,
+            KNN_PREFILTER_DEAD
+        ));
+        // no overflow at counts a 64-bit usize product would wrap on
+        let big = usize::MAX / 2;
+        assert!(!filter_dead(big / 3, big, KNN_PREFILTER_DEAD));
+        assert!(filter_dead(big, big, KNN_PREFILTER_DEAD));
     }
 
     #[test]
