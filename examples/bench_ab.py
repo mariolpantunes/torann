@@ -34,6 +34,8 @@ The workload matrix::
                            the LSH query over d x k x m x path
     W5  lifecycle          fit / update / promote and peak RSS
     W6  python backend     the pure-NumPy reference, for changes to lsh.py
+    W7  dynamic self-join  every point queries, a fraction moves each epoch
+                           (uniform / clustered data, no ESS code)
     WQ  quality            full-length ESS runs scored with the dispersion panel
 
 Run from the repository root (``ess`` on the path)::
@@ -72,6 +74,7 @@ SWEEP_N = 2048
 SWEEP_EPOCHS = 10
 LSH_N = 16384
 RECALL_QUERIES = 128
+DYN_EPOCHS = 6
 
 
 # --------------------------------------------------------------------- #
@@ -419,6 +422,64 @@ def case_lifecycle(d, n):
     }
 
 
+def case_dynamic(d, n, frac, mode, data):
+    """W7: the dynamic self-join, with no ESS code in the loop.
+
+    Every candidate queries the whole index each epoch and a fraction `frac`
+    of the candidates then takes a small random step (`update`). Half the
+    points are static anchors, so both tiers are searched.
+    """
+    import numpy as np
+
+    from torann import ToroidalNN
+    from torann.brute import exact_knn
+
+    sys.path.insert(1, HERE)
+    import benchmark as bm
+
+    rng = np.random.default_rng(7 * d + n)
+    if data == "clustered":
+        centres = rng.random((32, d))
+        pts = np.mod(centres[rng.integers(0, 32, n)] + rng.normal(0.0, 0.02, (n, d)), 1.0)
+    else:
+        pts = rng.random((n, d))
+    half = n // 2
+    k = min(2 * d, 64)
+    nn = ToroidalNN(seed=0, brute_threshold=0)
+    nn.fit(pts[:half], pts[half:], k=k)
+    radius = bm.radius_for(d, n, k)
+
+    def search():
+        return nn.query(k=k) if mode == "knn" else nn.query_radius(radius, pad=True)
+
+    cur = pts[half:].copy()
+    q_s = u_s = 0.0
+    for _ in range(DYN_EPOCHS):
+        t = time.perf_counter()
+        out = search()
+        q_s += time.perf_counter() - t
+        moved = rng.random(cur.shape[0]) < frac
+        step = rng.normal(0.0, 0.01, cur.shape)
+        cur = np.mod(cur + step * moved[:, None], 1.0)
+        t = time.perf_counter()
+        nn.update(cur)
+        u_s += time.perf_counter() - t
+    row = {
+        "ms_per_epoch": 1e3 * (q_s + u_s) / DYN_EPOCHS,
+        "query_ms_per_epoch": 1e3 * q_s / DYN_EPOCHS,
+        "update_ms": 1e3 * u_s / DYN_EPOCHS,
+        "impl": "lsh" if nn.is_approximate else "brute",
+        "fingerprint": _fp(*[np.asarray(v) for v in out]),
+    }
+    if mode == "knn":
+        ids, _ = nn.query(k=k)
+        take = rng.choice(ids.shape[0], min(RECALL_QUERIES, ids.shape[0]), replace=False)
+        arena = nn._arena
+        want, _ = exact_knn(arena, arena[half + take], k, exclude_ids=(half + take).astype(np.int64))
+        row["recall"] = sum(len(set(ids[i].tolist()) & set(w.tolist())) for i, w in zip(take, want)) / (take.size * k)
+    return row
+
+
 def case_python(d, mode):
     """W6: the pure-NumPy reference backend."""
     import numpy as np
@@ -487,6 +548,14 @@ def cases():
     for d in (8, 32):
         for n in (20000, 100000, 1000000):
             reg[f"W5/d{d}-n{n}"] = (case_lifecycle, {"d": d, "n": n})
+    for d in (8, 16, 32, 64):
+        for data in ("uniform", "clustered"):
+            for frac in (0.5, 1.0):
+                for mode in ("knn", "radius"):
+                    reg[f"W7/d{d}-{data}-f{int(frac * 100)}-{mode}"] = (
+                        case_dynamic,
+                        {"d": d, "n": 20000, "frac": frac, "mode": mode, "data": data},
+                    )
     for d in (8, 32):
         for mode in ("knn", "radius"):
             reg[f"W6/d{d}-{mode}"] = (case_python, {"d": d, "mode": mode})
@@ -877,7 +946,7 @@ if __name__ == "__main__":
     b.add_argument("--profile")
     r = sub.add_parser("run")
     r.add_argument("--arms", nargs=2, required=True)
-    r.add_argument("--suites", nargs="+", default=["W1", "W2", "W3", "W4", "W5"])
+    r.add_argument("--suites", nargs="+", default=["W1", "W2", "W3", "W4", "W5", "W7"])
     r.add_argument("--cases", help="regex over case ids")
     r.add_argument("--pairs", type=int, default=8)
     r.add_argument("--threads", type=int, default=os.cpu_count())
