@@ -865,6 +865,94 @@ class TestPrefilterOnClusters(ContractCase):
             self.check(mixed(300), mixed(m), 8, f"mixed d={d}")
 
 
+class TestBucketArcs(ContractCase):
+    """Bucket-local bounds (S2) must not change an answer.
+
+    A lower bound taken from each bucket's own coordinate range is only as
+    sound as its handling of three shapes, all pinned here against the
+    pure-Python reference bit for bit (dyadic data): a bucket whose range
+    straddles the 0/1 seam, a bucket that spans more than half the circle in
+    some dimension (two modes), and a query outside every bucket's range.
+    Dimensions of zero width (constant within a cluster) are included. Each
+    case also runs after moves that carry whole clusters across the seam,
+    which change every bucket's range.
+    """
+
+    D = (17, 32)
+
+    @staticmethod
+    def clustered(rng, n, d, centres, widths):
+        """Cluster members: centre + dyadic offsets, per-dimension width in GRID steps (0 = constant)."""
+        lab = rng.integers(0, len(centres), n)
+        off = rng.integers(-1, 2, (n, d)) * rng.integers(0, widths + 1, (n, d))
+        return np.mod(np.round(centres[lab] / GRID) * GRID + off * GRID, 1.0)
+
+    def shapes(self, rng, d):
+        near_seam = np.where(rng.random((4, d)) < 0.5, 0.0, 1.0 - GRID * 8)  # ranges straddle 0/1
+        two_mode = np.stack([np.where(rng.random(d) < 0.5, 0.0, 0.5) for _ in range(4)])
+        wide = TestPrefilterExactness.awkward(rng, 4, d)
+        widths = np.where(rng.random(d) < 0.3, 0, rng.choice([2, 40, 300, 3000], d))
+        return np.vstack([near_seam, two_mode, wide]), widths
+
+    def runs(self, d, k, moves):
+        rng = np.random.default_rng(300 + d)
+        centres, widths = self.shapes(rng, d)
+        P = self.clustered(rng, 1500, d, centres, widths)
+        m = 70 * (os.cpu_count() or 1)  # every block holds >= 64 queries, the join's gate for the filter
+        C = self.clustered(rng, m, d, centres, widths)
+        Q = np.vstack([self.clustered(rng, m, d, centres, widths), TestPrefilterExactness.awkward(rng, m, d)])
+        out = {}
+        for backend in BACKENDS:
+            nn = ToroidalNN(seed=4, backend=backend, brute_threshold=1).fit(P, C, k=k)
+            res = [nn.query(k), nn.query(k, Q), nn.query_radius(0.02 * d, Q, pad=True)]
+            for step in moves:
+                nn.update(np.mod(nn.candidates + step, 1.0))
+                res += [nn.query(k), nn.query(k, Q)]
+            out[backend] = res
+        return out
+
+    def test_buckets_match_reference(self):
+        for d in self.D:
+            for k in (1, 24):
+                out = self.runs(d, k, ())
+                for backend, res in out.items():
+                    for i in (0, 1, 2):
+                        with self.subTest(backend=backend, d=d, k=k, which=i):
+                            self.assert_identical(res[i], out["python"][i])
+
+    def test_buckets_after_clusters_cross_the_seam(self):
+        for d in self.D:
+            out = self.runs(d, 8, (GRID * 400, -GRID * 900, 0.5, 0.5 + GRID * 77))
+            for backend, res in out.items():
+                for i, (got, want) in enumerate(zip(res, out["python"], strict=True)):
+                    with self.subTest(backend=backend, d=d, step=i):
+                        self.assert_identical(got, want)
+
+    def test_fuzz_cluster_shapes(self):
+        """Random mixes of the shapes above, many seeds, brute path as the oracle."""
+        for seed in range(12):
+            rng = np.random.default_rng(900 + seed)
+            d = int(rng.choice([17, 24, 33]))
+            centres, widths = self.shapes(rng, d)
+            P = self.clustered(rng, 700, d, centres, widths)
+            C = self.clustered(rng, 70 * (os.cpu_count() or 1), d, centres, widths)
+            allp = np.vstack([P, C])
+            want = oracle_knn(allp, C[:40], 6, exclude=np.arange(700, 740))
+            for backend in BACKENDS:
+                nn = ToroidalNN(
+                    seed=seed,
+                    backend=backend,
+                    brute_threshold=1,
+                    resolution=2,
+                    dims_per_table=1,
+                    probes=1,
+                    num_tables=1,
+                ).fit(P, C, k=6)
+                got = nn.query(6)
+                with self.subTest(seed=seed, backend=backend, d=d):
+                    self.assert_identical((got[0][:40], got[1][:40]), want)
+
+
 @unittest.skipUnless(SLOW, "slow tier: set TORANN_SLOW=1")
 class TestSlowGeometry(ContractCase):
     """T6 hash law and T8 wrapped clusters (statistical; fixed seeds)."""
