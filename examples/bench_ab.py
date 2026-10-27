@@ -36,6 +36,7 @@ The workload matrix::
     W6  python backend     the pure-NumPy reference, for changes to lsh.py
     W7  dynamic self-join  every point queries, a fraction moves each epoch
                            (uniform / clustered data, no ESS code)
+    W8  cutoff study       W7 shape over d 12..64 and cluster widths (not in the default suites)
     WQ  quality            full-length ESS runs scored with the dispersion panel
 
 Run from the repository root (``ess`` on the path)::
@@ -422,7 +423,7 @@ def case_lifecycle(d, n):
     }
 
 
-def case_dynamic(d, n, frac, mode, data):
+def case_dynamic(d, n, frac, mode, data, sigma=0.02):
     """W7: the dynamic self-join, with no ESS code in the loop.
 
     Every candidate queries the whole index each epoch and a fraction `frac`
@@ -440,7 +441,7 @@ def case_dynamic(d, n, frac, mode, data):
     rng = np.random.default_rng(7 * d + n)
     if data == "clustered":
         centres = rng.random((32, d))
-        pts = np.mod(centres[rng.integers(0, 32, n)] + rng.normal(0.0, 0.02, (n, d)), 1.0)
+        pts = np.mod(centres[rng.integers(0, 32, n)] + rng.normal(0.0, sigma, (n, d)), 1.0)
     else:
         pts = rng.random((n, d))
     half = n // 2
@@ -556,6 +557,19 @@ def cases():
                         case_dynamic,
                         {"d": d, "n": 20000, "frac": frac, "mode": mode, "data": data},
                     )
+    # W8: where does the 8-bit bound pay? The W7 shape over a finer d grid and
+    # over cluster widths from loose to tighter than one 8-bit cell (1/256 = 0.004).
+    # The radius join only exists up to d = 32 (RADIUS_JOIN_MAX_D).
+    for d in (12, 16, 20, 24, 28, 32, 48, 64):
+        for data, sigma in (("uniform", 0.0), ("clustered", 0.05), ("clustered", 0.01), ("clustered", 0.003)):
+            for mode in ("knn", "radius"):
+                if mode == "radius" and d > 32:
+                    continue
+                tag = data if data == "uniform" else f"clu{sigma:g}"
+                reg[f"W8/d{d}-{tag}-{mode}"] = (
+                    case_dynamic,
+                    {"d": d, "n": 20000, "frac": 1.0, "mode": mode, "data": data, "sigma": sigma},
+                )
     for d in (8, 32):
         for mode in ("knn", "radius"):
             reg[f"W6/d{d}-{mode}"] = (case_python, {"d": d, "mode": mode})
