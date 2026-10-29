@@ -61,13 +61,14 @@ to ``lsh.py`` rather than crashing.
 from __future__ import annotations
 
 import logging
+from math import comb, exp
 from typing import Any, ClassVar, Literal, overload
 
 import numpy as np
 
 from . import rust
 from .base import IdArray, Neighbours, csr_to_padded
-from .brute import BruteIndex, pairwise_l1, radius_scan
+from .brute import BruteIndex, exact_knn, pairwise_l1, radius_scan
 from .lsh import PythonLshIndex
 
 
@@ -181,6 +182,9 @@ class ToroidalNN:
             bit-identical results either way.
         backend: LSH implementation — ``"auto"`` (first installed of rust,
             python), or an explicit name.
+        recall: Target single-neighbour base-bucket recall in ``(0, 1)`` used to
+            size the number of tables $L$, or ``"auto"`` (default, 0.90).
+        p: Toroidal $L^p$ exponent in ``(0, 1]`` (default ``1.0``, toroidal L1).
     """
 
     # Measured brute/LSH crossover per backend: the NumPy
@@ -245,6 +249,8 @@ class ToroidalNN:
         probes: int = 4,
         query_block_size: int | None = None,
         backend: str = "auto",
+        recall: float | str = "auto",
+        p: float = 1.0,
     ):
         if resolution is not None and resolution < 2:
             raise ValueError("resolution must be >= 2")
@@ -256,7 +262,21 @@ class ToroidalNN:
             raise ValueError("dims_per_table must be >= 1")
         if probes < 0:
             raise ValueError("probes must be >= 0")
+        if recall == "auto":
+            self.recall: float | str = "auto"
+        elif (
+            not isinstance(recall, bool)
+            and isinstance(recall, (int, float))
+            and np.isfinite(recall)
+            and 0.0 < float(recall) < 1.0
+        ):
+            self.recall = float(recall)
+        else:
+            raise ValueError(f"recall must be 'auto' or a float in (0, 1), got {recall!r}")
+        if isinstance(p, bool) or not isinstance(p, (int, float)) or not np.isfinite(p) or not (0.0 < float(p) <= 1.0):
+            raise ValueError(f"p must be a float in (0, 1], got {p!r}")
 
+        self.p = float(p)
         self.brute_threshold = None if brute_threshold is None else int(brute_threshold)
         self.num_tables = num_tables
         self.resolution = resolution
@@ -320,7 +340,7 @@ class ToroidalNN:
             self._tune(radius)
             self._make_lsh()
         else:
-            self._impl = BruteIndex()
+            self._impl = BruteIndex(p=self.p)
             self._impl.build(self._arena, self._n_static)
         return self
 
@@ -463,7 +483,7 @@ class ToroidalNN:
             raise ValueError(f"radius must be >= 0 (inf allowed), got {radius}")
         Q, ex = self._resolve_queries(queries, None)
         if exact and self._use_lsh:
-            indptr, ids, dst = radius_scan(self._arena, Q, radius, ex)
+            indptr, ids, dst = radius_scan(self._arena, Q, radius, ex, p=self.p)
         else:
             indptr, ids, dst = self._impl.query_radius(np.ascontiguousarray(Q), radius, ex)
         m = Q.shape[0]
@@ -481,6 +501,9 @@ class ToroidalNN:
 
         if radius is not None:
             r_hat = float(radius)
+            delta = (
+                max(1e-9, r_hat / d) if self.p == 1.0 else max(1e-9, (r_hat / (d ** (1.0 / self.p))) * (self.p**-0.32))
+            )
         else:
             # Neighbour scale: k-th NN distance of a sample against a sample.
             q = self._arena[self._rng.choice(n, min(_TUNE_QUERIES, n), replace=False)]
@@ -505,13 +528,25 @@ class ToroidalNN:
             # where the two paths part.
             kk = min(k, ref.shape[0] - 1)
             knn = getattr(rust, "brute_knn", None)
-            if knn is not None:
-                nth = knn(ref, q, kk + 1, None)[1][:, kk]
+            if self.p == 1.0:
+                if knn is not None:
+                    nth = knn(ref, q, kk + 1, None)[1][:, kk]
+                else:
+                    D = pairwise_l1(q, ref)
+                    nth = np.partition(D, kk, axis=1)[:, kk]
             else:
-                D = pairwise_l1(q, ref)
-                nth = np.partition(D, kk, axis=1)[:, kk]
+                # 1-D grid collision depends on the marginal 1-D coordinate
+                # gap delta_j, so measure the exact toroidal L1 gap of the
+                # true k-th L^p neighbour rather than approximating from r_p.
+                idx_k = (
+                    knn(ref, q, kk + 1, None, self.p)[0][:, kk]
+                    if knn is not None
+                    else exact_knn(ref, q, kk + 1, p=self.p)[0][:, kk]
+                )
+                diff = np.abs(q - ref[idx_k])
+                nth = np.minimum(diff, 1.0 - diff).sum(axis=1)
             r_hat = float(f"{float(np.median(nth)):.12e}")
-        delta = max(1e-9, r_hat / d)  # mean per-dimension neighbour distance
+            delta = max(1e-9, r_hat / d)  # mean per-dimension neighbour distance
 
         # B: want per-dim collision 1-B*delta comfortably positive; high-d
         # concentration (large delta) pushes B to its coarsest value 2.
@@ -527,8 +562,37 @@ class ToroidalNN:
         if self.num_tables is not None:
             L = self.num_tables
         else:
-            p1 = (1.0 - min(0.95, B * delta)) ** K  # per-table collision of a k-NN
-            L = int(np.clip(np.ceil(np.log(0.10) / np.log(1 - min(0.99, p1 + 1e-9))), 4, 24)) if p1 < 1.0 else 4
+            # For p < 1, Subbotin exp(-(u/s)^p) marginals on the L^p sphere have
+            # heavier tails beyond 1/B than Exp(mu) at equal mean B*delta.
+            mu = B * delta * (1.0 if self.p == 1.0 else self.p**-0.15)
+            q0 = min(0.95, mu)
+            p0 = 1.0 - q0
+            p1 = p0**K  # base-bucket collision of a k-NN
+            # Wall-ordered multi-probe per-table collision probability
+            # (.agents/notes/math/eqs.md e6-e9): under L1-sphere marginal
+            # u ~ Exp(mu), a 1-wall crossing into the nearest-wall adjacent
+            # cell occurs with probability q1 = mu*(1 - e^(-1/mu))*(1 - e^(-1/(2*mu))),
+            # and the top m = min(probes, K) closest walls capture the
+            # Beta-Binomial fraction with X = min(1, 2*q0).
+            m = min(self.probes, K)
+            if m > 0:
+                q1 = mu * (1.0 - exp(-1.0 / mu)) * (1.0 - exp(-1.0 / (2.0 * mu)))
+                X = min(1.0, 2.0 * q0)
+                p_step = (
+                    (p0 ** (K - 1))
+                    * (q1 / X)
+                    * sum(min(r, m) * comb(K, r) * (X**r) * ((1.0 - X) ** (K - r)) for r in range(1, K + 1))
+                )
+            else:
+                p_step = 0.0
+            p_table = p1 + p_step
+            miss = 0.10 if self.recall == "auto" else 1.0 - float(self.recall)
+            l_min = 4 if self.recall == "auto" else 1
+            L = (
+                int(np.clip(np.ceil(np.log(miss) / np.log(1 - min(0.99, p_table + 1e-9))), l_min, 24))
+                if p_table < 1.0
+                else l_min
+            )
         self._B, self._K, self._L = B, K, L
 
         self._S = self._rng.integers(0, d, size=(L, K))
@@ -547,7 +611,12 @@ class ToroidalNN:
         """Instantiate the LSH implementation and build both tiers."""
         name, cls = _resolve(self.backend)
         self.backend_name = name
-        self._impl = cls(self._B, self._K, self._L, self.probes, self._S, self._U, self.query_block_size or 0)
+        if self.p == 1.0:
+            self._impl = cls(self._B, self._K, self._L, self.probes, self._S, self._U, self.query_block_size or 0)
+        else:
+            self._impl = cls(
+                self._B, self._K, self._L, self.probes, self._S, self._U, self.query_block_size or 0, self.p
+            )
         self._impl.build(np.ascontiguousarray(self._arena), self._n_static)
         logger.info("LSH implementation: %s", name)
 

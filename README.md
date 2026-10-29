@@ -109,6 +109,8 @@ distance, ties by ascending id, on every backend.
 
 Knobs (all optional — tuning fills them in): `num_tables`, `resolution`,
 `dims_per_table`, `target_bucket_size`, `probes`, `brute_threshold`,
+`recall` (`"auto"` or a target in `(0, 1)` to tune `num_tables` for
+speed/precision), `p` (toroidal $L^p$ exponent in `(0, 1]`, default `1.0`),
 `backend` (`"auto"` prefers the fastest installed of `rust`, `python`).
 
 ## How it works

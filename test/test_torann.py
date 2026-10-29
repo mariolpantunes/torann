@@ -15,7 +15,7 @@ import unittest.mock
 import numpy as np
 
 from torann import Neighbours, ToroidalNN, available_backends, rust
-from torann.brute import exact_knn, exact_radius
+from torann.brute import BruteIndex, exact_knn, exact_radius, pairwise_l1, pairwise_lp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1190,6 +1190,166 @@ class TestRadiusJoin(unittest.TestCase):
         indptr, got, _ = self._assert_same(per_query, batched, q, 0.6, ids)
         for i in range(len(arena)):
             self.assertNotIn(i, got[indptr[i] : indptr[i + 1]])
+
+
+class TestRecallParameter(unittest.TestCase):
+    """Construction-time `recall` knob ('auto' or float in (0, 1))."""
+
+    def test_auto_is_bit_identical_to_default(self):
+        rng = np.random.default_rng(7)
+        pts = rng.random((1500, 12))
+        q = rng.random((64, 12))
+        a = ToroidalNN(seed=3, brute_threshold=0).fit(pts[:1000], pts[1000:], k=10)
+        b = ToroidalNN(seed=3, brute_threshold=0, recall="auto").fit(pts[:1000], pts[1000:], k=10)
+        self.assertEqual((a._B, a._K, a._L), (b._B, b._K, b._L))
+        ia, da = a.query(k=10, queries=q)
+        ib, db = b.query(k=10, queries=q)
+        np.testing.assert_array_equal(ia, ib)
+        np.testing.assert_array_equal(da, db)
+
+    def test_recall_scales_tables_and_empirical_recall(self):
+        rng = np.random.default_rng(11)
+        pts = rng.random((2000, 16))
+        q = rng.random((100, 16))
+        k = 10
+        exact_idx, _ = exact_knn(pts, q, k)
+        prev_l = 0
+        recalls = []
+        for target in (0.30, 0.50, 0.75, 0.90, 0.98):
+            nn = ToroidalNN(seed=5, brute_threshold=0, recall=target).fit(pts, k=k)
+            self.assertGreaterEqual(nn.n_tables, prev_l)
+            prev_l = nn.n_tables
+            got_idx, _ = nn.query(k=k, queries=q)
+            hits = sum(len(np.intersect1d(got_idx[i], exact_idx[i])) for i in range(len(q)))
+            recalls.append(hits / exact_idx.size)
+        self.assertLess(
+            ToroidalNN(seed=5, brute_threshold=0, recall=0.50).fit(pts, k=k).n_tables,
+            ToroidalNN(seed=5, brute_threshold=0, recall="auto").fit(pts, k=k).n_tables,
+        )
+        self.assertLess(
+            ToroidalNN(seed=5, brute_threshold=0, recall=0.90, probes=2).fit(pts, k=k).n_tables,
+            ToroidalNN(seed=5, brute_threshold=0, recall=0.90, probes=0).fit(pts, k=k).n_tables,
+        )
+        self.assertGreater(recalls[-1], recalls[0])
+
+    def test_invalid_recall_raises(self):
+        for bad in (0.0, 1.0, -0.2, 1.5, float("nan"), float("inf"), True, False, "fast"):
+            with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError)):
+                ToroidalNN(recall=bad)  # type: ignore[arg-type]
+
+
+class TestExactLp(unittest.TestCase):
+    """Exact toroidal L^p search (`pairwise_lp`, `exact_knn`, `exact_radius`, `BruteIndex`)."""
+
+    PS = (0.25, 0.5, 0.75, 1.0, 2.0)
+
+    def naive(self, Q, P, p):
+        diff = np.abs(Q[:, None, :] - P[None, :, :])
+        delta = np.minimum(diff, 1.0 - diff)
+        return (delta**p).sum(-1) ** (1.0 / p)
+
+    def sample(self, m, n, d, seed=3):
+        rng = np.random.default_rng(seed)
+        return np.ascontiguousarray(rng.random((m, d))), np.ascontiguousarray(rng.random((n, d)))
+
+    def test_p_one_is_bit_identical_to_l1(self):
+        Q, P = self.sample(20, 60, 5)
+        np.testing.assert_array_equal(pairwise_lp(Q, P, 1.0), pairwise_l1(Q, P))
+
+    def test_pairwise_matches_naive_across_p_and_all_three_paths(self):
+        for d in (2, 5, 8, 16, 129):
+            Q, P = self.sample(12, 35, d)
+            for p in self.PS:
+                got = pairwise_lp(Q, P, p) ** (1.0 / p)
+                np.testing.assert_allclose(got, self.naive(Q, P, p), rtol=1e-12, atol=1e-12)
+
+    def test_knn_and_radius_match_naive(self):
+        Q, P = self.sample(20, 100, 9)
+        for p in self.PS:
+            ref = self.naive(Q, P, p)
+            order = np.argsort(ref, axis=1, kind="stable")[:, :7]
+            idx, dst = exact_knn(P, Q, 7, p=p)
+            np.testing.assert_array_equal(idx, order)
+            np.testing.assert_allclose(dst, np.take_along_axis(ref, order, 1), rtol=1e-11)
+            thr = float(np.median(ref[:, :5]))
+            indptr, rids, rdst = exact_radius(P, Q, thr, p=p)
+            for i in range(len(Q)):
+                row = rids[indptr[i] : indptr[i + 1]]
+                exp = np.flatnonzero(ref[i] <= thr)
+                self.assertEqual(set(row.tolist()), set(exp.tolist()))
+                np.testing.assert_allclose(rdst[indptr[i] : indptr[i + 1]], np.sort(ref[i, row]), rtol=1e-11)
+            bi = BruteIndex(p=p)
+            bi.build(P, len(P))
+            b_idx, b_dst = bi.query_knn(Q, 7)
+            np.testing.assert_array_equal(b_idx, idx)
+            np.testing.assert_allclose(b_dst, dst, rtol=1e-11, atol=1e-12)
+
+
+class TestLshLp(unittest.TestCase):
+    """Toroidal L^p (0 < p <= 1) LSH index across Python and Rust backends."""
+
+    def test_p_one_is_bit_identical_to_default(self):
+        rng = np.random.default_rng(19)
+        pts = rng.random((1200, 10))
+        q = rng.random((50, 10))
+        for b in BACKENDS:
+            a = ToroidalNN(seed=2, brute_threshold=0, backend=b).fit(pts[:800], pts[800:], k=8)
+            c = ToroidalNN(seed=2, brute_threshold=0, backend=b, p=1.0).fit(pts[:800], pts[800:], k=8)
+            ia, da = a.query(k=8, queries=q)
+            ic, dc = c.query(k=8, queries=q)
+            np.testing.assert_array_equal(ia, ic)
+            np.testing.assert_array_equal(da, dc)
+
+    def test_seam_invariance_and_backend_equivalence_for_fractional_p(self):
+        rng = np.random.default_rng(23)
+        pts = rng.random((1500, 12))
+        q = rng.random((80, 12))
+        for p in (0.25, 0.5, 0.6, 0.75):
+            ref_idx, ref_dst = exact_knn(pts, q, 8, p=p)
+            # Brute mode via ToroidalNN
+            b_nn = ToroidalNN(seed=4, brute_threshold=5000, p=p).fit(pts[:1000], pts[1000:], k=8)
+            bi, bd = b_nn.query(k=8, queries=q)
+            np.testing.assert_array_equal(bi, ref_idx)
+            np.testing.assert_allclose(bd, ref_dst, rtol=1e-11, atol=1e-12)
+            results = {}
+            for b in BACKENDS:
+                nn = ToroidalNN(seed=4, brute_threshold=0, backend=b, p=p).fit(pts[:1000], pts[1000:], k=8)
+                idx, dst = nn.query(k=8, queries=q)
+                results[b] = (nn, idx, dst)
+                hits = sum(len(np.intersect1d(idx[i], ref_idx[i])) for i in range(len(q)))
+                self.assertGreaterEqual(hits / ref_idx.size, 0.90, f"backend={b} p={p}")
+                # Check exact L^p distances of returned ids (f32 refine amplified by 1/p)
+                for i in range(10):
+                    diff = np.abs(pts[idx[i]] - q[i])
+                    d_true = ((np.minimum(diff, 1.0 - diff) ** p).sum(-1)) ** (1.0 / p)
+                    np.testing.assert_allclose(dst[i], d_true, rtol=1e-4 / p, atol=1e-5)
+                # Radius query + lifecycle (update + promote)
+                r_cut = float(np.median(ref_dst[:, 3]))
+                r_res = nn.query_radius(r_cut, queries=q[:16], pad=True)
+                self.assertEqual(r_res.ids.shape[0], 16)
+                r_exact = nn.query_radius(r_cut, queries=q[:16], exact=True, pad=True)
+                self.assertGreaterEqual(r_exact.ids.shape[1], r_res.ids.shape[1])
+                nn.update((pts[1000:] + 0.01) % 1.0)
+                nn.promote(np.random.default_rng(7).random((100, 12)))
+                idx2, _ = nn.query(k=5, queries=q[:10])
+                self.assertEqual(idx2.shape, (10, 5))
+                r_tuned = ToroidalNN(seed=4, brute_threshold=0, backend=b, p=p).fit(
+                    pts[:1000], pts[1000:], radius=r_cut
+                )
+                self.assertGreater(r_tuned.n_tables, 0)
+            if "python" in results and "rust" in results:
+                py_nn, py_i, py_d = results["python"]
+                rs_nn, rs_i, rs_d = results["rust"]
+                for k_name, v in py_nn._impl.tables().items():
+                    np.testing.assert_array_equal(v, rs_nn._impl.tables()[k_name], err_msg=k_name)
+                np.testing.assert_allclose(py_d, rs_d, rtol=1e-5, atol=1e-5)
+                agree = (py_i == rs_i).mean()
+                self.assertGreaterEqual(agree, 0.99)
+
+    def test_invalid_p_raises(self):
+        for bad in (0.0, -0.5, 1.5, 2.0, float("nan"), float("inf"), True):
+            with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError)):
+                ToroidalNN(p=bad)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

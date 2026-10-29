@@ -27,19 +27,35 @@ node sees the same copy):
 
 ## A run
 
-    # build arms and sweep them, sharded across the nodes in config.sh
-    cluster/submit.sh base p1e --spec cluster/arms.spec \
-        --suites "W1 W2 W3 W4 W5" --pairs 7 --name p1-final
+    # One-command fire-and-forget launcher for all active campaigns
+    # (builds arms once, then queues A/A, W8 cutoff, S5 SoA, N1 full, and
+    # standalone ablation/crossover jobs so you can disconnect immediately):
+    cluster/campaigns.sh --dry-run
+    cluster/campaigns.sh all
 
-    # later
-    cluster/fetch.sh p1-final --aa examples/out/cluster/ab_aa.json
+    # Or launch individual campaigns:
+    cluster/campaigns.sh aa w8-cutoff s5-soa
+    cluster/campaigns.sh experiments --no-sync --no-build
 
-`submit.sh` chains three jobs: build (optional, `--spec`), a sweep array with
-one task per shard, and a merge that runs `afterok` and **refuses any case
-whose two arms did not meet on one machine**. Results are fetched into
-`examples/out/cluster/`, deliberately separate from the laptop's own runs.
+    # Manual single A/B comparison:
+    cluster/submit.sh main s5_soa --spec cluster/arms.spec \
+        --suites "W1 W2 W3 W4 W5 W7 W8" --pairs 8 --name s5_soa
 
-Useful options: `--cases REGEX`, `--shards N`, `--no-sync`, `--wait`.
+    # Later (once jobs finish):
+    cluster/fetch.sh aa_main
+    cluster/fetch.sh s5_soa --aa examples/out/cluster/ab_aa_main.json
+
+`submit.sh` chains three jobs: build (optional, `--spec` or `--after JOB_ID`), a
+sweep array with one task per shard, and a merge that runs `afterok` and
+**refuses any case whose two arms did not meet on one machine**. Results are
+fetched into `examples/out/cluster/`, deliberately separate from the laptop's
+own runs.
+
+`experiments.sbatch` runs standalone non-A/B workloads (`recall-ablation`,
+`crossover`, `refine-rounds`, `exploration`) on a compute node using `/tmp`
+tmpfs staging and copies outputs back to `examples/out/exp_<task>_<arm>/`.
+
+Useful options: `--cases REGEX`, `--shards N`, `--after JOB_ID`, `--no-sync`, `--wait`.
 
 ## What has to hold for the numbers to mean anything
 

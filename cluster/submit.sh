@@ -4,11 +4,12 @@
 # Usage:
 #   cluster/submit.sh ARM_A ARM_B [options]
 #     --spec FILE     arms to build first (default: none, arms must exist)
-#     --suites "W1 W4"    default "W1 W2 W3 W4 W5"
+#     --suites "W1 W4"    default "W1 W2 W3 W4 W5 W7"
 #     --cases REGEX   subset of case ids
-#     --pairs N       default 7
+#     --pairs N       default 8
 #     --shards N      default: one per node in $NODES
 #     --name TAG      output tag (default: ARM_A-vs-ARM_B)
+#     --after JOB_ID  wait for existing build job instead of building --spec
 #     --no-sync       skip rsync (the tree on the cluster is already right)
 #     --wait          block until the merge job finishes, then fetch
 #
@@ -19,7 +20,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
 ARM_A="${1:?arm A}"; ARM_B="${2:?arm B}"; shift 2
-SPEC="" SUITES="W1 W2 W3 W4 W5" CASES="" PAIRS=7 SHARDS="" TAG="" SYNC=1 WAIT=0
+SPEC="" SUITES="W1 W2 W3 W4 W5 W7" CASES="" PAIRS=8 SHARDS="" TAG="" AFTER_ID="" SYNC=1 WAIT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --spec) SPEC="$2"; shift 2;;
@@ -28,6 +29,7 @@ while [ $# -gt 0 ]; do
         --pairs) PAIRS="$2"; shift 2;;
         --shards) SHARDS="$2"; shift 2;;
         --name) TAG="$2"; shift 2;;
+        --after) AFTER_ID="$2"; shift 2;;
         --no-sync) SYNC=0; shift;;
         --wait) WAIT=1; shift;;
         *) echo "unknown option: $1" >&2; exit 2;;
@@ -49,6 +51,8 @@ if [ -n "$SPEC" ]; then
         '$ROOT/torann/cluster/build_arms.sbatch'")
     echo "build job $BUILD_ID"
     DEP="--dependency=afterok:$BUILD_ID"
+elif [ -n "$AFTER_ID" ]; then
+    DEP="--dependency=afterok:$AFTER_ID"
 else
     DEP=""
 fi

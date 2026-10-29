@@ -437,6 +437,46 @@ fn dist_l1_32(a: &[f32], b: &[f32]) -> f32 {
     l1::<0>(a, b, a.len().min(b.len()))
 }
 
+/// Un-rooted toroidal L^p sum in f32 (`p != 1.0`; delegates to `dist_l1_32` at `p == 1.0`).
+#[inline]
+fn dist_lp_32(a: &[f32], b: &[f32], p: f32) -> f32 {
+    if p == 1.0 {
+        return dist_l1_32(a, b);
+    }
+    let n = a.len().min(b.len());
+    let mut s = 0.0f32;
+    if p == 0.5 {
+        for j in 0..n {
+            let t = a[j].algebraic_sub(b[j]).abs();
+            let w = 1.0f32.algebraic_sub(t);
+            let u = if t < w { t } else { w };
+            s = s.algebraic_add(u.sqrt());
+        }
+    } else if p == 0.25 {
+        for j in 0..n {
+            let t = a[j].algebraic_sub(b[j]).abs();
+            let w = 1.0f32.algebraic_sub(t);
+            let u = if t < w { t } else { w };
+            s = s.algebraic_add(u.sqrt().sqrt());
+        }
+    } else if p == 0.75 {
+        for j in 0..n {
+            let t = a[j].algebraic_sub(b[j]).abs();
+            let w = 1.0f32.algebraic_sub(t);
+            let u = if t < w { t } else { w };
+            s = s.algebraic_add((u * u.sqrt()).sqrt());
+        }
+    } else {
+        for j in 0..n {
+            let t = a[j].algebraic_sub(b[j]).abs();
+            let w = 1.0f32.algebraic_sub(t);
+            let u = if t < w { t } else { w };
+            s = s.algebraic_add(u.powf(p));
+        }
+    }
+    s
+}
+
 /// The 8-bit cell of a coordinate: `floor(256 x) mod 256`. `x` is a float32 in
 /// `[0, 1]`; `1.0` lands in cell 0, exactly where the torus puts it (1.0 and
 /// 0.0 are one point), and `256 x` is exact, so no coordinate is mis-binned.
@@ -601,11 +641,19 @@ fn heap_offer(h: &mut [(u32, i64)], len: &mut usize, bits: u32, id: i64) {
 }
 
 /// Ascending (dist, id) into one output row; pads to k with (-1, inf).
-fn heap_emit(h: &mut [(u32, i64)], len: usize, out_idx: &mut [i64], out_dst: &mut [f64]) {
+fn heap_emit(h: &mut [(u32, i64)], len: usize, out_idx: &mut [i64], out_dst: &mut [f64], p: f64) {
     h[..len].sort_unstable();
-    for (i, &(bits, id)) in h[..len].iter().enumerate() {
-        out_idx[i] = id;
-        out_dst[i] = f32::from_bits(bits) as f64;
+    if p == 1.0 {
+        for (i, &(bits, id)) in h[..len].iter().enumerate() {
+            out_idx[i] = id;
+            out_dst[i] = f32::from_bits(bits) as f64;
+        }
+    } else {
+        let inv_p = 1.0 / p;
+        for (i, &(bits, id)) in h[..len].iter().enumerate() {
+            out_idx[i] = id;
+            out_dst[i] = (f32::from_bits(bits) as f64).powf(inv_p);
+        }
     }
     for i in len..h.len() {
         out_idx[i] = -1;
@@ -637,8 +685,8 @@ impl TopK {
         heap_offer(&mut self.buf, &mut self.len, dist.to_bits(), id);
     }
 
-    fn emit(&mut self, out_idx: &mut [i64], out_dst: &mut [f64]) {
-        heap_emit(&mut self.buf, self.len, out_idx, out_dst);
+    fn emit(&mut self, out_idx: &mut [i64], out_dst: &mut [f64], p: f64) {
+        heap_emit(&mut self.buf, self.len, out_idx, out_dst, p);
     }
 }
 
@@ -860,6 +908,8 @@ struct RustLshIndex {
     probes: usize,
     /// Queries per batched block; 0 = auto (see `block_size`).
     block: usize,
+    /// Metric exponent `p` in `(0, 1]` (default `1.0`).
+    p: f64,
     s: Vec<i64>,
     u: Vec<f64>,
     pw: Vec<i64>,
@@ -910,7 +960,7 @@ impl RustLshIndex {
     /// Whether the k-NN join runs behind the 8-bit prefilter.
     #[inline]
     fn prefilter(&self) -> bool {
-        (PREFILTER_MIN_D..=PREFILTER_MAX_D).contains(&self.d)
+        self.p == 1.0 && (PREFILTER_MIN_D..=PREFILTER_MAX_D).contains(&self.d)
     }
 
     #[inline]
@@ -1262,12 +1312,13 @@ impl RustLshIndex {
     // not remove the `unsafe` at the call site, and it cannot be combined
     // with `#[inline(always)]`, so the hint would cost a real function call.
     fn refine_topk(&self, ws: &Ws, top: &mut TopK, ex: i64) {
+        let p32 = self.p as f32;
         for &id in ws.cand.iter() {
             if id == ex {
                 continue;
             }
             let p = &self.pts32[id as usize * self.d..(id as usize + 1) * self.d];
-            top.push(dist_l1_32(&ws.q32, p), id);
+            top.push(dist_lp_32(&ws.q32, p, p32), id);
         }
     }
 
@@ -1373,6 +1424,10 @@ impl RustLshIndex {
         hlen: &mut [u32],
         k: usize,
     ) {
+        if self.p != 1.0 {
+            self.score_tile_lp(group, tile, tids, q32, exq, heaps, hlen, k);
+            return;
+        }
         let d = self.d;
         let nt = tids.len();
         for &(_, slot) in group {
@@ -1402,6 +1457,41 @@ impl RustLshIndex {
                     worst = if len == k { h[0] } else { WORST };
                 }
                 i += 1;
+            }
+            hlen[si] = len as u32;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn score_tile_lp(
+        &self,
+        group: &[(i64, u32)],
+        tile: &[f32],
+        tids: &[i64],
+        q32: &[f32],
+        exq: &[i64],
+        heaps: &mut [(u32, i64)],
+        hlen: &mut [u32],
+        k: usize,
+    ) {
+        let d = self.d;
+        let nt = tids.len();
+        let p32 = self.p as f32;
+        for &(_, slot) in group {
+            let si = slot as usize;
+            let qrow = &q32[si * d..(si + 1) * d];
+            let h = &mut heaps[si * k..(si + 1) * k];
+            let mut len = hlen[si] as usize;
+            let ex = exq[si];
+            let mut worst = if len == k { h[0] } else { WORST };
+            for i in 0..nt {
+                let bits = dist_lp_32(qrow, &tile[i * d..(i + 1) * d], p32).to_bits();
+                let id = tids[i];
+                if hless((bits, id), worst) && id != ex {
+                    heap_offer(h, &mut len, bits, id);
+                    worst = if len == k { h[0] } else { WORST };
+                }
             }
             hlen[si] = len as u32;
         }
@@ -1712,6 +1802,24 @@ impl RustLshIndex {
         rhits: &mut [Vec<u64>],
         r32: f32,
     ) {
+        if self.p != 1.0 {
+            let d = self.d;
+            let nt = tids.len();
+            let p32 = self.p as f32;
+            for &(_, slot) in group {
+                let si = slot as usize;
+                let qrow = &q32[si * d..(si + 1) * d];
+                let (ex, hits) = (exq[si], &mut rhits[si]);
+                for i in 0..nt {
+                    let dd = dist_lp_32(qrow, &tile[i * d..(i + 1) * d], p32);
+                    let id = tids[i];
+                    if dd <= r32 && id != ex {
+                        push_hit(hits, pack_hit(dd.to_bits(), id));
+                    }
+                }
+            }
+            return;
+        }
         let d = self.d;
         let nt = tids.len();
         for &(_, slot) in group {
@@ -2041,14 +2149,23 @@ impl RustLshIndex {
             parts.push((hi, hd));
             (ri, rd) = (ti, td);
         }
+        let p_exp = self.p;
         blocks
             .into_par_iter()
             .zip(parts)
             .for_each(|(lists, (oi, od))| {
                 let hits = lists.iter().flatten();
-                for ((x, i), dd) in hits.zip(oi.iter_mut()).zip(od.iter_mut()) {
-                    *i = (x & u64::from(u32::MAX)) as i64;
-                    *dd = f32::from_bits((x >> 32) as u32) as f64;
+                if p_exp == 1.0 {
+                    for ((x, i), dd) in hits.zip(oi.iter_mut()).zip(od.iter_mut()) {
+                        *i = (x & u64::from(u32::MAX)) as i64;
+                        *dd = f32::from_bits((x >> 32) as u32) as f64;
+                    }
+                } else {
+                    let inv_p = 1.0 / p_exp;
+                    for ((x, i), dd) in hits.zip(oi.iter_mut()).zip(od.iter_mut()) {
+                        *i = (x & u64::from(u32::MAX)) as i64;
+                        *dd = (f32::from_bits((x >> 32) as u32) as f64).powf(inv_p);
+                    }
                 }
             });
         let mut tally = Tally::new();
@@ -2143,9 +2260,15 @@ impl RustLshIndex {
                             let tr = Clock::start();
                             self.relax_query(w, top, x, k, bws.exq[i]);
                             relax_ns += tally.relax(tr);
-                            top.emit(row_idx, row_dst);
+                            top.emit(row_idx, row_dst, self.p);
                         } else {
-                            heap_emit(&mut bws.heaps[i * k..(i + 1) * k], len, row_idx, row_dst);
+                            heap_emit(
+                                &mut bws.heaps[i * k..(i + 1) * k],
+                                len,
+                                row_idx,
+                                row_dst,
+                                self.p,
+                            );
                         }
                     }
                     // Emitting the heaps is refinement; relaxation is booked
@@ -2207,7 +2330,7 @@ impl RustLshIndex {
                         self.relax_query(&mut ws, &mut top, x, k, exq);
                         tally.relax(t2);
                     }
-                    top.emit(row_idx, row_dst);
+                    top.emit(row_idx, row_dst, self.p);
                 }
                 self.stats.add(&tally);
             });
@@ -2236,7 +2359,9 @@ impl RustLshIndex {
     ///     block: Queries per block of the batched join (k-NN and, at
     ///         `d <= 32` with 64+ queries per block, radius); `1` selects the
     ///         per-query paths, `0` sizes blocks from the worker count.
-    #[pyo3(signature = (b, k, l, probes, s, u, block=1024))]
+    ///     p: Toroidal L^p exponent in `(0, 1]` (default `1.0`).
+    #[pyo3(signature = (b, k, l, probes, s, u, block=1024, p=1.0))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         b: i64,
         k: usize,
@@ -2245,6 +2370,7 @@ impl RustLshIndex {
         s: PyReadonlyArray2<i64>,
         u: PyReadonlyArray2<f64>,
         block: usize,
+        p: f64,
     ) -> PyResult<Self> {
         if s.shape() != [l, k] || u.shape() != [l, k] {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -2261,6 +2387,7 @@ impl RustLshIndex {
             l,
             probes,
             block,
+            p,
             s: s.as_slice()?.to_vec(),
             u: u.as_slice()?.to_vec(),
             pw,
@@ -2507,7 +2634,13 @@ impl RustLshIndex {
             Some(e) => Some(e.as_slice()?.to_vec()),
             None => None,
         };
-        let r32 = radius as f32;
+        let r32 = if self.p == 1.0 || radius <= 0.0 {
+            radius as f32
+        } else {
+            (radius as f32).powf(self.p as f32)
+        };
+        let p_exp = self.p;
+        let p32 = self.p as f32;
 
         let out: RadiusOut = py.detach(|| {
             // BATCH_MIN queries *per block*, not per call as on the k-NN path.
@@ -2550,15 +2683,21 @@ impl RustLshIndex {
                                 continue;
                             }
                             let p = &self.pts32[id as usize * self.d..(id as usize + 1) * self.d];
-                            let dd = dist_l1_32(&ws.q32, p);
+                            let dd = dist_lp_32(&ws.q32, p, p32);
                             if dd <= r32 {
                                 hits.push((dd.to_bits(), id));
                             }
                         }
                         hits.sort_unstable();
                         let ids: Vec<i64> = hits.iter().map(|h| h.1).collect();
-                        let ds: Vec<f64> =
-                            hits.iter().map(|h| f32::from_bits(h.0) as f64).collect();
+                        let ds: Vec<f64> = if p_exp == 1.0 {
+                            hits.iter().map(|h| f32::from_bits(h.0) as f64).collect()
+                        } else {
+                            let inv_p = 1.0 / p_exp;
+                            hits.iter()
+                                .map(|h| (f32::from_bits(h.0) as f64).powf(inv_p))
+                                .collect()
+                        };
                         tally.refine(t1);
                         tally.cands(ws.cand.len());
                         tally.hits(raw, raw);
@@ -2794,6 +2933,44 @@ fn l1_64_dyn(a: &[f64], b: &[f64], d: usize) -> f64 {
     }
 }
 
+#[inline(always)]
+fn lp_64_dyn(a: &[f64], b: &[f64], d: usize, p: f64) -> f64 {
+    if p == 1.0 {
+        return l1_64_dyn(a, b, d);
+    }
+    let mut s = 0.0f64;
+    if p == 0.5 {
+        for j in 0..d {
+            let t = a[j].algebraic_sub(b[j]).abs();
+            let w = 1.0f64.algebraic_sub(t);
+            let u = if t < w { t } else { w };
+            s = s.algebraic_add(u.sqrt());
+        }
+    } else if p == 0.25 {
+        for j in 0..d {
+            let t = a[j].algebraic_sub(b[j]).abs();
+            let w = 1.0f64.algebraic_sub(t);
+            let u = if t < w { t } else { w };
+            s = s.algebraic_add(u.sqrt().sqrt());
+        }
+    } else if p == 0.75 {
+        for j in 0..d {
+            let t = a[j].algebraic_sub(b[j]).abs();
+            let w = 1.0f64.algebraic_sub(t);
+            let u = if t < w { t } else { w };
+            s = s.algebraic_add((u * u.sqrt()).sqrt());
+        }
+    } else {
+        for j in 0..d {
+            let t = a[j].algebraic_sub(b[j]).abs();
+            let w = 1.0f64.algebraic_sub(t);
+            let u = if t < w { t } else { w };
+            s = s.algebraic_add(u.powf(p));
+        }
+    }
+    s
+}
+
 /// The arrays a brute kernel scans, copied out of NumPy once.
 ///
 /// Both kernels release the GIL for the scan, so they cannot hold a
@@ -2882,14 +3059,20 @@ fn brute_inputs(
 ///     `(idx, dist)` of shape `(m, k)`, rows ascending by distance, padded
 ///     with `-1` / `inf` where fewer than `k` points qualify.
 #[pyfunction]
-#[pyo3(signature = (points, queries, k, exclude_ids=None))]
+#[pyo3(signature = (points, queries, k, exclude_ids=None, p=1.0))]
 fn brute_knn<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<'py, f64>,
     queries: PyReadonlyArray2<'py, f64>,
     k: usize,
     exclude_ids: Option<PyReadonlyArray1<'py, i64>>,
+    p: f64,
 ) -> PyResult<(Bound<'py, PyArray2<i64>>, Bound<'py, PyArray2<f64>>)> {
+    if !p.is_finite() || p <= 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "p must be a finite positive float",
+        ));
+    }
     let BruteInputs {
         pts,
         qs,
@@ -2914,16 +3097,24 @@ fn brute_knn<'py>(
                         if id as i64 == exq {
                             continue;
                         }
-                        let p = &pts[id * d..(id + 1) * d];
-                        let dd = l1_64_dyn(q, p, d);
+                        let pt = &pts[id * d..(id + 1) * d];
+                        let dd = lp_64_dyn(q, pt, d, p);
                         heap_offer_64(heap, &mut len, dd.to_bits(), id as i64);
                     }
                     let mut idx = vec![-1i64; k];
                     let mut dst = vec![f64::INFINITY; k];
                     heap[..len].sort_unstable();
-                    for (i, &(bits, id)) in heap[..len].iter().enumerate() {
-                        idx[i] = id;
-                        dst[i] = f64::from_bits(bits);
+                    if p == 1.0 {
+                        for (i, &(bits, id)) in heap[..len].iter().enumerate() {
+                            idx[i] = id;
+                            dst[i] = f64::from_bits(bits);
+                        }
+                    } else {
+                        let inv_p = 1.0 / p;
+                        for (i, &(bits, id)) in heap[..len].iter().enumerate() {
+                            idx[i] = id;
+                            dst[i] = f64::from_bits(bits).powf(inv_p);
+                        }
                     }
                     (idx, dst)
                 },
@@ -2983,18 +3174,24 @@ fn brute_knn<'py>(
 ///     `(indptr, ids, dists)` in CSR form: query `i` owns
 ///     `ids[indptr[i]:indptr[i + 1]]`, ascending by distance, ties by id.
 #[pyfunction]
-#[pyo3(signature = (points, queries, radius, exclude_ids=None))]
+#[pyo3(signature = (points, queries, radius, exclude_ids=None, p=1.0))]
 fn brute_radius<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<'py, f64>,
     queries: PyReadonlyArray2<'py, f64>,
     radius: f64,
     exclude_ids: Option<PyReadonlyArray1<'py, i64>>,
+    p: f64,
 ) -> PyResult<(
     Bound<'py, PyArray1<i64>>,
     Bound<'py, PyArray1<i64>>,
     Bound<'py, PyArray1<f64>>,
 )> {
+    if !p.is_finite() || p <= 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "p must be a finite positive float",
+        ));
+    }
     let BruteInputs {
         pts,
         qs,
@@ -3003,6 +3200,12 @@ fn brute_radius<'py>(
         m,
         d,
     } = brute_inputs(&points, &queries, &exclude_ids)?;
+
+    let thr = if p == 1.0 || radius <= 0.0 {
+        radius
+    } else {
+        radius.powf(p)
+    };
 
     // One `Vec` per query rather than a reusable scratch buffer: a hit list
     // is variable-length and has to outlive the closure to be assembled, so
@@ -3024,9 +3227,9 @@ fn brute_radius<'py>(
                     if id as i64 == exq {
                         continue;
                     }
-                    let p = &pts[id * d..(id + 1) * d];
-                    let dd = l1_64_dyn(q, p, d);
-                    if dd <= radius {
+                    let pt = &pts[id * d..(id + 1) * d];
+                    let dd = lp_64_dyn(q, pt, d, p);
+                    if dd <= thr {
                         hits.push((dd.to_bits(), id as i64));
                     }
                 }
@@ -3045,10 +3248,20 @@ fn brute_radius<'py>(
     }
     let mut ids = Vec::with_capacity(total as usize);
     let mut dst = Vec::with_capacity(total as usize);
-    for r in rows {
-        for (bits, id) in r {
-            ids.push(id);
-            dst.push(f64::from_bits(bits));
+    if p == 1.0 {
+        for r in rows {
+            for (bits, id) in r {
+                ids.push(id);
+                dst.push(f64::from_bits(bits));
+            }
+        }
+    } else {
+        let inv_p = 1.0 / p;
+        for r in rows {
+            for (bits, id) in r {
+                ids.push(id);
+                dst.push(f64::from_bits(bits).powf(inv_p));
+            }
         }
     }
     Ok((
@@ -3476,5 +3689,23 @@ mod tests {
         let mut v: Vec<u8> = x.iter().map(|&c| code8(c)).collect();
         v.resize(stride, 0);
         v
+    }
+
+    #[test]
+    fn lp_kernels_match_l1_at_one_and_respect_seam() {
+        let a32 = [0.02f32, 0.98, 0.50, 0.25];
+        let b32 = [0.98f32, 0.02, 0.50, 0.75];
+        assert!((dist_lp_32(&a32, &b32, 1.0) - l1::<0>(&a32, &b32, 4)).abs() < 1e-6);
+        for p in [0.25f32, 0.5, 0.75, 0.6] {
+            let expected: f32 = [0.04f32, 0.04, 0.0, 0.5].iter().map(|u| u.powf(p)).sum();
+            assert!((dist_lp_32(&a32, &b32, p) - expected).abs() < 1e-5);
+        }
+        let a64 = [0.02f64, 0.98, 0.50, 0.25];
+        let b64 = [0.98f64, 0.02, 0.50, 0.75];
+        assert!((lp_64_dyn(&a64, &b64, 4, 1.0) - l1_64::<0>(&a64, &b64, 4)).abs() < 1e-12);
+        for p in [0.25f64, 0.5, 0.75, 0.6, 2.0] {
+            let expected: f64 = [0.04f64, 0.04, 0.0, 0.5].iter().map(|u| u.powf(p)).sum();
+            assert!((lp_64_dyn(&a64, &b64, 4, p) - expected).abs() < 1e-12);
+        }
     }
 }

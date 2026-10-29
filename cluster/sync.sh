@@ -22,8 +22,8 @@ sync_one() {
     echo "== $name -> $REMOTE:$DEST_ROOT/$name"
     rsync -az --delete --info=stats1 \
         --exclude 'target/' --exclude 'examples/out/' --exclude 'exploration/out/' \
-        --exclude '.git/worktrees/' \
-        --exclude '.venv/' --exclude '__pycache__/' --exclude '*.so' \
+        --exclude '.git/worktrees/' --exclude '.arms/' \
+        --exclude 'venv/' --exclude '.venv/' --exclude '__pycache__/' --exclude '*.so' \
         --exclude 'dist/' --exclude 'build/' --exclude '*.egg-info/' \
         "$src/" "$REMOTE:$DEST_ROOT/$name/"
 }

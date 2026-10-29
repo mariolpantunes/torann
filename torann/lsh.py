@@ -31,7 +31,7 @@ class PythonLshIndex(BaseIndex):
         block: Queries per vectorised block; 0 selects the default 1024.
     """
 
-    def __init__(self, B, K, L, probes, S, U, block=1024):
+    def __init__(self, B, K, L, probes, S, U, block=1024, p: float = 1.0):
         self.B = int(B)
         self.K = int(K)
         self.L = int(L)
@@ -39,6 +39,7 @@ class PythonLshIndex(BaseIndex):
         self.S = np.ascontiguousarray(S, dtype=np.int64)
         self.U = np.ascontiguousarray(U, dtype=np.float64)
         self.block = int(block) or 1024
+        self.p = float(p)
         self._pw = self.B ** np.arange(self.K, dtype=np.int64)
         self.n_points = 0
         self.n_static = 0
@@ -152,12 +153,14 @@ class PythonLshIndex(BaseIndex):
                 keep = cands != exclude_ids[s:e][qids]
                 qids, cands = qids[keep], cands[keep]
             dist = self._refine(Qb, qids, cands)
-            keep = dist <= radius
+            thr = radius if (self.p == 1.0 or radius <= 0.0) else float(np.float32(radius) ** np.float32(self.p))
+            keep = dist <= thr
             qids, cands, dist = qids[keep], cands[keep], dist[keep]
             order = np.lexsort((cands, dist, qids))  # (query, distance, id): ties by id
             counts.append(np.bincount(qids, minlength=Qb.shape[0]))
             all_ids.append(cands[order])
-            all_dst.append(dist[order].astype(np.float64))
+            d64 = dist[order].astype(np.float64)
+            all_dst.append(d64 if self.p == 1.0 else d64 ** (1.0 / self.p))
         indptr = np.zeros(m + 1, dtype=np.int64)
         np.cumsum(np.concatenate(counts), out=indptr[1:])
         return indptr, np.concatenate(all_ids), np.concatenate(all_dst)
@@ -241,7 +244,8 @@ class PythonLshIndex(BaseIndex):
         rank = np.arange(sq.size) - starts[sq]
         keep = rank < k
         idx_view[sq[keep], rank[keep]] = sc[keep]
-        dst_view[sq[keep], rank[keep]] = sd[keep]
+        sel = sd[keep].astype(np.float64)
+        dst_view[sq[keep], rank[keep]] = sel if self.p == 1.0 else sel ** (1.0 / self.p)
 
     def _relaxed_query(self, Q, k, ex):
         """k-NN for queries whose probed buckets under-filled, without brute
@@ -356,9 +360,21 @@ class PythonLshIndex(BaseIndex):
         return pairs // n, pairs % n
 
     def _refine(self, Qb, qids, cands):
-        """Toroidal L1 in float32 for every gathered (query, candidate)
-        pair — the distance the contract mandates for refinement."""
+        """Un-rooted toroidal L^p sum in float32 for every gathered (query,
+        candidate) pair — identical to L1 when p == 1.0."""
         q32 = Qb.astype(np.float32)
         delta = np.abs(q32[qids] - self._pts32[cands])
         np.minimum(delta, np.float32(1.0) - delta, out=delta)
+        if self.p != 1.0:
+            if self.p == 0.5:
+                np.sqrt(delta, out=delta)
+            elif self.p == 0.25:
+                np.sqrt(delta, out=delta)
+                np.sqrt(delta, out=delta)
+            elif self.p == 0.75:
+                s = np.sqrt(delta)
+                np.multiply(delta, s, out=delta)
+                np.sqrt(delta, out=delta)
+            else:
+                np.power(delta, np.float32(self.p), out=delta)
         return delta.sum(axis=1)

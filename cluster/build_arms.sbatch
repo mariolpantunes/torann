@@ -30,8 +30,17 @@ echo "node $(hostname) | $(rustc --version) | $(python -V)"
 
 while read -r name rev flags; do
     case "$name" in ''|\#*) continue;; esac
-    echo "== arm $name ($rev) $flags"
-    eval python examples/bench_ab.py build "$name" --rev "$rev" $flags
+    env_args=()
+    while [[ "${flags:-}" =~ ^([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+)[[:space:]]*(.*)$ ]]; do
+        env_args+=("${BASH_REMATCH[1]}")
+        flags="${BASH_REMATCH[2]}"
+    done
+    rev_args=()
+    if [[ "$rev" != "-" ]]; then
+        rev_args=(--rev "$rev")
+    fi
+    echo "== arm $name ($rev) env=[${env_args[*]:-}] flags=[${flags:-}]"
+    eval env "${env_args[@]}" python examples/bench_ab.py build "$name" "${rev_args[@]}" ${flags:-}
 done < "$SPEC"
 
 echo "== arms in $TORANN_ARMS"

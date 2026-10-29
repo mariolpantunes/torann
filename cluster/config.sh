@@ -33,8 +33,8 @@ TIME_SWEEP="${TIME_SWEEP:-12:00:00}"
 TIME_BUILD="${TIME_BUILD:-2:00:00}"
 
 # The toolchain the arms are built with. Pinned so a rebuilt arm is the same
-# compiler as the one it is compared against; the kernel needs 1.98+.
-RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-1.98.0}"
+# compiler as the one it is compared against; matches pyproject.toml / CI.
+RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-1.99.1}"
 
 # Threads per run. Default: the node's *physical* cores, not its threads --
 # two hyperthreads of one core share the execution units this kernel is

@@ -14,7 +14,7 @@ import numpy as np
 from . import rust
 from .base import BaseIndex
 
-__all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1", "radius_scan"]
+__all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1", "pairwise_lp", "radius_scan"]
 
 # Element budget for the temporary (queries x points) distance blocks.
 #
@@ -108,6 +108,76 @@ def pairwise_l1(Q: np.ndarray, pts: np.ndarray) -> np.ndarray:
     return acc
 
 
+def _validate_p(p: float) -> float:
+    if isinstance(p, bool) or not isinstance(p, (int, float)) or not np.isfinite(p) or p <= 0.0:
+        raise ValueError(f"p must be a finite positive float, got {p!r}")
+    return float(p)
+
+
+def _root(x: np.ndarray, p: float) -> np.ndarray:
+    if p == 1.0:
+        return x
+    if p == 0.5:
+        return np.square(x)
+    return np.power(x, 1.0 / p)
+
+
+def pairwise_lp(Q: np.ndarray, pts: np.ndarray, p: float = 1.0) -> np.ndarray:
+    r"""Un-rooted toroidal-``L^p`` sum matrix $\sum_{i=1}^d \delta_i^p$.
+
+    Rank-equivalent to the ``L^p`` distance (for all $p > 0$), so callers
+    can select top-$k$ or threshold against $r^p$ before taking the $1/p$
+    root only on the surviving entries. Delegates directly to
+    :func:`pairwise_l1` when ``p == 1.0`` so the default path is bit-identical.
+    """
+    p = _validate_p(p)
+    if p == 1.0:
+        return pairwise_l1(Q, pts)
+    m, d = Q.shape
+    n = pts.shape[0]
+    if d > _PAIRWISE_MAX:
+        diff = np.abs(Q[:, None, :] - pts[None, :, :])
+        np.minimum(diff, 1.0 - diff, out=diff)
+        np.power(diff, p, out=diff)
+        return diff.sum(-1)
+
+    wall = np.empty((m, n))
+
+    def fold(j, out):
+        np.subtract(Q[:, j, None], pts[None, :, j], out=out)
+        np.abs(out, out=out)
+        np.subtract(1.0, out, out=wall)
+        np.minimum(out, wall, out=out)
+        if p == 0.5:
+            np.sqrt(out, out=out)
+        elif p == 0.25:
+            np.sqrt(out, out=out)
+            np.sqrt(out, out=out)
+        else:
+            np.power(out, p, out=out)
+        return out
+
+    if d < 8:
+        acc = fold(0, np.empty((m, n)))
+        tmp = np.empty((m, n))
+        for j in range(1, d):
+            acc += fold(j, tmp)
+        return acc
+
+    lanes = [fold(j, np.empty((m, n))) for j in range(8)]
+    tmp = np.empty((m, n))
+    j = 8
+    while j + 8 <= d:
+        for lane in range(8):
+            lanes[lane] += fold(j + lane, tmp)
+        j += 8
+    acc = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3])) + ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]))
+    while j < d:
+        acc += fold(j, tmp)
+        j += 1
+    return acc
+
+
 def _blocks(m: int, n: int, d: int):
     step = max(1, _BUDGET // max(1, n * d))
     for s in range(0, m, step):
@@ -123,8 +193,8 @@ def _exclude(D, exclude_ids, s, e):
     D[rows, exclude_ids[s:e][rows]] = np.inf
 
 
-def exact_knn(pts, Q, k, exclude_ids=None):
-    """Exact toroidal-L1 k-NN of ``Q`` against ``pts``.
+def exact_knn(pts, Q, k, exclude_ids=None, p: float = 1.0):
+    """Exact toroidal-``L^p`` k-NN of ``Q`` against ``pts``.
 
     Args:
         pts: ``(n, d)`` float64 points in ``[0, 1)``.
@@ -132,18 +202,20 @@ def exact_knn(pts, Q, k, exclude_ids=None):
         k: Neighbours per query.
         exclude_ids: Optional int64 ``(m,)`` — one point id excluded per
             query (the self-join).
+        p: Metric exponent ``> 0`` (default ``1.0``, toroidal L1).
 
     Returns:
         ``(idx, dist)`` of shape ``(m, k)``: int64 ids and float64
         distances, rows sorted ascending, padded with ``-1`` / ``inf``
         where fewer than ``k`` points exist.
     """
+    p = _validate_p(p)
     m, (n, d) = Q.shape[0], pts.shape
     idx = np.full((m, k), -1, dtype=np.int64)
     dst = np.full((m, k), np.inf)
     kk = min(k, n)
     for s, e in _blocks(m, n, d):
-        D = pairwise_l1(Q[s:e], pts)
+        D = pairwise_lp(Q[s:e], pts, p)
         _exclude(D, exclude_ids, s, e)
         if kk == 1:
             # ESS asks for exactly this in `_smart_init` (the farthest of a
@@ -171,12 +243,12 @@ def exact_knn(pts, Q, k, exclude_ids=None):
             pd = np.take_along_axis(pd, order, axis=1)
         finite = np.isfinite(pd)
         idx[s:e, :kk] = np.where(finite, part, -1)
-        dst[s:e, :kk] = np.where(finite, pd, np.inf)
+        dst[s:e, :kk] = np.where(finite, _root(pd, p), np.inf)
     return idx, dst
 
 
-def exact_radius(pts, Q, radius, exclude_ids=None):
-    """Exact toroidal-L1 range query.
+def exact_radius(pts, Q, radius, exclude_ids=None, p: float = 1.0):
+    """Exact toroidal-``L^p`` range query.
 
     Args:
         pts: ``(n, d)`` float64 points in ``[0, 1)``.
@@ -184,22 +256,25 @@ def exact_radius(pts, Q, radius, exclude_ids=None):
         radius: Inclusive distance threshold.
         exclude_ids: Optional int64 ``(m,)`` — one point id excluded per
             query.
+        p: Metric exponent ``> 0`` (default ``1.0``, toroidal L1).
 
     Returns:
         CSR triple ``(indptr, ids, dists)``: row ``i`` is
         ``ids[indptr[i]:indptr[i+1]]``, sorted by distance.
     """
+    p = _validate_p(p)
     m, (n, d) = Q.shape[0], pts.shape
+    thr = radius if (p == 1.0 or radius <= 0.0) else radius**p
     counts, all_ids, all_dst = [], [], []
     for s, e in _blocks(m, n, d):
-        D = pairwise_l1(Q[s:e], pts)
+        D = pairwise_lp(Q[s:e], pts, p)
         _exclude(D, exclude_ids, s, e)
         for row in D:
-            ids = np.flatnonzero(row <= radius)
+            ids = np.flatnonzero(row <= thr)
             order = np.argsort(row[ids], kind="stable")
             counts.append(ids.size)
             all_ids.append(ids[order])
-            all_dst.append(row[ids[order]])
+            all_dst.append(_root(row[ids[order]], p))
     indptr = np.zeros(m + 1, dtype=np.int64)
     np.cumsum(np.asarray(counts, dtype=np.int64), out=indptr[1:])
     return (
@@ -209,7 +284,7 @@ def exact_radius(pts, Q, radius, exclude_ids=None):
     )
 
 
-def radius_scan(pts, Q, radius, exclude_ids=None):
+def radius_scan(pts, Q, radius, exclude_ids=None, p: float = 1.0):
     """The *serving* exact range scan: compiled when the wheel provides it.
 
     The same split `BruteIndex.query_knn` makes — `exact_radius` above stays
@@ -229,17 +304,21 @@ def radius_scan(pts, Q, radius, exclude_ids=None):
     Args, Returns:
         As :func:`exact_radius`.
     """
+    p = _validate_p(p)
     if rust.brute_radius is None:
-        return exact_radius(pts, Q, radius, exclude_ids)
+        return exact_radius(pts, Q, radius, exclude_ids, p=p)
     q = np.ascontiguousarray(Q, dtype=np.float64)
     ex = None if exclude_ids is None else np.ascontiguousarray(exclude_ids, dtype=np.int64)
-    return rust.brute_radius(pts, q, float(radius), ex)
+    if p == 1.0:
+        return rust.brute_radius(pts, q, float(radius), ex)
+    return rust.brute_radius(pts, q, float(radius), ex, p)
 
 
 class BruteIndex(BaseIndex):
     """The exact implementation of the index contract."""
 
-    def __init__(self):
+    def __init__(self, p: float = 1.0):
+        self.p = _validate_p(p)
         self._pts = np.empty((0, 0))
         self.n_points = 0
         self.n_static = 0
@@ -279,11 +358,13 @@ class BruteIndex(BaseIndex):
         caller never enters.
         """
         if rust.brute_knn is None:
-            return exact_knn(self._pts, queries, k, exclude_ids)
+            return exact_knn(self._pts, queries, k, exclude_ids, p=self.p)
         q = np.ascontiguousarray(queries, dtype=np.float64)
         ex = None if exclude_ids is None else np.ascontiguousarray(exclude_ids, dtype=np.int64)
-        return rust.brute_knn(self._pts, q, int(k), ex)
+        if self.p == 1.0:
+            return rust.brute_knn(self._pts, q, int(k), ex)
+        return rust.brute_knn(self._pts, q, int(k), ex, self.p)
 
     def query_radius(self, queries, radius, exclude_ids=None):
         """Exact range query — see :func:`radius_scan`."""
-        return radius_scan(self._pts, queries, radius, exclude_ids)
+        return radius_scan(self._pts, queries, radius, exclude_ids, p=self.p)

@@ -28,6 +28,7 @@ if [ ! -x "\$CARGO_HOME/bin/cargo" ]; then
         | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
 else
     "\$RUSTUP_HOME/../cargo/bin/rustup" toolchain install "$RUST_TOOLCHAIN" 2>/dev/null || true
+    "\$RUSTUP_HOME/../cargo/bin/rustup" default "$RUST_TOOLCHAIN" 2>/dev/null || true
 fi
 export PATH="\$CARGO_HOME/bin:\$PATH"
 rustc --version
