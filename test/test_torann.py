@@ -1238,6 +1238,94 @@ class TestRecallParameter(unittest.TestCase):
                 ToroidalNN(recall=bad)  # type: ignore[arg-type]
 
 
+class TestTuneContract(unittest.TestCase):
+    """What `_tune` promises whatever the model behind it."""
+
+    def test_native_and_python_tune_alike(self):
+        if rust.brute_knn is None:
+            self.skipTest("no compiled kernel")
+        for d, n, p in ((4, 2048, 1.0), (8, 4096, 1.0), (16, 4096, 0.5), (32, 2048, 0.25), (64, 9000, 1.0)):
+            for seed in range(4):
+                pts = np.random.default_rng(seed).random((n, d))
+                with self.subTest(d=d, n=n, p=p, seed=seed):
+                    a = ToroidalNN(seed=seed, brute_threshold=0, p=p, backend="python").fit(pts, k=2 * d)
+                    b = ToroidalNN(seed=seed, brute_threshold=0, p=p, backend="rust").fit(pts, k=2 * d)
+                    self.assertEqual((a._B, a._K, a._L), (b._B, b._K, b._L))
+
+    def test_more_probes_never_need_more_tables(self):
+        pts = np.random.default_rng(2).random((4096, 16))
+        tables = [
+            ToroidalNN(seed=1, brute_threshold=0, probes=m, recall=0.8).fit(pts, k=16)._L for m in (0, 1, 2, 4, 8)
+        ]
+        self.assertEqual(tables, sorted(tables, reverse=True))
+
+    def test_extreme_hints_tune_to_a_usable_index(self):
+        rng = np.random.default_rng(3)
+        pts = rng.random((512, 8))
+        cases = [{"radius": r} for r in (0.0, 1e-300, 1e3, 1e308, float("inf"))]
+        cases += [{"k": 1}, {"k": 511}, {"k": 4096}]
+        for p in (1.0, 0.5, 0.25):
+            for hint in cases:
+                with self.subTest(p=p, hint=hint):
+                    nn = ToroidalNN(seed=4, brute_threshold=0, p=p, backend="python").fit(pts, **hint)
+                    self.assertTrue(2 <= nn._B <= 8)
+                    self.assertGreaterEqual(nn._K, 1)
+                    self.assertGreaterEqual(nn._L, 1)
+                    self.assertEqual(nn.query(k=4, queries=pts[:8])[0].shape, (8, 4))
+
+    def test_degenerate_data_tunes_to_a_usable_index(self):
+        rng = np.random.default_rng(5)
+        sets = {
+            "duplicates": np.tile(rng.random((1, 8)), (512, 1)),
+            "two sites": rng.random((2, 8))[rng.integers(0, 2, 512)],
+            "one dimension": rng.random((512, 1)),
+            "more hash digits than dimensions": rng.random((8192, 2)),
+        }
+        for p in (1.0, 0.5):
+            for name, pts in sets.items():
+                with self.subTest(name=name, p=p):
+                    nn = ToroidalNN(seed=6, brute_threshold=0, p=p, backend="python").fit(pts, k=4)
+                    self.assertGreaterEqual(nn._L, 1)
+                    self.assertEqual(nn.query(k=4, queries=pts[:8])[0].shape, (8, 4))
+
+    def test_default_recall_does_not_fall(self):
+        """Floors are the recall the defaults gave before the wall model, less 0.02."""
+        floors = {
+            ("knn", 8, 1.0): 0.93,
+            ("knn", 8, 0.5): 0.94,
+            ("knn", 16, 1.0): 0.92,
+            ("knn", 16, 0.5): 0.97,
+            ("knn", 32, 1.0): 0.94,
+            ("knn", 32, 0.5): 0.97,
+            ("radius", 8, 1.0): 0.94,
+            ("radius", 8, 0.5): 0.95,
+            ("radius", 16, 1.0): 0.91,
+            ("radius", 16, 0.5): 0.96,
+            ("radius", 32, 1.0): 0.95,
+            ("radius", 32, 0.5): 0.98,
+        }
+        for (mode, d, p), floor in floors.items():
+            rng = np.random.default_rng(d)
+            pts = rng.random((4096, d))
+            ids = rng.choice(4096, 300, replace=False)
+            k = 2 * d
+            want, dst = exact_knn(pts, pts[ids], k, exclude_ids=ids, p=p)
+            radius = float(np.median(dst[:, -1]))
+            with self.subTest(mode=mode, d=d, p=p):
+                nn = ToroidalNN(seed=d, brute_threshold=0, p=p, backend="python")
+                if mode == "knn":
+                    got, _ = nn.fit(pts, k=k).query(k=k, queries=pts[ids], exclude_ids=ids)
+                    hits = sum(len(set(a) & set(b)) for a, b in zip(got.tolist(), want.tolist(), strict=True))
+                    total = want.size
+                else:
+                    nn.fit(pts, k=k, radius=radius)
+                    got = nn.query_radius(radius, queries=pts[ids])
+                    ref = nn.query_radius(radius, queries=pts[ids], exact=True)
+                    hits = sum(len(set(a.ids.tolist()) & set(b.ids.tolist())) for a, b in zip(got, ref, strict=True))
+                    total = sum(b.ids.size for b in ref)
+                self.assertGreaterEqual(hits / total, floor)
+
+
 class TestExactLp(unittest.TestCase):
     """Exact toroidal L^p search (`pairwise_lp`, `exact_knn`, `exact_radius`, `BruteIndex`)."""
 
