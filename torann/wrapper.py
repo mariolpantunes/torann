@@ -67,7 +67,7 @@ from __future__ import annotations
 import logging
 from math import comb
 from time import perf_counter
-from typing import Any, ClassVar, Literal, overload
+from typing import Any, Literal, overload
 
 import numpy as np
 
@@ -108,6 +108,16 @@ _MAX_TABLES = 24
 _DEFAULT_PROBES = 4
 _DEEP_PROBES = 8  # worth its lookups only where the table cap would bind
 _WALL_GRID = 64
+_BRUTE_PYTHON = 12288
+# Rust brute/LSH crossover: (largest d, n up to which exact search serves), from
+# the smallest n where LSH is faster with recall >= 0.95 at every larger n tried
+# (examples/crossover.py on an EPYC 9354, up to n = 64000). Keyed by (mode, p < 1).
+_CROSSOVER: dict[tuple[str, bool], tuple[tuple[float, int], ...]] = {
+    ("knn", False): ((4, 512), (32, 2048), (64, 8192), (float("inf"), 65536)),
+    ("knn", True): ((16, 512), (64, 1024), (float("inf"), 8192)),
+    ("radius", False): ((4, 1024), (16, 2048), (64, 512), (float("inf"), 65536)),
+    ("radius", True): ((float("inf"), 512),),
+}
 
 _AUTO_ORDER = ("rust", "python")
 
@@ -251,8 +261,8 @@ class ToroidalNN:
     Args:
         seed: Seed for hash functions and tuning samples.
         brute_threshold: Exact search while total points <= this. ``None``
-            (default) picks the measured brute/LSH crossover of the backend:
-            4096 for python, 512 for rust.
+            (default) picks the measured brute/LSH crossover: 12288 for
+            python, by dimension, mode and $p$ for rust (512 to 65536).
         num_tables: Tables $L$. ``None`` = tuned (default 16 without hints).
         resolution: Cells per dimension $B \ge 2$. ``None`` = tuned
             (default 3).
@@ -290,21 +300,6 @@ class ToroidalNN:
         brute_threshold_radius: Mode-specific override for :meth:`query_radius`
             exact/LSH crossover (takes precedence over ``brute_threshold``).
     """
-
-    # Measured brute/LSH crossover per backend and query mode:
-    # - For k-NN (p = 1.0, k = 2*d), the Rust heap brute scan stays competitive
-    #   at n <= 3072 on moderate/high dimensions, while LSH wins from n = 4096
-    #   across all dimensions d in [2, 200] (1.1x-5.0x).
-    # - For range search (`query_radius`), the batched LSH radius join + exact
-    #   u8 SIMD prefilter wins across all dimensions from n = 2048 (1.2x-3.0x
-    #   at n = 2048, 1.8x-4.2x at n = 3072), while brute ties/wins at n <= 1024.
-    # - For fractional toroidal L^p (p < 1.0), exact brute pays fractional powers
-    #   or sqrt on every coordinate pair and LSH wins across all dimensions from
-    #   n > 1024 for both k-NN and radius queries.
-    _BRUTE_DEFAULTS_KNN: ClassVar[dict[str, int]] = {"python": 12288, "rust": 3072}
-    _BRUTE_DEFAULTS_RADIUS: ClassVar[dict[str, int]] = {"python": 12288, "rust": 1024}
-    _BRUTE_DEFAULTS_LP: ClassVar[dict[str, int]] = {"python": 12288, "rust": 1024}
-    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = _BRUTE_DEFAULTS_KNN
 
     def __init__(
         self,
@@ -691,14 +686,10 @@ class ToroidalNN:
             return self.brute_threshold_radius
         if self.brute_threshold is not None:
             return self.brute_threshold
-        name, _ = _resolve(self.backend)
-        if self.p < 1.0:
-            return self._BRUTE_DEFAULTS_LP.get(name, 1024)
-        if mode == "radius":
-            return self._BRUTE_DEFAULTS_RADIUS.get(name, 1024)
-        if mode == "knn":
-            return self._BRUTE_DEFAULTS_KNN.get(name, 3072)
-        return self._BRUTE_DEFAULTS.get(name, 3072)
+        if _resolve(self.backend)[0] == "python":
+            return _BRUTE_PYTHON
+        rows = _CROSSOVER[(mode or "knn", self.p < 1.0)]
+        return next(n for top, n in rows if self._d <= top)
 
     def _build_lsh(self, radius: float | None) -> None:
         """Tune and instantiate the LSH backend from the current arena."""

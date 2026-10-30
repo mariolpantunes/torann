@@ -2,7 +2,7 @@
 
 Below the wrapper's ``brute_threshold`` this *is* the index: exact search
 wins outright at small n, measured per backend (see
-``ToroidalNN._BRUTE_DEFAULTS``). It is also the ground truth the LSH
+``ToroidalNN._threshold``). It is also the ground truth the LSH
 implementations are validated against, and serves
 ``query_radius(exact=True)`` at any size via the module functions.
 """

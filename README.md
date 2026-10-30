@@ -108,9 +108,10 @@ Inputs may be any finite coordinates (reduced mod 1; NaN or inf raises
 distance, ties by ascending id, on every backend.
 
 Knobs (all optional — tuning fills them in): `num_tables`, `resolution`,
-`dims_per_table`, `target_bucket_size`, `probes`, `brute_threshold` (or
+`dims_per_table`, `target_bucket_size`, `probes` (`"auto"` chooses with the
+hash depth and tables), `brute_threshold` (or
 mode-specific `brute_threshold_knn`, `brute_threshold_radius`; calibrate on a
-workload with `tune_thresholds`), `recall` (`"auto"` or a target in `(0, 1)`
+workload with `tune_thresholds`; the defaults depend on `d`, the mode and `p`), `recall` (`"auto"` or a target in `(0, 1)`
 for finding the k-th neighbour, which sizes `num_tables`; `expected_recall`
 reports what the tuned index predicts), `p` (toroidal $L^p$ exponent in
 `(0, 1]`, default `1.0`), `backend` (`"auto"` prefers the fastest installed

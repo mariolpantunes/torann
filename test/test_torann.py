@@ -166,7 +166,7 @@ class TestLSHMode(unittest.TestCase):
 
     def make(self, **kw):
         # These classes test LSH behaviour, so they select LSH rather than
-        # inheriting whichever crossover `_BRUTE_DEFAULTS` currently holds.
+        # inheriting whichever crossover the defaults currently hold.
         # They used to rely on 7000 points clearing a threshold of 512; when
         # the compiled brute kernel moved that threshold to 8192 they
         # silently became brute-mode tests and ten of them failed.
@@ -273,7 +273,7 @@ class TestLifecycle(unittest.TestCase):
 
     def make(self, **kw):
         # These classes test LSH behaviour, so they select LSH rather than
-        # inheriting whichever crossover `_BRUTE_DEFAULTS` currently holds.
+        # inheriting whichever crossover the defaults currently hold.
         # They used to rely on 7000 points clearing a threshold of 512; when
         # the compiled brute kernel moved that threshold to 8192 they
         # silently became brute-mode tests and ten of them failed.
@@ -381,7 +381,7 @@ class TestRangeQueries(unittest.TestCase):
 
     def make(self, **kw):
         # These classes test LSH behaviour, so they select LSH rather than
-        # inheriting whichever crossover `_BRUTE_DEFAULTS` currently holds.
+        # inheriting whichever crossover the defaults currently hold.
         # They used to rely on 7000 points clearing a threshold of 512; when
         # the compiled brute kernel moved that threshold to 8192 they
         # silently became brute-mode tests and ten of them failed.
@@ -1553,17 +1553,25 @@ class TestCrossoverThresholds(unittest.TestCase):
     """Mode-specific crossover thresholds, crossover-band routing, and `tune_thresholds` (S3)."""
 
     def test_defaults_and_override_precedence(self):
-        for b in BACKENDS:
-            nn = ToroidalNN(backend=b)
-            exp_knn = 3072 if b == "rust" else 12288
-            exp_rad = 1024 if b == "rust" else 12288
-            self.assertEqual(nn._threshold("knn"), exp_knn)
-            self.assertEqual(nn._threshold("radius"), exp_rad)
-            self.assertEqual(nn._threshold(), exp_knn)
-            lp = ToroidalNN(backend=b, p=0.5)
-            self.assertEqual(lp._threshold("knn"), exp_rad)
-            self.assertEqual(lp._threshold("radius"), exp_rad)
-            self.assertEqual(lp._threshold(), exp_rad)
+        table = {  # (d, p): (k-NN threshold, radius threshold)
+            (2, 1.0): (512, 1024),
+            (8, 1.0): (2048, 2048),
+            (32, 1.0): (2048, 512),
+            (64, 1.0): (8192, 512),
+            (100, 1.0): (65536, 65536),
+            (16, 0.5): (512, 512),
+            (32, 0.5): (1024, 512),
+            (100, 0.25): (8192, 512),
+        }
+        pts = np.random.default_rng(1)
+        for (d, p), (knn, radius) in table.items():
+            with self.subTest(d=d, p=p):
+                nn = ToroidalNN(p=p, backend="python").fit(pts.random((8, d)), k=2)
+                self.assertEqual((nn._threshold("knn"), nn._threshold("radius")), (12288, 12288))
+                if "rust" in available_backends():
+                    nn = ToroidalNN(p=p, backend="rust").fit(pts.random((8, d)), k=2)
+                    self.assertEqual((nn._threshold("knn"), nn._threshold("radius")), (knn, radius))
+                    self.assertEqual(nn._threshold(), knn)
         g = ToroidalNN(brute_threshold=500)
         self.assertEqual((g._threshold("knn"), g._threshold("radius"), g._threshold()), (500, 500, 500))
         m = ToroidalNN(brute_threshold=500, brute_threshold_knn=800, brute_threshold_radius=200)
