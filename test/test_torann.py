@@ -14,8 +14,8 @@ import unittest.mock
 
 import numpy as np
 
-from torann import Neighbours, ToroidalNN, available_backends, rust
-from torann.brute import BruteIndex, exact_knn, exact_radius, pairwise_l1, pairwise_lp
+from torann import Neighbours, ToroidalNN, available_backends, rust, tune_thresholds
+from torann.brute import BruteIndex, exact_knn, exact_radius, knn_scan, pairwise_l1, pairwise_lp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1350,6 +1350,128 @@ class TestLshLp(unittest.TestCase):
         for bad in (0.0, -0.5, 1.5, 2.0, float("nan"), float("inf"), True):
             with self.subTest(bad=bad), self.assertRaises((ValueError, TypeError)):
                 ToroidalNN(p=bad)  # type: ignore[arg-type]
+
+
+class TestCrossoverThresholds(unittest.TestCase):
+    """Mode-specific crossover thresholds, crossover-band routing, and `tune_thresholds` (S3)."""
+
+    def test_defaults_and_override_precedence(self):
+        for b in BACKENDS:
+            nn = ToroidalNN(backend=b)
+            exp_knn = 3072 if b == "rust" else 12288
+            exp_rad = 1024 if b == "rust" else 12288
+            self.assertEqual(nn._threshold("knn"), exp_knn)
+            self.assertEqual(nn._threshold("radius"), exp_rad)
+            self.assertEqual(nn._threshold(), exp_knn)
+            lp = ToroidalNN(backend=b, p=0.5)
+            self.assertEqual(lp._threshold("knn"), exp_rad)
+            self.assertEqual(lp._threshold("radius"), exp_rad)
+            self.assertEqual(lp._threshold(), exp_rad)
+        g = ToroidalNN(brute_threshold=500)
+        self.assertEqual((g._threshold("knn"), g._threshold("radius"), g._threshold()), (500, 500, 500))
+        m = ToroidalNN(brute_threshold=500, brute_threshold_knn=800, brute_threshold_radius=200)
+        self.assertEqual((m._threshold("knn"), m._threshold("radius"), m._threshold()), (800, 200, 500))
+
+    def test_invalid_thresholds_raise(self):
+        for kw in ("brute_threshold", "brute_threshold_knn", "brute_threshold_radius"):
+            for bad in (-1, -100, True, False, 1.5, "auto"):
+                with self.subTest(kw=kw, bad=bad), self.assertRaises((ValueError, TypeError)):
+                    ToroidalNN(**{kw: bad})  # type: ignore[arg-type]
+
+    def test_crossover_band_routing_and_lifecycle(self):
+        rng = np.random.default_rng(31)
+        pts = rng.random((400, 8))
+        q = rng.random((24, 8))
+        for b in BACKENDS:
+            for p in (1.0, 0.5):
+                # Band 1: thr_radius=100 < n=250 <= thr_knn=500
+                nn = ToroidalNN(
+                    seed=7,
+                    backend=b,
+                    p=p,
+                    brute_threshold_knn=500,
+                    brute_threshold_radius=100,
+                ).fit(pts[:150], pts[150:250], k=6)
+                self.assertFalse(nn.is_approximate)
+                self.assertFalse(nn.is_approximate_knn)
+                self.assertTrue(nn.is_approximate_radius)
+                # query() stays exact before LSH is built
+                ref_i, ref_d = knn_scan(pts[:250], q, 6, p=p)
+                got_i, got_d = nn.query(k=6, queries=q)
+                np.testing.assert_array_equal(got_i, ref_i)
+                np.testing.assert_allclose(got_d, ref_d, rtol=1e-12)
+                self.assertFalse(nn.is_approximate)
+                # query_radius() builds LSH on demand and routes through LSH
+                r_cut = float(np.median(ref_d[:, 3]))
+                r_approx = nn.query_radius(r_cut, queries=q, pad=True)
+                self.assertTrue(nn.is_approximate)
+                self.assertEqual(r_approx.ids.shape[0], len(q))
+                # query() still routes through exact knn_scan even after LSH is built
+                got_i2, got_d2 = nn.query(k=6, queries=q)
+                np.testing.assert_array_equal(got_i2, ref_i)
+                np.testing.assert_allclose(got_d2, ref_d, rtol=1e-12)
+                # update() keeps arena and LSH in sync; promote() crosses thr_knn
+                moved = (pts[150:250] + 0.02) % 1.0
+                nn.update(moved)
+                ref_u_i, _ = knn_scan(np.vstack([pts[:150], moved]), q, 6, p=p)
+                got_u_i, _ = nn.query(k=6, queries=q)
+                np.testing.assert_array_equal(got_u_i, ref_u_i)
+                nn.promote(pts[250:400])
+                nn.promote(rng.random((200, 8)))
+                self.assertTrue(nn.is_approximate_knn)
+                self.assertEqual(nn.query(k=6, queries=q).ids.shape, (len(q), 6))
+
+                # Band 2: thr_knn=100 < n=250 <= thr_radius=500 (fit with radius hint)
+                nn2 = ToroidalNN(
+                    seed=7,
+                    backend=b,
+                    p=p,
+                    brute_threshold_knn=100,
+                    brute_threshold_radius=500,
+                ).fit(pts[:150], pts[150:250], k=6, radius=r_cut)
+                self.assertFalse(nn2.is_approximate)
+                self.assertTrue(nn2.is_approximate_knn)
+                self.assertFalse(nn2.is_approximate_radius)
+                # query() lazily builds LSH; query_radius() still uses exact radius_scan
+                nn2.query(k=6, queries=q)
+                self.assertTrue(nn2.is_approximate)
+                r_got = nn2.query_radius(r_cut, queries=q, pad=True)
+                r_ex = nn2.query_radius(r_cut, queries=q, exact=True, pad=True)
+                np.testing.assert_array_equal(r_got.ids, r_ex.ids)
+                np.testing.assert_allclose(r_got.distances, r_ex.distances, rtol=1e-12)
+                # promote() across radius threshold when fitted with radius hint
+                nn3 = ToroidalNN(
+                    seed=7,
+                    backend=b,
+                    p=p,
+                    brute_threshold_knn=900,
+                    brute_threshold_radius=300,
+                ).fit(pts[:150], pts[150:250], radius=r_cut)
+                self.assertFalse(nn3.is_approximate)
+                nn3.promote(pts[250:400])
+                self.assertTrue(nn3.is_approximate)
+
+    def test_tune_thresholds_self_and_external(self):
+        rng = np.random.default_rng(41)
+        pts = rng.random((300, 8))
+        q = rng.random((32, 8))
+        for p in (1.0, 0.5):
+            cfg_self = tune_thresholds(pts, k=6, p=p, repeats=1, seed=3)
+            self.assertEqual(set(cfg_self.keys()), {"brute_threshold_knn", "brute_threshold_radius"})
+            for v in cfg_self.values():
+                self.assertIn(v, (0, len(pts)))
+            cfg_ext = tune_thresholds(pts, q, k=6, radius=0.8, p=p, repeats=1, seed=3)
+            nn = ToroidalNN(seed=3, p=p, **cfg_ext).fit(pts, k=6)
+            self.assertEqual(nn.query(k=6, queries=q).ids.shape, (len(q), 6))
+        for bad_kw in (
+            {"points": rng.random((1, 4))},
+            {"points": pts, "repeats": 0},
+            {"points": pts, "repeats": True},
+            {"points": pts, "k": 0},
+            {"points": pts, "queries": rng.random((10, 5))},
+        ):
+            with self.subTest(bad_kw=list(bad_kw.keys())), self.assertRaises((ValueError, TypeError)):
+                tune_thresholds(**bad_kw)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

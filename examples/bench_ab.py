@@ -502,6 +502,58 @@ def case_python(d, mode):
     return {"ms_per_call": 1e3 * sec, "fingerprint": _fp(*out)}
 
 
+def case_crossover_auto(d, n, mode, p):
+    """W9: default crossover thresholds (`brute_threshold=None`) across the crossover band."""
+    import numpy as np
+
+    from torann import ToroidalNN
+    from torann.brute import exact_knn
+
+    sys.path.insert(1, HERE)
+    import benchmark as bm
+
+    rng = np.random.default_rng(11 * d + n)
+    pts = rng.random((n, d))
+    half = n // 2
+    k = min(2 * d, 64)
+    if p == 1.0:
+        radius = bm.radius_for(d, n, k)
+    else:
+        _, ref_d = exact_knn(pts, pts[:32], k + 1, p=p)
+        radius = float(np.median(ref_d[:, k]))
+
+    t0 = time.perf_counter()
+    nn = ToroidalNN(seed=0, p=p)
+    if mode == "knn":
+        nn.fit(pts[:half], pts[half:], k=k)
+    else:
+        nn.fit(pts[:half], pts[half:], k=k, radius=radius)
+    fit_s = time.perf_counter() - t0
+
+    def search():
+        return nn.query(k=k) if mode == "knn" else nn.query_radius(radius, pad=True)
+
+    cur = pts[half:].copy()
+    q_s = u_s = 0.0
+    for _ in range(DYN_EPOCHS):
+        t = time.perf_counter()
+        out = search()
+        q_s += time.perf_counter() - t
+        step = rng.normal(0.0, 0.01, cur.shape)
+        cur = np.mod(cur + step, 1.0)
+        t = time.perf_counter()
+        nn.update(cur)
+        u_s += time.perf_counter() - t
+    return {
+        "ms_per_epoch": 1e3 * (q_s + u_s) / DYN_EPOCHS,
+        "query_ms_per_epoch": 1e3 * q_s / DYN_EPOCHS,
+        "update_ms": 1e3 * u_s / DYN_EPOCHS,
+        "fit_ms": 1e3 * fit_s,
+        "impl": "lsh" if nn.is_approximate else "brute",
+        "fingerprint": _fp(*[np.asarray(v) for v in out]),
+    }
+
+
 def cases():
     """Every case id, mapped to (callable, kwargs). Ids sort into suites."""
     reg = {}
@@ -573,6 +625,14 @@ def cases():
     for d in (8, 32):
         for mode in ("knn", "radius"):
             reg[f"W6/d{d}-{mode}"] = (case_python, {"d": d, "mode": mode})
+    for d in (8, 16, 32, 64, 100):
+        for n in (2048, 3072, 4096):
+            for mode in ("knn", "radius"):
+                for p in (1.0, 0.5):
+                    reg[f"W9/d{d}-n{n}-{mode}-p{p:g}"] = (
+                        case_crossover_auto,
+                        {"d": d, "n": n, "mode": mode, "p": p},
+                    )
     return reg
 
 

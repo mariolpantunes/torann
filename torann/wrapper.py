@@ -62,13 +62,14 @@ from __future__ import annotations
 
 import logging
 from math import comb, exp
+from time import perf_counter
 from typing import Any, ClassVar, Literal, overload
 
 import numpy as np
 
 from . import rust
 from .base import IdArray, Neighbours, csr_to_padded
-from .brute import BruteIndex, exact_knn, pairwise_l1, radius_scan
+from .brute import BruteIndex, exact_knn, knn_scan, pairwise_l1, radius_scan
 from .lsh import PythonLshIndex
 
 
@@ -90,7 +91,7 @@ def _to_torus(points: Any) -> np.ndarray:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ToroidalNN", "available_backends"]
+__all__ = ["ToroidalNN", "available_backends", "tune_thresholds"]
 
 # Sampling caps for the tune() estimate of the neighbour scale.
 _TUNE_QUERIES = 256
@@ -136,6 +137,17 @@ def available_backends() -> list[str]:
         except ImportError:
             continue
         out.append(name)
+    return out
+
+
+def _validate_threshold(val: int | None, name: str) -> int | None:
+    if val is None:
+        return None
+    if isinstance(val, bool) or not isinstance(val, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer >= 0 or None, got {type(val).__name__}")
+    out = int(val)
+    if out < 0:
+        raise ValueError(f"{name} must be >= 0, got {out}")
     return out
 
 
@@ -185,58 +197,26 @@ class ToroidalNN:
         recall: Target single-neighbour base-bucket recall in ``(0, 1)`` used to
             size the number of tables $L$, or ``"auto"`` (default, 0.90).
         p: Toroidal $L^p$ exponent in ``(0, 1]`` (default ``1.0``, toroidal L1).
+        brute_threshold_knn: Mode-specific override for :meth:`query` exact/LSH
+            crossover (takes precedence over ``brute_threshold``).
+        brute_threshold_radius: Mode-specific override for :meth:`query_radius`
+            exact/LSH crossover (takes precedence over ``brute_threshold``).
     """
 
-    # Measured brute/LSH crossover per backend: the NumPy
-    # brute path stays competitive to ~4-8k points against the python
-    # LSH, while the native implementation wins from the smallest sizes
-    # tested.
-    #: Exact search below this many points, per backend.
-    #:
-    #: The rust entry was 512, calibrated when the brute path was NumPy. It
-    #: is compiled now, 13-73x faster, and 512 left the new kernel serving
-    #: only the regime below it -- the same mistake in the other direction.
-    #:
-    #: Recalibrated by break-even: LSH costs a tuning pass of
-    #: `O(256 * min(n, 8192) * d)` once, and has to recover it from cheaper
-    #: queries. Batches of 512 queries needed before it does:
-    #:
-    #: ======  ========  =========
-    #: d       n=4096    n=16384
-    #: ======  ========  =========
-    #: 8       1398      27
-    #: 32      84        13
-    #: 100     220       27
-    #: 200     187       23
-    #: ======  ========  =========
-    #:
-    #: An ESS relaxation queries its index once per epoch, so N is in the
-    #: low hundreds: at 4096 points brute wins on every dimension measured,
-    #: at 16384 LSH wins on all of them. 8192 sits between, and the python
-    #: entry is unchanged because that path has no compiled kernel to have
-    #: shifted its crossover.
-    #: Points above which the LSH index replaces the exact scan, per LSH
-    #: backend. Measured as the workload runs it -- fit once, then relax --
-    #: so the fit LSH pays and brute does not is inside the number.
-    #:
-    #: **They move in opposite directions, because the two backends are not
-    #: the same trade.** With the compiled index, LSH wins from 4096 at every
-    #: dimension measured (2 to 200); 3072 still loses at d=40. The old 8192
-    #: cost up to 2x at n=8192. With the pure-Python index it is the reverse:
-    #: brute is *faster* at d=10 all the way to 12288 (1.8-3.8x), and at
-    #: d=100 LSH wins by at most 8%. Best case 8%, worst case 280% -- so that
-    #: backend stays exact far longer. It is a reference implementation, not
-    #: a speed path.
-    #:
-    #: Quality is not what sets these. Across every size and dimension
-    #: measured the returned k-th neighbour is within **0.4%** of the true
-    #: k-th distance (`d_k` ratio 1.0000-1.0042) even where id-recall falls
-    #: to 0.36 -- in high dimension the formally-nearest k are barely nearer
-    #: than any other k. The force law reads distances, so a design built on
-    #: LSH neighbours scores the same as one built on exact ones. Ranking the
-    #: backends by id-recall says the opposite and is measuring the wrong
-    #: thing.
-    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = {"python": 12288, "rust": 4096}
+    # Measured brute/LSH crossover per backend and query mode:
+    # - For k-NN (p = 1.0, k = 2*d), the Rust heap brute scan stays competitive
+    #   at n <= 3072 on moderate/high dimensions, while LSH wins from n = 4096
+    #   across all dimensions d in [2, 200] (1.1x-5.0x).
+    # - For range search (`query_radius`), the batched LSH radius join + exact
+    #   u8 SIMD prefilter wins across all dimensions from n = 2048 (1.2x-3.0x
+    #   at n = 2048, 1.8x-4.2x at n = 3072), while brute ties/wins at n <= 1024.
+    # - For fractional toroidal L^p (p < 1.0), exact brute pays fractional powers
+    #   or sqrt on every coordinate pair and LSH wins across all dimensions from
+    #   n > 1024 for both k-NN and radius queries.
+    _BRUTE_DEFAULTS_KNN: ClassVar[dict[str, int]] = {"python": 12288, "rust": 3072}
+    _BRUTE_DEFAULTS_RADIUS: ClassVar[dict[str, int]] = {"python": 12288, "rust": 1024}
+    _BRUTE_DEFAULTS_LP: ClassVar[dict[str, int]] = {"python": 12288, "rust": 1024}
+    _BRUTE_DEFAULTS: ClassVar[dict[str, int]] = _BRUTE_DEFAULTS_KNN
 
     def __init__(
         self,
@@ -251,6 +231,8 @@ class ToroidalNN:
         backend: str = "auto",
         recall: float | str = "auto",
         p: float = 1.0,
+        brute_threshold_knn: int | None = None,
+        brute_threshold_radius: int | None = None,
     ):
         if resolution is not None and resolution < 2:
             raise ValueError("resolution must be >= 2")
@@ -277,7 +259,9 @@ class ToroidalNN:
             raise ValueError(f"p must be a float in (0, 1], got {p!r}")
 
         self.p = float(p)
-        self.brute_threshold = None if brute_threshold is None else int(brute_threshold)
+        self.brute_threshold = _validate_threshold(brute_threshold, "brute_threshold")
+        self.brute_threshold_knn = _validate_threshold(brute_threshold_knn, "brute_threshold_knn")
+        self.brute_threshold_radius = _validate_threshold(brute_threshold_radius, "brute_threshold_radius")
         self.num_tables = num_tables
         self.resolution = resolution
         self.dims_per_table = dims_per_table
@@ -293,6 +277,7 @@ class ToroidalNN:
         self._d = 0
         self._use_lsh = False
         self._k_hint: int | None = None
+        self._radius_hint: float | None = None
         self._impl: Any = None  # BaseIndex instance; set at fit()
 
     # ------------------------------------------------------------------ #
@@ -334,12 +319,13 @@ class ToroidalNN:
         self._arena = np.vstack([S, C])
         self._n_static = S.shape[0]
         self._k_hint = int(k) if k is not None else 2 * self._d
+        self._radius_hint = float(radius) if radius is not None else None
 
-        self._use_lsh = self.n_points > self._threshold()
-        if self._use_lsh:
-            self._tune(radius)
-            self._make_lsh()
+        fit_thr = self._threshold("radius") if self._radius_hint is not None else self._threshold("knn")
+        if self.n_points > fit_thr:
+            self._build_lsh(self._radius_hint)
         else:
+            self._use_lsh = False
             self._impl = BruteIndex(p=self.p)
             self._impl.build(self._arena, self._n_static)
         return self
@@ -372,11 +358,10 @@ class ToroidalNN:
         self._n_static = self.n_points  # old candidates are static now
         if C.size:
             self._arena = np.vstack([self._arena, C])
-        if not self._use_lsh and self.n_points > self._threshold():
+        fit_thr = self._threshold("radius") if self._radius_hint is not None else self._threshold("knn")
+        if not self._use_lsh and self.n_points > fit_thr:
             # Crossed the threshold: first (and only) full LSH build.
-            self._use_lsh = True
-            self._tune(None)
-            self._make_lsh()
+            self._build_lsh(self._radius_hint)
 
     # ------------------------------------------------------------------ #
     # Queries
@@ -417,6 +402,13 @@ class ToroidalNN:
         if kq < 1:
             raise ValueError("k must be >= 1")
         Q, ex = self._resolve_queries(queries, exclude_ids)
+        if self.is_approximate_knn:
+            if not self._use_lsh:
+                self._build_lsh(self._radius_hint)
+            return Neighbours(*self._impl.query_knn(np.ascontiguousarray(Q), kq, ex))
+        if self._use_lsh:
+            ids, dst = knn_scan(self._arena, Q, kq, ex, p=self.p)
+            return Neighbours(ids, dst)
         return Neighbours(*self._impl.query_knn(np.ascontiguousarray(Q), kq, ex))
 
     # `pad` chooses between two unrelated shapes, so it is overloaded rather
@@ -482,7 +474,11 @@ class ToroidalNN:
         if not radius >= 0.0:  # also catches NaN
             raise ValueError(f"radius must be >= 0 (inf allowed), got {radius}")
         Q, ex = self._resolve_queries(queries, None)
-        if exact and self._use_lsh:
+        if not exact and self.is_approximate_radius:
+            if not self._use_lsh:
+                self._build_lsh(radius)
+            indptr, ids, dst = self._impl.query_radius(np.ascontiguousarray(Q), radius, ex)
+        elif self._use_lsh:
             indptr, ids, dst = radius_scan(self._arena, Q, radius, ex, p=self.p)
         else:
             indptr, ids, dst = self._impl.query_radius(np.ascontiguousarray(Q), radius, ex)
@@ -600,12 +596,28 @@ class ToroidalNN:
         self._pw = B ** np.arange(K, dtype=np.int64)
         logger.info("tuned: n=%d d=%d r_hat=%.3f -> B=%d K=%d L=%d", n, d, r_hat, B, K, L)
 
-    def _threshold(self) -> int:
-        """Explicit brute_threshold, or the backend's measured crossover."""
+    def _threshold(self, mode: Literal["knn", "radius"] | None = None) -> int:
+        """Mode-specific or global brute_threshold, else the backend's crossover."""
+        if mode == "knn" and self.brute_threshold_knn is not None:
+            return self.brute_threshold_knn
+        if mode == "radius" and self.brute_threshold_radius is not None:
+            return self.brute_threshold_radius
         if self.brute_threshold is not None:
             return self.brute_threshold
         name, _ = _resolve(self.backend)
-        return self._BRUTE_DEFAULTS.get(name, 4096)
+        if self.p < 1.0:
+            return self._BRUTE_DEFAULTS_LP.get(name, 1024)
+        if mode == "radius":
+            return self._BRUTE_DEFAULTS_RADIUS.get(name, 1024)
+        if mode == "knn":
+            return self._BRUTE_DEFAULTS_KNN.get(name, 3072)
+        return self._BRUTE_DEFAULTS.get(name, 3072)
+
+    def _build_lsh(self, radius: float | None) -> None:
+        """Tune and instantiate the LSH backend from the current arena."""
+        self._use_lsh = True
+        self._tune(radius)
+        self._make_lsh()
 
     def _make_lsh(self) -> None:
         """Instantiate the LSH implementation and build both tiers."""
@@ -688,6 +700,99 @@ class ToroidalNN:
         return self._use_lsh
 
     @property
+    def is_approximate_knn(self) -> bool:
+        """True when :meth:`query` routes through the LSH index (``n_points > threshold('knn')``)."""
+        return self._arena.size > 0 and self.n_points > self._threshold("knn")
+
+    @property
+    def is_approximate_radius(self) -> bool:
+        """True when :meth:`query_radius` routes through the LSH index (``n_points > threshold('radius')``)."""
+        return self._arena.size > 0 and self.n_points > self._threshold("radius")
+
+    @property
     def n_tables(self) -> int:
         """Hash tables in use (0 in exact mode)."""
         return self._L if self._use_lsh else 0
+
+
+def tune_thresholds(
+    points: np.ndarray,
+    queries: np.ndarray | None = None,
+    *,
+    k: int | None = None,
+    radius: float | None = None,
+    p: float = 1.0,
+    recall: float | str = "auto",
+    backend: str = "auto",
+    repeats: int = 3,
+    seed: int = 0,
+) -> dict[str, int]:
+    """Measure brute vs LSH query latency on a workload and return threshold overrides.
+
+    Compares exact brute-force search against the configured LSH backend on
+    ``points`` (and ``queries``, or a candidate self-join slice when
+    ``queries is None``) for both k-NN and range search, returning a dict
+    ``{"brute_threshold_knn": ..., "brute_threshold_radius": ...}`` ready to
+    splat into :class:`ToroidalNN`:
+
+    * ``0`` when LSH is faster than exact brute at ``len(points)``, activating
+      LSH immediately at this size.
+    * ``len(points)`` when exact brute is faster at ``len(points)``, keeping
+      exact search active at this size.
+    """
+    if isinstance(repeats, bool) or not isinstance(repeats, (int, np.integer)) or int(repeats) < 1:
+        raise ValueError(f"repeats must be an integer >= 1, got {repeats!r}")
+    rep = int(repeats)
+    P = np.atleast_2d(_to_torus(points))
+    if P.ndim != 2 or P.shape[0] < 2:
+        raise ValueError("points must be an (n, d) array with n >= 2")
+    n, d = P.shape
+    kq = int(k) if k is not None else min(2 * d, n - 1)
+    if kq < 1:
+        raise ValueError("k must be >= 1")
+    if queries is not None:
+        Q = np.atleast_2d(_to_torus(queries))
+        if Q.ndim != 2 or Q.shape[1] != d:
+            raise ValueError(f"queries must have {d} dimensions")
+        static_pts, cand_pts, q_arg = P, None, Q
+    else:
+        m = min(256, max(1, n // 4))
+        static_pts, cand_pts, q_arg = P[: n - m], P[n - m :], None
+
+    brute_nn = ToroidalNN(seed=seed, brute_threshold=n + 1, backend=backend, recall=recall, p=p).fit(
+        static_pts, cand_pts, k=kq
+    )
+    lsh_nn = ToroidalNN(seed=seed, brute_threshold=0, backend=backend, recall=recall, p=p).fit(
+        static_pts, cand_pts, k=kq, radius=radius
+    )
+
+    brute_knn = float("inf")
+    b_dst = np.empty((0, 0))
+    for _ in range(rep):
+        t0 = perf_counter()
+        _, b_dst = brute_nn.query(k=kq, queries=q_arg)
+        brute_knn = min(brute_knn, perf_counter() - t0)
+
+    lsh_knn = float("inf")
+    for _ in range(rep):
+        t0 = perf_counter()
+        lsh_nn.query(k=kq, queries=q_arg)
+        lsh_knn = min(lsh_knn, perf_counter() - t0)
+
+    r_q = float(radius) if radius is not None else float(np.median(b_dst[:, min(kq - 1, b_dst.shape[1] - 1)]))
+    brute_rad = float("inf")
+    for _ in range(rep):
+        t0 = perf_counter()
+        brute_nn.query_radius(r_q, queries=q_arg, pad=True)
+        brute_rad = min(brute_rad, perf_counter() - t0)
+
+    lsh_rad = float("inf")
+    for _ in range(rep):
+        t0 = perf_counter()
+        lsh_nn.query_radius(r_q, queries=q_arg, pad=True)
+        lsh_rad = min(lsh_rad, perf_counter() - t0)
+
+    return {
+        "brute_threshold_knn": 0 if lsh_knn < brute_knn else n,
+        "brute_threshold_radius": 0 if lsh_rad < brute_rad else n,
+    }

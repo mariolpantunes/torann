@@ -68,8 +68,8 @@ case "$TASK" in
             --out "$SCRATCH/out/recall_ablation_report.md"
         ;;
     crossover)
-        # S3: Exact brute vs LSH crossover n*(d) across d=2..64
-        python examples/crossover.py --dims 2,4,8,16,32,64 --backends rust \
+        # S3: Exact brute vs LSH crossover n*(d, mode, p) across d=2..100
+        python examples/crossover.py --dims 2,4,8,16,32,64,100 --backends rust --modes knn,radius --ps 1.0,0.5 \
             | tee "$SCRATCH/out/crossover.log"
         [[ -f examples/out/crossover.json ]] && cp -f examples/out/crossover.json "$SCRATCH/out/crossover.json"
         ;;
@@ -91,7 +91,7 @@ case "$TASK" in
         python - "$SCRATCH/out/lp_recall.json" <<'PY' | tee "$SCRATCH/out/lp_recall.log"
 import json, sys, time
 import numpy as np
-from torann import ToroidalNN, rust
+from torann import ToroidalNN, rust, tune_thresholds
 from torann.brute import exact_knn
 
 out_path = sys.argv[1]
@@ -137,6 +137,22 @@ for d in (8, 16, 32):
                "speedup_vs_rust_brute": round(t_brute / max(t_q, 1e-6), 2)}
         rows.append(row)
         print(f"d={d:2d} p={p:.2f} -> B={nn._B} K={nn._K:2d} L={nn._L:2d} | emp_recall={emp:.4f} | lsh={t_q:6.2f} ms vs rust_brute={t_brute:6.2f} ms ({t_brute/t_q:.2f}x)")
+
+print("\n=== 3. S3 crossover band & tune_thresholds (n in 1024..4096) ===")
+for d in (8, 16, 32):
+    for n in (1024, 2048, 3072, 4096):
+        pts = rng.random((n, d))
+        q = rng.random((512, d))
+        for p in (1.0, 0.5):
+            cfg = tune_thresholds(pts, q, k=2*d, p=p, repeats=2, seed=7)
+            nn = ToroidalNN(seed=7, p=p).fit(pts[:n//2], pts[n//2:], k=2*d)
+            row = {"exp": "s3_band", "d": d, "n": n, "p": p,
+                   "is_approx_knn": nn.is_approximate_knn,
+                   "is_approx_radius": nn.is_approximate_radius,
+                   "tuned_thr_knn": cfg["brute_threshold_knn"],
+                   "tuned_thr_radius": cfg["brute_threshold_radius"]}
+            rows.append(row)
+            print(f"d={d:2d} n={n:4d} p={p:.2f} -> default(knn={nn.is_approximate_knn}, rad={nn.is_approximate_radius}) | tune_thresholds={cfg}")
 
 with open(out_path, "w") as f:
     json.dump(rows, f, indent=2)

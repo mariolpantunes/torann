@@ -12,9 +12,9 @@ from __future__ import annotations
 import numpy as np
 
 from . import rust
-from .base import BaseIndex
+from .base import BaseIndex, DistArray, IdArray
 
-__all__ = ["BruteIndex", "exact_knn", "exact_radius", "pairwise_l1", "pairwise_lp", "radius_scan"]
+__all__ = ["BruteIndex", "exact_knn", "exact_radius", "knn_scan", "pairwise_l1", "pairwise_lp", "radius_scan"]
 
 # Element budget for the temporary (queries x points) distance blocks.
 #
@@ -284,6 +284,27 @@ def exact_radius(pts, Q, radius, exclude_ids=None, p: float = 1.0):
     )
 
 
+def knn_scan(pts, Q, k, exclude_ids=None, p: float = 1.0) -> tuple[IdArray, DistArray]:
+    """The *serving* exact k-NN scan: compiled when the wheel provides it.
+
+    Symmetric to :func:`radius_scan`: :func:`exact_knn` stays the reference,
+    while this dispatches to ``rust.brute_knn`` when available and serves
+    both :class:`BruteIndex` and ``ToroidalNN.query`` when ``n_points`` sits
+    below ``brute_threshold_knn`` in the crossover band.
+
+    Args, Returns:
+        As :func:`exact_knn`.
+    """
+    p = _validate_p(p)
+    if rust.brute_knn is None:
+        return exact_knn(pts, Q, k, exclude_ids, p=p)
+    q = np.ascontiguousarray(Q, dtype=np.float64)
+    ex = None if exclude_ids is None else np.ascontiguousarray(exclude_ids, dtype=np.int64)
+    if p == 1.0:
+        return rust.brute_knn(pts, q, int(k), ex)
+    return rust.brute_knn(pts, q, int(k), ex, p)
+
+
 def radius_scan(pts, Q, radius, exclude_ids=None, p: float = 1.0):
     """The *serving* exact range scan: compiled when the wheel provides it.
 
@@ -357,13 +378,7 @@ class BruteIndex(BaseIndex):
         the compiled kernel served exclusively the regime a population-sized
         caller never enters.
         """
-        if rust.brute_knn is None:
-            return exact_knn(self._pts, queries, k, exclude_ids, p=self.p)
-        q = np.ascontiguousarray(queries, dtype=np.float64)
-        ex = None if exclude_ids is None else np.ascontiguousarray(exclude_ids, dtype=np.int64)
-        if self.p == 1.0:
-            return rust.brute_knn(self._pts, q, int(k), ex)
-        return rust.brute_knn(self._pts, q, int(k), ex, self.p)
+        return knn_scan(self._pts, queries, k, exclude_ids, p=self.p)
 
     def query_radius(self, queries, radius, exclude_ids=None):
         """Exact range query — see :func:`radius_scan`."""
