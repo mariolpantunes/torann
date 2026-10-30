@@ -37,6 +37,7 @@ The workload matrix::
     W7  dynamic self-join  every point queries, a fraction moves each epoch
                            (uniform / clustered data, no ESS code)
     W8  cutoff study       W7 shape over d 12..64 and cluster widths (not in the default suites)
+    W9  crossover          default thresholds over d x n x mode x p, with recall
     WQ  quality            full-length ESS runs scored with the dispersion panel
 
 Run from the repository root (``ess`` on the path)::
@@ -216,7 +217,7 @@ def _timeit(fn, min_time=0.25, min_reps=5, max_reps=200):
     return statistics.median(times), out
 
 
-def _knn_recall(arena, got_fn, k, seed=0):
+def _knn_recall(arena, got_fn, k, seed=0, **exact):
     import numpy as np
 
     from torann.brute import exact_knn
@@ -227,7 +228,7 @@ def _knn_recall(arena, got_fn, k, seed=0):
     q = np.ascontiguousarray(arena[rows])
     ids = np.ascontiguousarray(rows, dtype=np.int64)
     got, _ = got_fn(q, k, ids)
-    want, _ = exact_knn(arena, q, k, exclude_ids=ids)
+    want, _ = exact_knn(arena, q, k, exclude_ids=ids, **exact)
     return sum(len(set(got[i].tolist()) & set(want[i].tolist())) for i in range(take)) / (take * k)
 
 
@@ -544,12 +545,28 @@ def case_crossover_auto(d, n, mode, p):
         t = time.perf_counter()
         nn.update(cur)
         u_s += time.perf_counter() - t
+    if mode == "knn":
+        approximate = getattr(nn, "is_approximate_knn", nn.is_approximate)
+        recall = _knn_recall(
+            nn._arena,
+            lambda q, kk, ii: nn.query(k=kk, queries=q, exclude_ids=ii),
+            k,
+            **({} if p == 1.0 else {"p": p}),
+        )
+    else:
+        approximate = nn.is_approximate
+        q = nn._arena[rng.choice(n, min(RECALL_QUERIES, n), replace=False)]
+        got = nn.query_radius(radius, queries=q)
+        want = nn.query_radius(radius, queries=q, exact=True)
+        hits = sum(len(set(g.ids.tolist()) & set(w.ids.tolist())) for g, w in zip(got, want))
+        recall = hits / max(1, sum(w.ids.size for w in want))
     return {
         "ms_per_epoch": 1e3 * (q_s + u_s) / DYN_EPOCHS,
         "query_ms_per_epoch": 1e3 * q_s / DYN_EPOCHS,
         "update_ms": 1e3 * u_s / DYN_EPOCHS,
         "fit_ms": 1e3 * fit_s,
-        "impl": "lsh" if nn.is_approximate else "brute",
+        "impl": "lsh" if approximate else "brute",
+        "recall": recall,
         "fingerprint": _fp(*[np.asarray(v) for v in out]),
     }
 
@@ -625,10 +642,10 @@ def cases():
     for d in (8, 32):
         for mode in ("knn", "radius"):
             reg[f"W6/d{d}-{mode}"] = (case_python, {"d": d, "mode": mode})
-    for d in (8, 16, 32, 64, 100):
-        for n in (2048, 3072, 4096):
+    for d in (2, 4, 8, 16, 32, 64, 100):
+        for n in (512, 1024, 2048, 3072, 4096, 8192, 16384):
             for mode in ("knn", "radius"):
-                for p in (1.0, 0.5):
+                for p in (1.0, 0.75, 0.5, 0.25):
                     reg[f"W9/d{d}-n{n}-{mode}-p{p:g}"] = (
                         case_crossover_auto,
                         {"d": d, "n": n, "mode": mode, "p": p},
@@ -639,14 +656,14 @@ def cases():
 # One subprocess per case, except the cheap W4 LSH cases, which share a
 # process per dimension so the fixture is built once.
 def _batches(ids):
-    out, lsh = [], {}
+    out, grouped = [], {}
     for cid in ids:
-        m = re.match(r"W4/lsh_\w+/d(\d+)-", cid)
+        m = re.match(r"(W4/lsh_\w+|W9)/d(\d+)-", cid)
         if m:
-            lsh.setdefault(m.group(1), []).append(cid)
+            grouped.setdefault((m.group(1), m.group(2)), []).append(cid)
         else:
             out.append([cid])
-    return out + list(lsh.values())
+    return out + list(grouped.values())
 
 
 def _host():

@@ -8,13 +8,18 @@
 # Usage:
 #   cluster/campaigns.sh [CAMPAIGN ...] [options]
 #
-# Campaigns (default: all):
-#   aa          A/A noise calibration on `NODES` (main vs main_aa, W1-W5 W7 W8)
-#   w8-cutoff   S0/W8 8-bit prefilter cutoff study (s0_off vs s0_1, s0_off vs s0_17)
-#   s5-soa      S5 transposed float32 SoA tile filter (main vs s5_soa, W1-W5 W7 W8)
-#   n1-full     Upstream origin/main vs local main (origin_main vs main, W1-W5 W7 WQ)
-#   experiments Standalone 4-task array (recall-ablation, crossover, refine-rounds, exploration)
-#   all         Queue every campaign above sharing a single arm-build job
+# Campaigns (default: all). Each chain link isolates one core idea:
+#   smoke       2 pairs of a few cases per link: proves every arm builds and runs
+#   aa          A/A noise calibration on `NODES` (s3fix vs s3fix_aa, every suite)
+#   core1       Batched radius join          (c0 vs c1)
+#   core2       u8 prefilter + auto-off      (c1 vs c2)
+#   core34      recall knob + L^p LSH        (c2 vs c3)
+#   core5       Crossover thresholds, S3     (c3 vs s3)
+#   s3-fix      S3 fix, needs the fix on HEAD (s3 vs s3fix)
+#   w8-cutoff   S0 prefilter cutoff study    (s0_off vs s0_1, s0_off vs s0_17, A/A)
+#   s5-soa      S5 SoA tiles on their own base (c2 vs s5_soa)
+#   experiments 6-task array on arm s3fix (see experiments.sbatch)
+#   all         Everything above but smoke, sharing one arm-build job
 #
 # Options:
 #   --dry-run   Print the remote commands and sbatch submissions without SSH
@@ -45,7 +50,7 @@ while [[ $# -gt 0 ]]; do
         --no-sync) DO_SYNC=0; shift ;;
         --no-build) DO_BUILD=0; shift ;;
         --pairs) PAIRS_ARG="${2:?--pairs needs an even integer}"; shift 2 ;;
-        aa|w8-cutoff|s5-soa|n1-full|experiments|all)
+        smoke|aa|core1|core2|core34|core5|s3-fix|w8-cutoff|s5-soa|experiments|all)
             CAMPAIGNS+=("$1"); shift ;;
         *)
             echo "error: unknown argument '$1' (see --help)" >&2
@@ -56,19 +61,20 @@ done
 [[ ${#CAMPAIGNS[@]} -eq 0 ]] && CAMPAIGNS=(all)
 for c in "${CAMPAIGNS[@]}"; do
     if [[ "$c" == "all" ]]; then
-        CAMPAIGNS=(aa w8-cutoff s5-soa n1-full experiments)
+        CAMPAIGNS=(aa core1 core2 core34 core5 s3-fix w8-cutoff s5-soa experiments)
         break
     fi
 done
 
 run_submit() {
-    local arm_a="$1" arm_b="$2" tag="$3" suites="$4" after_id="$5"
+    local arm_a="$1" arm_b="$2" tag="$3" suites="$4" after_id="$5" pairs="${6:-$PAIRS_ARG}" cases="${7:-}"
     local cmd=("$DIR/submit.sh" "$arm_a" "$arm_b"
         --name "$tag"
         --suites "$suites"
-        --pairs "$PAIRS_ARG"
+        --pairs "$pairs"
         --no-sync)
     [[ -n "$after_id" ]] && cmd+=(--after "$after_id")
+    [[ -n "$cases" ]] && cmd+=(--cases "$cases")
     if [[ "$DRY_RUN" -eq 1 ]]; then
         echo "[dry-run] ${cmd[*]}"
     else
@@ -107,10 +113,34 @@ if [[ "$DO_BUILD" -eq 1 ]]; then
     fi
 fi
 
+SUITES_BASE="W1 W2 W3 W4 W5 W7"
+
 for c in "${CAMPAIGNS[@]}"; do
     case "$c" in
+        smoke)
+            local_cases='/d8-|/d8/|/d32-|n4096-d8'
+            for link in "c0 c1" "c1 c2" "c2 c3" "c3 s3" "s3 s3fix" "c2 s5_soa"; do
+                read -r arm_a arm_b <<<"$link"
+                run_submit "$arm_a" "$arm_b" "smoke_${arm_a}_${arm_b}" "$SUITES_BASE" "$BUILD_ID" 2 "$local_cases"
+            done
+            ;;
         aa)
-            run_submit main main_aa "aa_main" "W1 W2 W3 W4 W5 W7 W8" "$BUILD_ID"
+            run_submit s3fix s3fix_aa "aa" "$SUITES_BASE W8 W9" "$BUILD_ID"
+            ;;
+        core1)
+            run_submit c0 c1 "core1" "$SUITES_BASE" "$BUILD_ID"
+            ;;
+        core2)
+            run_submit c1 c2 "core2" "$SUITES_BASE W8" "$BUILD_ID"
+            ;;
+        core34)
+            run_submit c2 c3 "core34" "$SUITES_BASE W8" "$BUILD_ID"
+            ;;
+        core5)
+            run_submit c3 s3 "core5" "$SUITES_BASE W8 W9" "$BUILD_ID"
+            ;;
+        s3-fix)
+            run_submit s3 s3fix "s3fix" "$SUITES_BASE W8 W9" "$BUILD_ID"
             ;;
         w8-cutoff)
             run_submit s0_off s0_1  "w8_off_vs_1"  "W8" "$BUILD_ID"
@@ -118,21 +148,20 @@ for c in "${CAMPAIGNS[@]}"; do
             run_submit s0_17  s0_17b "w8_aa_17"    "W8" "$BUILD_ID"
             ;;
         s5-soa)
-            run_submit main s5_soa "s5_soa" "W1 W2 W3 W4 W5 W7 W8" "$BUILD_ID"
-            ;;
-        n1-full)
-            run_submit origin_main main "n1_origin_vs_main" "W1 W2 W3 W4 W5 W7 WQ" "$BUILD_ID"
+            run_submit c2 s5_soa "s5_soa" "$SUITES_BASE W8" "$BUILD_ID"
             ;;
         experiments)
-            DEP_EXP="${BUILD_ID:+--dependency=afterok:$BUILD_ID}"
+            # Named like the sweeps and singleton: these share the node, so
+            # they must wait for every sweep or both timings are void.
+            DEP_EXP="--dependency=${BUILD_ID:+afterok:$BUILD_ID,}singleton --job-name=torann-sweep"
             if [[ "$DRY_RUN" -eq 1 ]]; then
-                echo "[dry-run] ssh $REMOTE sbatch $DEP_EXP -p $PARTITION -w ${NODES%%,*} --array=0-4 experiments.sbatch"
+                echo "[dry-run] ssh $REMOTE sbatch $DEP_EXP -p $PARTITION -w ${NODES%%,*} --array=0-5%1 experiments.sbatch"
             else
                 EXP_ID=$(ssh_remote "cd '$ROOT/logs' && sbatch --parsable $DEP_EXP -p '$PARTITION' \
-                    -w '${NODES%%,*}' --array=0-4 \
-                    --export=ALL,BENCH_ROOT='$ROOT',ARM=main \
+                    -w '${NODES%%,*}' --array=0-5%1 \
+                    --export=ALL,BENCH_ROOT='$ROOT',ARM=s3fix \
                     '$ROOT/torann/cluster/experiments.sbatch'")
-                echo "== queued standalone experiments array $EXP_ID (recall-ablation, crossover, refine-rounds, exploration, lp-recall)"
+                echo "== queued standalone experiments array $EXP_ID (recall-ablation, crossover, refine-rounds, exploration, lp-recall, tune-model)"
             fi
             ;;
     esac
@@ -145,9 +174,7 @@ Monitor when on VPN/IT network:
   ~/.agents/skills/slurm/scripts/status.sh
   ssh $REMOTE "ls -lh $ROOT/torann/examples/out/"
 Fetch A/B reports once complete:
-  cluster/fetch.sh aa_main
-  cluster/fetch.sh w8_off_vs_1 --aa aa_main
-  cluster/fetch.sh w8_off_vs_17 --aa aa_main
-  cluster/fetch.sh s5_soa --aa aa_main
-  cluster/fetch.sh n1_origin_vs_main --aa aa_main
+  cluster/fetch.sh aa
+  for t in core1 core2 core34 core5 s3fix w8_off_vs_1 w8_off_vs_17 s5_soa; do
+      cluster/fetch.sh \$t --aa examples/out/cluster/ab_aa.json; done
 EOF

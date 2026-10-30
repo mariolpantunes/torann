@@ -12,13 +12,13 @@
 #
 # Runs long ablation, crossover, or multi-round ESS studies using a compiled
 # arm in $BENCH_ROOT/arms/$ARM (default: main) while leaving the laptop free.
-# Can be submitted as a single job (EXP_TASK=recall-ablation) or a 4-task array
-# (--array=0-3, where each task picks one workload from the table below).
+# Can be submitted as a single job (EXP_TASK=recall-ablation) or a 6-task array
+# (--array=0-5, where each task picks one workload from the table below).
 set -euo pipefail
 
 ROOT="${BENCH_ROOT:?BENCH_ROOT not set}"
 ARM="${ARM:-main}"
-TASKS=(recall-ablation crossover refine-rounds exploration lp-recall)
+TASKS=(recall-ablation crossover refine-rounds exploration lp-recall tune-model)
 if [[ -n "${EXP_TASK:-}" ]]; then
     TASK="$EXP_TASK"
 else
@@ -69,7 +69,7 @@ case "$TASK" in
         ;;
     crossover)
         # S3: Exact brute vs LSH crossover n*(d, mode, p) across d=2..100
-        python examples/crossover.py --dims 2,4,8,16,32,64,100 --backends rust --modes knn,radius --ps 1.0,0.5 \
+        python examples/crossover.py --dims 2,4,8,16,32,64,100 --backends rust --modes knn,radius --ps 1.0,0.75,0.5,0.25 \
             | tee "$SCRATCH/out/crossover.log"
         [[ -f examples/out/crossover.json ]] && cp -f examples/out/crossover.json "$SCRATCH/out/crossover.json"
         ;;
@@ -85,6 +85,12 @@ case "$TASK" in
             echo "--- running exploration/$s ---"
             python "exploration/$s" 2>&1 | tee "$SCRATCH/out/${s%.py}.log"
         done
+        ;;
+    tune-model)
+        # Predicted vs measured per-table hit rate, and _tune stability
+        python exploration/exp_tune_model.py --pairs 500 --tables 500 \
+            --json "$SCRATCH/out/tune_model.json" | tee "$SCRATCH/out/tune_model.log"
+        python exploration/exp_tune_stability.py | tee "$SCRATCH/out/tune_stability.log"
         ;;
     lp-recall)
         # Large-dataset evaluation of `recall` tuning and toroidal L^p (p <= 1) LSH
@@ -159,7 +165,7 @@ with open(out_path, "w") as f:
 PY
         ;;
     *)
-        echo "unknown EXP_TASK: $TASK (expected: recall-ablation|crossover|refine-rounds|exploration|lp-recall)" >&2
+        echo "unknown EXP_TASK: $TASK (expected: ${TASKS[*]})" >&2
         exit 2
         ;;
 esac

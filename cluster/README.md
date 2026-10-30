@@ -28,9 +28,10 @@ node sees the same copy):
 ## A run
 
     # One-command fire-and-forget launcher for all active campaigns
-    # (builds arms once, then queues A/A, W8 cutoff, S5 SoA, N1 full, and
-    # standalone ablation/crossover jobs so you can disconnect immediately):
+    # (builds arms once, then queues A/A, one A/B per core idea, W8 cutoff,
+    # S5 SoA and the standalone experiments so you can disconnect immediately):
     cluster/campaigns.sh --dry-run
+    cluster/campaigns.sh smoke        # prove every arm runs, first
     cluster/campaigns.sh all
 
     # Or launch individual campaigns:
@@ -38,12 +39,12 @@ node sees the same copy):
     cluster/campaigns.sh experiments --no-sync --no-build
 
     # Manual single A/B comparison:
-    cluster/submit.sh main s5_soa --spec cluster/arms.spec \
+    cluster/submit.sh c2 s5_soa --spec cluster/arms.spec \
         --suites "W1 W2 W3 W4 W5 W7 W8" --pairs 8 --name s5_soa
 
     # Later (once jobs finish):
-    cluster/fetch.sh aa_main
-    cluster/fetch.sh s5_soa --aa examples/out/cluster/ab_aa_main.json
+    cluster/fetch.sh aa
+    cluster/fetch.sh s5_soa --aa examples/out/cluster/ab_aa.json
 
 `submit.sh` chains three jobs: build (optional, `--spec` or `--after JOB_ID`), a
 sweep array with one task per shard, and a merge that runs `afterok` and
@@ -52,7 +53,7 @@ fetched into `examples/out/cluster/`, deliberately separate from the laptop's
 own runs.
 
 `experiments.sbatch` runs standalone non-A/B workloads (`recall-ablation`,
-`crossover`, `refine-rounds`, `exploration`) on a compute node using `/tmp`
+`crossover`, `refine-rounds`, `exploration`, `lp-recall`, `tune-model`) on a compute node using `/tmp`
 tmpfs staging and copies outputs back to `examples/out/exp_<task>_<arm>/`.
 
 Useful options: `--cases REGEX`, `--shards N`, `--after JOB_ID`, `--no-sync`, `--wait`.

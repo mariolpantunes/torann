@@ -58,7 +58,7 @@ else
 fi
 
 ARRAY_ID=$(ssh_remote "cd '$ROOT/logs' && sbatch --parsable $DEP -p '$PARTITION' \
-    --nodelist='$NODES' --array=0-$((SHARDS - 1))%$NODE_COUNT -c '$CPUS_PER_NODE' --mem=0 -t '$TIME_SWEEP' \
+    --nodelist='$NODES' --array=0-$((SHARDS - 1))%$NODE_COUNT -c '$CPUS_PER_NODE' --mem='$MEM_PER_NODE' -t '$TIME_SWEEP' \
     --export=ALL,BENCH_ROOT='$ROOT',ARM_A='$ARM_A',ARM_B='$ARM_B',SUITES='$SUITES',\
 PAIRS='$PAIRS',SHARDS='$SHARDS',CASES='$CASES',OUT_PREFIX='$OUT_PREFIX',RAYON_THREADS='$RAYON_THREADS' \
     '$ROOT/torann/cluster/sweep.sbatch'")
