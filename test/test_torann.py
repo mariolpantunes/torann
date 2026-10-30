@@ -16,7 +16,7 @@ import numpy as np
 
 from torann import Neighbours, ToroidalNN, available_backends, rust, tune_thresholds
 from torann.brute import BruteIndex, exact_knn, exact_radius, knn_scan, pairwise_l1, pairwise_lp
-from torann.wrapper import _torus_gaps, _wall_hit_rate
+from torann.wrapper import _torus_gaps, _wall_hit_rate, _wall_profile
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1228,8 +1228,8 @@ class TestRecallParameter(unittest.TestCase):
             ToroidalNN(seed=5, brute_threshold=0, recall="auto").fit(pts, k=k).n_tables,
         )
         self.assertLess(
-            ToroidalNN(seed=5, brute_threshold=0, recall=0.90, probes=2).fit(pts, k=k).n_tables,
-            ToroidalNN(seed=5, brute_threshold=0, recall=0.90, probes=0).fit(pts, k=k).n_tables,
+            ToroidalNN(seed=5, brute_threshold=0, recall=0.90, probes=2, dims_per_table=6).fit(pts, k=k).n_tables,
+            ToroidalNN(seed=5, brute_threshold=0, recall=0.90, probes=0, dims_per_table=6).fit(pts, k=k).n_tables,
         )
         self.assertGreater(recalls[-1], recalls[0])
 
@@ -1256,7 +1256,8 @@ class TestTuneContract(unittest.TestCase):
     def test_more_probes_never_need_more_tables(self):
         pts = np.random.default_rng(2).random((4096, 16))
         tables = [
-            ToroidalNN(seed=1, brute_threshold=0, probes=m, recall=0.8).fit(pts, k=16)._L for m in (0, 1, 2, 4, 8)
+            ToroidalNN(seed=1, brute_threshold=0, probes=m, recall=0.8, dims_per_table=7).fit(pts, k=16)._L
+            for m in (0, 1, 2, 4, 8)
         ]
         self.assertEqual(tables, sorted(tables, reverse=True))
 
@@ -1353,13 +1354,43 @@ class TestTuneContract(unittest.TestCase):
         Q = pts[:256]
         ids, _ = exact_knn(pts, Q, k + 1)
         true_gaps = _torus_gaps(Q, pts[ids[:, k]])
-        self.assertLessEqual(abs(nn._L - nn._tables_for(true_gaps, nn._B, nn._K, 0.7)), 1)
+        L, _ = nn._reach(_wall_profile(true_gaps, nn._B), nn._K, nn.probes, 0.7)
+        self.assertLessEqual(abs(nn._L - L), 1)
 
     def test_expected_recall_reports_a_blocked_target(self):
         pts = np.random.default_rng(10).random((8192, 64))
-        nn = ToroidalNN(seed=1, brute_threshold=0, recall=0.98, probes=0, backend="python").fit(pts, k=32)
+        nn = ToroidalNN(seed=1, brute_threshold=0, recall=0.98, probes=0, dims_per_table=8, backend="python")
+        nn.fit(pts, k=32)
         self.assertEqual(nn._L, 24)
         self.assertLess(nn.expected_recall, 0.98)
+
+    def test_past_the_cap_a_shallower_hash_keeps_the_target(self):
+        pts = np.random.default_rng(13).random((32768, 32))
+        pinned = ToroidalNN(seed=4, brute_threshold=0, probes=4, dims_per_table=9, backend="python").fit(pts, k=32)
+        nn = ToroidalNN(seed=4, brute_threshold=0, backend="python").fit(pts, k=32)
+        self.assertEqual(pinned._L, 24)
+        self.assertLess(pinned.expected_recall, 0.96)
+        self.assertLess(nn._K, pinned._K)
+        self.assertLessEqual(nn._L, 24)
+        self.assertGreaterEqual(nn.expected_recall, 0.96)
+
+    def test_probes_the_target_does_not_need_are_dropped(self):
+        rng = np.random.default_rng(14)
+        pts = np.mod(rng.random((16, 32))[rng.integers(0, 16, 8192)] + rng.normal(0.0, 0.02, (8192, 32)), 1.0)
+        kept = ToroidalNN(seed=4, brute_threshold=0, probes=4, backend="python").fit(pts, k=32)
+        nn = ToroidalNN(seed=4, brute_threshold=0, backend="python").fit(pts, k=32)
+        self.assertLess(nn.probes, 4)
+        self.assertEqual(nn._L, kept._L)
+        self.assertGreaterEqual(nn.expected_recall, kept.expected_recall - 0.01)
+
+    def test_explicit_settings_are_never_tuned_away(self):
+        pts = np.random.default_rng(15).random((8192, 32))
+        self.assertEqual(ToroidalNN(seed=1, brute_threshold=0, probes=2).fit(pts, k=8).probes, 2)
+        self.assertEqual(ToroidalNN(seed=1, brute_threshold=0, dims_per_table=9).fit(pts, k=8)._K, 9)
+        self.assertEqual(ToroidalNN(seed=1, brute_threshold=0, num_tables=3).fit(pts, k=8).probes, 4)
+        for bad in (-1, "fast", ""):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ToroidalNN(probes=bad)  # type: ignore[arg-type]
 
     def test_expected_recall_is_none_without_a_tuned_table_count(self):
         pts = np.random.default_rng(11).random((512, 8))

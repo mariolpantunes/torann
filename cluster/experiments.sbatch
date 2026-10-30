@@ -12,13 +12,13 @@
 #
 # Runs long ablation, crossover, or multi-round ESS studies using a compiled
 # arm in $BENCH_ROOT/arms/$ARM (default: main) while leaving the laptop free.
-# Can be submitted as a single job (EXP_TASK=recall-ablation) or a 6-task array
-# (--array=0-5, where each task picks one workload from the table below).
+# Can be submitted as a single job (EXP_TASK=recall-ablation) or a 7-task array
+# (--array=0-6, where each task picks one workload from the table below).
 set -euo pipefail
 
 ROOT="${BENCH_ROOT:?BENCH_ROOT not set}"
 ARM="${ARM:-main}"
-TASKS=(recall-ablation crossover refine-rounds exploration lp-recall tune-model)
+TASKS=(recall-ablation crossover refine-rounds exploration lp-recall tune-model tune-cost)
 if [[ -n "${EXP_TASK:-}" ]]; then
     TASK="$EXP_TASK"
 else
@@ -91,6 +91,11 @@ case "$TASK" in
         python exploration/exp_tune_model.py --pairs 500 --tables 500 \
             --json "$SCRATCH/out/tune_model.json" | tee "$SCRATCH/out/tune_model.log"
         python exploration/exp_tune_stability.py | tee "$SCRATCH/out/tune_stability.log"
+        ;;
+    tune-cost)
+        # Recall against real query, update and fit time, per probes and K
+        python exploration/exp_tune_cost.py --json "$SCRATCH/out/tune_cost.json" \
+            | tee "$SCRATCH/out/tune_cost.log"
         ;;
     lp-recall)
         # Large-dataset evaluation of `recall` tuning and toroidal L^p (p <= 1) LSH

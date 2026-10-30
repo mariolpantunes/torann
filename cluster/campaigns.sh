@@ -18,7 +18,7 @@
 #   s3-fix      S3 fix, needs the fix on HEAD (s3 vs s3fix)
 #   w8-cutoff   S0 prefilter cutoff study    (s0_off vs s0_1, s0_off vs s0_17, A/A)
 #   s5-soa      S5 SoA tiles on their own base (c2 vs s5_soa)
-#   experiments 6-task array on arm s3fix (see experiments.sbatch)
+#   experiments 7-task array on arm s3fix (see experiments.sbatch)
 #   all         Everything above but smoke, sharing one arm-build job
 #
 # Options:
@@ -155,13 +155,13 @@ for c in "${CAMPAIGNS[@]}"; do
             # they must wait for every sweep or both timings are void.
             DEP_EXP="--dependency=${BUILD_ID:+afterok:$BUILD_ID,}singleton --job-name=torann-sweep"
             if [[ "$DRY_RUN" -eq 1 ]]; then
-                echo "[dry-run] ssh $REMOTE sbatch $DEP_EXP -p $PARTITION -w ${NODES%%,*} --array=0-5%1 experiments.sbatch"
+                echo "[dry-run] ssh $REMOTE sbatch $DEP_EXP -p $PARTITION -w ${NODES%%,*} --array=0-6%1 experiments.sbatch"
             else
                 EXP_ID=$(ssh_remote "cd '$ROOT/logs' && sbatch --parsable $DEP_EXP -p '$PARTITION' \
-                    -w '${NODES%%,*}' --array=0-5%1 \
+                    -w '${NODES%%,*}' --array=0-6%1 \
                     --export=ALL,BENCH_ROOT='$ROOT',ARM=s3fix \
                     '$ROOT/torann/cluster/experiments.sbatch'")
-                echo "== queued standalone experiments array $EXP_ID (recall-ablation, crossover, refine-rounds, exploration, lp-recall, tune-model)"
+                echo "== queued standalone experiments array $EXP_ID (recall-ablation, crossover, refine-rounds, exploration, lp-recall, tune-model, tune-cost)"
             fi
             ;;
     esac

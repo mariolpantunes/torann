@@ -102,9 +102,11 @@ _TUNE_QUERIES = 256
 _TUNE_REFERENCE = 8192
 # recall="auto" targets for the k-th neighbour, calibrated so the defaults keep
 # the recall they had under the older, pessimistic model, which over-built p < 1.
-_AUTO_RECALL = 0.94
+_AUTO_RECALL = 0.96
 _AUTO_RECALL_LP = 0.98
 _MAX_TABLES = 24
+_DEFAULT_PROBES = 4
+_DEEP_PROBES = 8  # worth its lookups only where the table cap would bind
 _WALL_GRID = 64
 
 _AUTO_ORDER = ("rust", "python")
@@ -167,6 +169,11 @@ def _wall_hit_rate(gaps: np.ndarray, B: int, K: int, m: int) -> np.ndarray:
     with $A(w) = \int_0^w 2 s$, $D(w) = \int_w^{1/2} 2 s$ and $\bar s = A(1/2)$.
     See exploration/exp_tune_model.py for the check against the real hash.
     """
+    return _hit_rate(_wall_profile(gaps, B), K, m)
+
+
+def _wall_profile(gaps: np.ndarray, B: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The per-pair wall integrands of `_wall_hit_rate`: everything that does not depend on K or m."""
     u = B * gaps
     w = (np.arange(_WALL_GRID) + 0.5) / (2 * _WALL_GRID)
     dw = 0.5 / _WALL_GRID
@@ -179,12 +186,18 @@ def _wall_hit_rate(gaps: np.ndarray, B: int, K: int, m: int) -> np.ndarray:
     adjacent = 1.0 - same if B == 2 else 0.5 * (near - tail(1.0 + w))
     mass = 2.0 * same * dw
     closer = np.cumsum(mass, axis=1) - 0.5 * mass
-    total = mass.sum(axis=1)
+    return 2.0 * adjacent * dw, closer, mass.sum(axis=1)
+
+
+def _hit_rate(wall: tuple[np.ndarray, np.ndarray, np.ndarray], K: int, m: int) -> np.ndarray:
+    """`_wall_hit_rate` from a `_wall_profile`, for one hash depth and probe count."""
+    adjacent, closer, total = wall
+    m = min(m, K)
     if m == 0:
         return total**K
     farther = total[:, None] - closer
     ways = sum(comb(K - 1, i) * closer**i * farther ** (K - 1 - i) for i in range(m))
-    return total**K + K * (2.0 * adjacent * ways * dw).sum(axis=1)
+    return total**K + K * (adjacent * ways).sum(axis=1)
 
 
 def _resolve(name: str = "auto"):
@@ -247,7 +260,8 @@ class ToroidalNN:
             bucket load $K = \operatorname{round}(\log_B(n/\text{target}))$.
         target_bucket_size: Bucket-load target for the $K$ rule. ``None`` =
             ``max(32, k_hint)``.
-        probes: Neighbour-cell probes per table per query.
+        probes: Neighbour-cell probes per table per query. ``"auto"`` (default)
+            chooses with $K$ and $L$ when tables are tuned, and is 4 otherwise.
         query_block_size: Queries per block of the batched join. ``None``
             (default) is one block per worker, which is what bucket reuse
             wants: a bucket is loaded once per block and scored against
@@ -267,7 +281,7 @@ class ToroidalNN:
             python), or an explicit name.
         recall: Target chance in ``(0, 1)`` of finding a query's k-th nearest
             neighbour, the hardest of its k, used to size the number of tables
-            $L$. ``"auto"`` (default) is 0.94 for L1 and 0.98 for $p < 1$.
+            $L$. ``"auto"`` (default) is 0.96 for L1 and 0.98 for $p < 1$.
             `expected_recall` reports what the tuned index predicts; it falls
             short of the target where $L$ reaches its cap of 24.
         p: Toroidal $L^p$ exponent in ``(0, 1]`` (default ``1.0``, toroidal L1).
@@ -300,7 +314,7 @@ class ToroidalNN:
         resolution: int | None = None,
         dims_per_table: int | None = None,
         target_bucket_size: int | None = None,
-        probes: int = 4,
+        probes: int | Literal["auto"] = "auto",
         query_block_size: int | None = None,
         backend: str = "auto",
         recall: float | str = "auto",
@@ -316,8 +330,8 @@ class ToroidalNN:
             raise ValueError("num_tables must be >= 1")
         if dims_per_table is not None and dims_per_table < 1:
             raise ValueError("dims_per_table must be >= 1")
-        if probes < 0:
-            raise ValueError("probes must be >= 0")
+        if probes != "auto" and (isinstance(probes, str) or probes < 0):
+            raise ValueError(f"probes must be 'auto' or >= 0, got {probes!r}")
         if recall == "auto":
             self.recall: float | str = "auto"
         elif (
@@ -340,7 +354,8 @@ class ToroidalNN:
         self.resolution = resolution
         self.dims_per_table = dims_per_table
         self.target_bucket_size = target_bucket_size
-        self.probes = int(probes)
+        self._auto_probes = probes == "auto"
+        self.probes = _DEFAULT_PROBES if probes == "auto" else int(probes)
         self.query_block_size = None if query_block_size is None else int(query_block_size)
         self.backend = backend
         self.backend_name: str | None = None
@@ -628,7 +643,7 @@ class ToroidalNN:
             auto = _AUTO_RECALL if self.p == 1.0 else _AUTO_RECALL_LP
             goal = auto if self.recall == "auto" else float(self.recall)
             assert gaps is not None  # set on every path that reaches tuning L
-            L = self._tables_for(gaps, B, K, goal)
+            K, L = self._plan_tables(_wall_profile(gaps, B), K, goal)
         self._B, self._K, self._L = B, K, L
 
         self._S = self._rng.integers(0, d, size=(L, K))
@@ -636,21 +651,37 @@ class ToroidalNN:
         self._pw = B ** np.arange(K, dtype=np.int64)
         logger.info("tuned: n=%d d=%d r_hat=%.3f -> B=%d K=%d L=%d", n, d, r_hat, B, K, L)
 
-    def _tables_for(self, gaps: np.ndarray, B: int, K: int, target: float) -> int:
-        """Fewest tables whose predicted recall of the sampled pairs reaches ``target``.
-
-        The result is capped at `_MAX_TABLES`: past it the target is out of
-        reach, and `expected_recall` reports what the index can give instead.
-        """
-        l_min = 4 if self.recall == "auto" else 1
-        hit = _wall_hit_rate(gaps, B, K, min(self.probes, K))
+    def _reach(self, wall: Any, K: int, m: int, goal: float) -> tuple[int, float]:
+        """Fewest tables, up to `_MAX_TABLES`, reaching ``goal``; and the recall they predict."""
+        hit = _hit_rate(wall, K, m)
         tables = np.arange(1, _MAX_TABLES + 1)
         # Rounded so the last bits of a sampled gap cannot move L across backends.
         reach = np.round((1.0 - (1.0 - hit[None, :]) ** tables[:, None]).mean(axis=1), 9)
-        L = int(max(l_min, np.searchsorted(reach, target) + 1))
-        L = min(L, _MAX_TABLES)
-        self._expected_recall = float(reach[L - 1])
-        return L
+        L = int(np.searchsorted(reach, goal) + 1)
+        L = min(max(L, 4 if self.recall == "auto" else 1), _MAX_TABLES)
+        return L, float(reach[L - 1])
+
+    def _plan_tables(self, wall: Any, K: int, goal: float) -> tuple[int, int]:
+        """Choose (K, L), and the probe count when it is ``"auto"``, for ``goal``.
+
+        Past the table cap a shallower hash is the cheap way back to the goal:
+        buckets double per digit dropped, but the tables needed fall faster,
+        and the memory falls with them. Below the cap, probes that the goal
+        does not need are dropped; a probe costs a bucket scan per table.
+        """
+        depths = [K] if self.dims_per_table is not None else [k for k in range(K, K - 4, -1) if k >= 1]
+        probes = (_DEFAULT_PROBES, _DEEP_PROBES) if self._auto_probes else (self.probes,)
+        plans = [(k, m, *self._reach(wall, k, m, goal)) for k in depths for m in probes]
+        k, m, L, reach = next((plan for plan in plans if plan[3] >= goal), max(plans, key=lambda plan: plan[3]))
+        if self._auto_probes and (k, m) == (K, _DEFAULT_PROBES):
+            for fewer in range(_DEFAULT_PROBES):
+                L_f, reach_f = self._reach(wall, K, fewer, goal)
+                if L_f <= L and reach_f >= reach - 0.01:
+                    m, L, reach = fewer, L_f, reach_f
+                    break
+        self.probes = m
+        self._expected_recall = reach
+        return k, L
 
     def _threshold(self, mode: Literal["knn", "radius"] | None = None) -> int:
         """Mode-specific or global brute_threshold, else the backend's crossover."""
