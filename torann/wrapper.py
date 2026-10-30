@@ -35,8 +35,9 @@ Contract:
 * **Tuning**: ``fit(..., k=...)`` or ``radius=...`` feeds ESS's own query
   heuristic into the index — $B$ from the neighbour scale, $K$ from the
   closed-form bucket load $K = \operatorname{round}(\log_B(n/\text{target}))$,
-  $L$ from a recall target. Explicit constructor arguments always win
-  over tuning.
+  $L$ from a recall target and the per-dimension gaps of sampled neighbours,
+  which predict each table's hit rate on the real hash and probe rule for
+  any $p$. Explicit constructor arguments always win over tuning.
 
 This class owns validation, tuning, hash-parameter drawing and *selection*;
 the search itself lives in interchangeable implementations of
@@ -61,7 +62,7 @@ to ``lsh.py`` rather than crashing.
 from __future__ import annotations
 
 import logging
-from math import comb, exp
+from math import comb
 from time import perf_counter
 from typing import Any, ClassVar, Literal, overload
 
@@ -69,7 +70,7 @@ import numpy as np
 
 from . import rust
 from .base import IdArray, Neighbours, csr_to_padded
-from .brute import BruteIndex, exact_knn, knn_scan, pairwise_l1, radius_scan
+from .brute import BruteIndex, knn_scan, radius_scan
 from .lsh import PythonLshIndex
 
 
@@ -96,6 +97,12 @@ __all__ = ["ToroidalNN", "available_backends", "tune_thresholds"]
 # Sampling caps for the tune() estimate of the neighbour scale.
 _TUNE_QUERIES = 256
 _TUNE_REFERENCE = 8192
+# recall="auto" targets for the k-th neighbour, calibrated so the defaults keep
+# the recall they had under the older, pessimistic model, which over-built p < 1.
+_AUTO_RECALL = 0.94
+_AUTO_RECALL_LP = 0.98
+_MAX_TABLES = 24
+_WALL_GRID = 64
 
 _AUTO_ORDER = ("rust", "python")
 
@@ -114,6 +121,67 @@ def _lsh_class(name: str):
             )
         return rust.RustLshIndex
     raise ValueError(f"unknown backend {name!r}; expected 'auto', {', '.join(map(repr, _AUTO_ORDER))}")
+
+
+def _torus_gaps(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Per-dimension toroidal distance of two point arrays."""
+    diff = np.abs(a - b)
+    return np.minimum(diff, 1.0 - diff)
+
+
+def _ball_gaps(q: np.ndarray, ref: np.ndarray, radius: float, p: float) -> np.ndarray:
+    """Gaps to the farthest other point within ``radius`` of each query: its hardest neighbour."""
+    indptr, ids, dst = radius_scan(ref, q, radius, None, p=p)
+    far = np.empty(q.shape[0], dtype=np.int64)
+    found = np.zeros(q.shape[0], dtype=bool)
+    for i in range(q.shape[0]):
+        row = indptr[i + 1] - 1
+        if row >= indptr[i] and dst[row] > 0.0:
+            far[i] = ids[row]
+            found[i] = True
+    if not found.any():
+        return np.zeros((1, q.shape[1]))
+    return _torus_gaps(q[found], ref[far[found]])
+
+
+def _wall_hit_rate(gaps: np.ndarray, B: int, K: int, m: int) -> np.ndarray:
+    r"""Per-pair probability that one table finds the pair, for ``gaps`` (pairs, d).
+
+    A table draws its K dimensions i.i.d. from the pair's d gaps, so with
+    $u = B\,\delta$ and $G(t) = P[u > t]$ over those d values, a query at
+    distance $w \sim U[0, 1/2]$ from its nearest wall keeps the neighbour in
+    its cell with probability $s(w) = 1 - (G(w) + G(1-w))/2$, and has it one
+    step across that wall with probability $a(w) = (G(w) - G(1+w))/2$; at
+    $B = 2$ both walls lead to the same cell, so $a(w) = 1 - s(w)$.
+
+    A probe flips one of the m closest walls, so the pair is found in the base
+    bucket, or when exactly one dimension differs, across its nearest wall,
+    and at most m-1 of the other dimensions have a closer wall:
+
+    $$P = \bar s^K + K \int_0^{1/2} 2\,a(w) \sum_{i<m} \binom{K-1}{i}
+          A(w)^i D(w)^{K-1-i}\, dw$$
+
+    with $A(w) = \int_0^w 2 s$, $D(w) = \int_w^{1/2} 2 s$ and $\bar s = A(1/2)$.
+    See exploration/exp_tune_model.py for the check against the real hash.
+    """
+    u = B * gaps
+    w = (np.arange(_WALL_GRID) + 0.5) / (2 * _WALL_GRID)
+    dw = 0.5 / _WALL_GRID
+
+    def tail(t: np.ndarray) -> np.ndarray:
+        return (u[:, :, None] > t[None, None, :]).mean(axis=1)
+
+    near, far = tail(w), tail(1.0 - w)
+    same = 1.0 - 0.5 * (near + far)
+    adjacent = 1.0 - same if B == 2 else 0.5 * (near - tail(1.0 + w))
+    mass = 2.0 * same * dw
+    closer = np.cumsum(mass, axis=1) - 0.5 * mass
+    total = mass.sum(axis=1)
+    if m == 0:
+        return total**K
+    farther = total[:, None] - closer
+    ways = sum(comb(K - 1, i) * closer**i * farther ** (K - 1 - i) for i in range(m))
+    return total**K + K * (2.0 * adjacent * ways * dw).sum(axis=1)
 
 
 def _resolve(name: str = "auto"):
@@ -194,8 +262,11 @@ class ToroidalNN:
             bit-identical results either way.
         backend: LSH implementation — ``"auto"`` (first installed of rust,
             python), or an explicit name.
-        recall: Target single-neighbour base-bucket recall in ``(0, 1)`` used to
-            size the number of tables $L$, or ``"auto"`` (default, 0.90).
+        recall: Target chance in ``(0, 1)`` of finding a query's k-th nearest
+            neighbour, the hardest of its k, used to size the number of tables
+            $L$. ``"auto"`` (default) is 0.94 for L1 and 0.98 for $p < 1$.
+            `expected_recall` reports what the tuned index predicts; it falls
+            short of the target where $L$ reaches its cap of 24.
         p: Toroidal $L^p$ exponent in ``(0, 1]`` (default ``1.0``, toroidal L1).
         brute_threshold_knn: Mode-specific override for :meth:`query` exact/LSH
             crossover (takes precedence over ``brute_threshold``).
@@ -273,6 +344,7 @@ class ToroidalNN:
 
         self._rng = np.random.default_rng(seed)
         self._arena = np.empty((0, 0))
+        self._expected_recall: float | None = None
         self._n_static = 0
         self._d = 0
         self._use_lsh = False
@@ -495,15 +567,16 @@ class ToroidalNN:
         """Set (B, K, L) from the workload hints; explicit args always win."""
         n, d, k = self.n_points, self._d, self._k_hint or 2 * self._d
 
+        q = self._arena[self._rng.choice(n, min(_TUNE_QUERIES, n), replace=False)]
+        ref = self._arena[self._rng.choice(n, min(_TUNE_REFERENCE, n), replace=False)]
         if radius is not None:
             r_hat = float(radius)
             delta = (
                 max(1e-9, r_hat / d) if self.p == 1.0 else max(1e-9, (r_hat / (d ** (1.0 / self.p))) * (self.p**-0.32))
             )
+            gaps = None if self.num_tables is not None else _ball_gaps(q, ref, r_hat, self.p)
         else:
             # Neighbour scale: k-th NN distance of a sample against a sample.
-            q = self._arena[self._rng.choice(n, min(_TUNE_QUERIES, n), replace=False)]
-            ref = self._arena[self._rng.choice(n, min(_TUNE_REFERENCE, n), replace=False)]
             # This is a k-NN query, so it is served by the k-NN kernel.
             #
             # It used to compute the full (256 x 8192) distance block in
@@ -512,37 +585,28 @@ class ToroidalNN:
             # Rust index build it exists to configure. The LSH machinery was
             # never the slow part; choosing its radius was.
             #
+            # The per-dimension gaps come from the neighbours' ids, not from
+            # a distance: a hash collision depends on the 1-D gaps whatever
+            # the metric that ranked the neighbour.
+            #
             # `r_hat` is quantised because the two paths must agree exactly.
             # `brute_knn` reassociates (the algebraic float methods) where
-            # `pairwise_l1` reproduces NumPy's summation, so they differ in
-            # the last bits -- and `r_hat` feeds `round(0.3 / delta)`, where
-            # a boundary case would pick a different `B` and build entirely
-            # different tables. A wheel with the compiled kernel would then
-            # disagree with a pure-Python install, which is the one contract
-            # this file cannot break. Twelve digits is far below anything a
-            # radius estimated from a random sample can resolve and far above
-            # where the two paths part.
+            # `exact_knn` sums in NumPy's order, so they differ in the last
+            # bits -- and `r_hat` feeds `round(0.3 / delta)`, where a boundary
+            # case would pick a different `B` and build entirely different
+            # tables. A wheel with the compiled kernel would then disagree
+            # with a pure-Python install, which is the one contract this file
+            # cannot break. Twelve digits is far below anything a radius
+            # estimated from a random sample can resolve and far above where
+            # the two paths part.
             kk = min(k, ref.shape[0] - 1)
-            knn = getattr(rust, "brute_knn", None)
-            if self.p == 1.0:
-                if knn is not None:
-                    nth = knn(ref, q, kk + 1, None)[1][:, kk]
-                else:
-                    D = pairwise_l1(q, ref)
-                    nth = np.partition(D, kk, axis=1)[:, kk]
-            else:
-                # 1-D grid collision depends on the marginal 1-D coordinate
-                # gap delta_j, so measure the exact toroidal L1 gap of the
-                # true k-th L^p neighbour rather than approximating from r_p.
-                idx_k = (
-                    knn(ref, q, kk + 1, None, self.p)[0][:, kk]
-                    if knn is not None
-                    else exact_knn(ref, q, kk + 1, p=self.p)[0][:, kk]
-                )
-                diff = np.abs(q - ref[idx_k])
-                nth = np.minimum(diff, 1.0 - diff).sum(axis=1)
-            r_hat = float(f"{float(np.median(nth)):.12e}")
+            ids = knn_scan(ref, q, kk + 1, p=self.p)[0]
+            r_hat = float(f"{float(np.median(_torus_gaps(q, ref[ids[:, kk]]).sum(axis=1))):.12e}")
             delta = max(1e-9, r_hat / d)  # mean per-dimension neighbour distance
+            # `ref` is a sample of the index, so its k-th neighbour is farther
+            # out than the index's: the same rank scaled by the sampling rate.
+            rank = int(np.clip(round(k * ref.shape[0] / n), 1, kk))
+            gaps = _torus_gaps(q, ref[ids[:, rank]])
 
         # B: want per-dim collision 1-B*delta comfortably positive; high-d
         # concentration (large delta) pushes B to its coarsest value 2.
@@ -558,43 +622,32 @@ class ToroidalNN:
         if self.num_tables is not None:
             L = self.num_tables
         else:
-            # For p < 1, Subbotin exp(-(u/s)^p) marginals on the L^p sphere have
-            # heavier tails beyond 1/B than Exp(mu) at equal mean B*delta.
-            mu = B * delta * (1.0 if self.p == 1.0 else self.p**-0.15)
-            q0 = min(0.95, mu)
-            p0 = 1.0 - q0
-            p1 = p0**K  # base-bucket collision of a k-NN
-            # Wall-ordered multi-probe per-table collision probability
-            # (.agents/notes/math/eqs.md e6-e9): under L1-sphere marginal
-            # u ~ Exp(mu), a 1-wall crossing into the nearest-wall adjacent
-            # cell occurs with probability q1 = mu*(1 - e^(-1/mu))*(1 - e^(-1/(2*mu))),
-            # and the top m = min(probes, K) closest walls capture the
-            # Beta-Binomial fraction with X = min(1, 2*q0).
-            m = min(self.probes, K)
-            if m > 0:
-                q1 = mu * (1.0 - exp(-1.0 / mu)) * (1.0 - exp(-1.0 / (2.0 * mu)))
-                X = min(1.0, 2.0 * q0)
-                p_step = (
-                    (p0 ** (K - 1))
-                    * (q1 / X)
-                    * sum(min(r, m) * comb(K, r) * (X**r) * ((1.0 - X) ** (K - r)) for r in range(1, K + 1))
-                )
-            else:
-                p_step = 0.0
-            p_table = p1 + p_step
-            miss = 0.10 if self.recall == "auto" else 1.0 - float(self.recall)
-            l_min = 4 if self.recall == "auto" else 1
-            L = (
-                int(np.clip(np.ceil(np.log(miss) / np.log(1 - min(0.99, p_table + 1e-9))), l_min, 24))
-                if p_table < 1.0
-                else l_min
-            )
+            auto = _AUTO_RECALL if self.p == 1.0 else _AUTO_RECALL_LP
+            goal = auto if self.recall == "auto" else float(self.recall)
+            assert gaps is not None  # set on every path that reaches tuning L
+            L = self._tables_for(gaps, B, K, goal)
         self._B, self._K, self._L = B, K, L
 
         self._S = self._rng.integers(0, d, size=(L, K))
         self._U = self._rng.random((L, K))
         self._pw = B ** np.arange(K, dtype=np.int64)
         logger.info("tuned: n=%d d=%d r_hat=%.3f -> B=%d K=%d L=%d", n, d, r_hat, B, K, L)
+
+    def _tables_for(self, gaps: np.ndarray, B: int, K: int, target: float) -> int:
+        """Fewest tables whose predicted recall of the sampled pairs reaches ``target``.
+
+        The result is capped at `_MAX_TABLES`: past it the target is out of
+        reach, and `expected_recall` reports what the index can give instead.
+        """
+        l_min = 4 if self.recall == "auto" else 1
+        hit = _wall_hit_rate(gaps, B, K, min(self.probes, K))
+        tables = np.arange(1, _MAX_TABLES + 1)
+        # Rounded so the last bits of a sampled gap cannot move L across backends.
+        reach = np.round((1.0 - (1.0 - hit[None, :]) ** tables[:, None]).mean(axis=1), 9)
+        L = int(max(l_min, np.searchsorted(reach, target) + 1))
+        L = min(L, _MAX_TABLES)
+        self._expected_recall = float(reach[L - 1])
+        return L
 
     def _threshold(self, mode: Literal["knn", "radius"] | None = None) -> int:
         """Mode-specific or global brute_threshold, else the backend's crossover."""
@@ -708,6 +761,11 @@ class ToroidalNN:
     def is_approximate_radius(self) -> bool:
         """True when :meth:`query_radius` routes through the LSH index (``n_points > threshold('radius')``)."""
         return self._arena.size > 0 and self.n_points > self._threshold("radius")
+
+    @property
+    def expected_recall(self) -> float | None:
+        """Predicted chance of finding a query's hardest neighbour, None while exact or with explicit tables."""
+        return self._expected_recall
 
     @property
     def n_tables(self) -> int:

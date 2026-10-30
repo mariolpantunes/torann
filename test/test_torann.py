@@ -16,6 +16,7 @@ import numpy as np
 
 from torann import Neighbours, ToroidalNN, available_backends, rust, tune_thresholds
 from torann.brute import BruteIndex, exact_knn, exact_radius, knn_scan, pairwise_l1, pairwise_lp
+from torann.wrapper import _torus_gaps, _wall_hit_rate
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1287,6 +1288,83 @@ class TestTuneContract(unittest.TestCase):
                     nn = ToroidalNN(seed=6, brute_threshold=0, p=p, backend="python").fit(pts, k=4)
                     self.assertGreaterEqual(nn._L, 1)
                     self.assertEqual(nn.query(k=4, queries=pts[:8])[0].shape, (8, 4))
+
+    def measured_hit_rate(self, Q, X, B, K, m, tables, rng):
+        """Per-pair hit rate of the normative hash and probe rule (`lsh.py`)."""
+        d, rows = Q.shape[1], np.arange(Q.shape[0])
+        hits = np.zeros(Q.shape[0])
+        for _ in range(tables):
+            S, U = rng.integers(0, d, K), rng.random(K)
+            fq, fx = np.mod(Q[:, S] + U, 1.0) * B, np.mod(X[:, S] + U, 1.0) * B
+            cq, cx = np.minimum(fq.astype(np.int64), B - 1), np.minimum(fx.astype(np.int64), B - 1)
+            differ = cq != cx
+            hit = ~differ.any(axis=1)
+            if m:
+                f = fq - cq
+                walls = np.argpartition(np.minimum(f, 1.0 - f), m - 1, axis=1)[:, :m]
+                j = differ.argmax(axis=1)
+                across = (cq + np.where(f >= 0.5, 1, -1)) % B
+                hit |= (differ.sum(axis=1) == 1) & (walls == j[:, None]).any(axis=1) & (across[rows, j] == cx[rows, j])
+            hits += hit
+        return hits / tables
+
+    def test_predicted_hit_rate_matches_the_real_hash(self):
+        rng = np.random.default_rng(8)
+        for d, n, p, B, K, m in (
+            (8, 4096, 1.0, 3, 4, 4),
+            (8, 4096, 0.25, 2, 7, 1),
+            (16, 4096, 0.5, 2, 7, 4),
+            (32, 4096, 1.0, 2, 6, 0),
+            (32, 4096, 0.25, 2, 6, 4),
+            (2, 4096, 1.0, 8, 4, 4),  # more hash digits than dimensions
+        ):
+            with self.subTest(d=d, p=p, B=B, K=K, m=m):
+                pts = rng.random((n, d))
+                Q = pts[:256]
+                ids, _ = exact_knn(pts, Q, 2 * d + 1, p=p)
+                X = pts[ids[:, 2 * d]]
+                gaps = _torus_gaps(Q, X)
+                self.assertAlmostEqual(
+                    _wall_hit_rate(gaps, B, K, m).mean() / self.measured_hit_rate(Q, X, B, K, m, 2000, rng).mean(),
+                    1.0,
+                    delta=0.08,
+                )
+
+    def test_a_requested_recall_is_met_where_the_cap_allows(self):
+        rng = np.random.default_rng(9)
+        d, k = 16, 16
+        pts = rng.random((4096, d))
+        ids = rng.choice(4096, 256, replace=False)
+        want, _ = exact_knn(pts, pts[ids], k, exclude_ids=ids)
+        for goal in (0.5, 0.7, 0.85):
+            with self.subTest(goal=goal):
+                nn = ToroidalNN(seed=2, brute_threshold=0, recall=goal, backend="python").fit(pts, k=k)
+                got, _ = nn.query(k=k, queries=pts[ids], exclude_ids=ids)
+                real = sum(len(set(a) & set(b)) for a, b in zip(got.tolist(), want.tolist(), strict=True)) / want.size
+                self.assertLess(nn._L, 24)
+                self.assertGreaterEqual(nn.expected_recall, goal)
+                self.assertGreaterEqual(real, goal)
+                self.assertLess(real - goal, 0.25)  # met, not over-built
+
+    def test_an_index_larger_than_the_tuning_sample_is_not_over_built(self):
+        pts = np.random.default_rng(12).random((32768, 16))
+        k = 16
+        nn = ToroidalNN(seed=3, brute_threshold=0, recall=0.7, backend="python").fit(pts, k=k)
+        Q = pts[:256]
+        ids, _ = exact_knn(pts, Q, k + 1)
+        true_gaps = _torus_gaps(Q, pts[ids[:, k]])
+        self.assertLessEqual(abs(nn._L - nn._tables_for(true_gaps, nn._B, nn._K, 0.7)), 1)
+
+    def test_expected_recall_reports_a_blocked_target(self):
+        pts = np.random.default_rng(10).random((8192, 64))
+        nn = ToroidalNN(seed=1, brute_threshold=0, recall=0.98, probes=0, backend="python").fit(pts, k=32)
+        self.assertEqual(nn._L, 24)
+        self.assertLess(nn.expected_recall, 0.98)
+
+    def test_expected_recall_is_none_without_a_tuned_table_count(self):
+        pts = np.random.default_rng(11).random((512, 8))
+        self.assertIsNone(ToroidalNN(seed=1, brute_threshold=10**6).fit(pts, k=8).expected_recall)
+        self.assertIsNone(ToroidalNN(seed=1, brute_threshold=0, num_tables=3).fit(pts, k=8).expected_recall)
 
     def test_default_recall_does_not_fall(self):
         """Floors are the recall the defaults gave before the wall model, less 0.02."""

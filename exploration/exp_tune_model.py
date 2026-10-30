@@ -4,8 +4,8 @@ For the true k-th neighbour pairs of a workload, draw many tables with the
 normative hash and probe rule (`lsh.py`: base key + the min(probes, K) closest
 walls) and measure the per-table hit rate. Compare it with:
 
-  code   the p_table formula of `_tune`
-  model  the iid wall integral on measured per-dimension gaps
+  code   the p_table formula `_tune` used before
+  model  `wrapper._wall_hit_rate`, the model `_tune` uses now
 
 Run: python exploration/exp_tune_model.py [--quick] [--json out.json]
 """
@@ -19,10 +19,11 @@ import numpy as np
 
 from torann import ToroidalNN
 from torann.brute import exact_knn
+from torann.wrapper import _wall_hit_rate
 
 
 def code_p_table(mu, K, m):
-    """The p_table of wrapper._tune, copied term by term."""
+    """The p_table `_tune` used before the wall model, kept as the reference."""
     q0 = min(0.95, mu)
     p0 = 1.0 - q0
     p1 = p0**K
@@ -33,35 +34,6 @@ def code_p_table(mu, K, m):
     return p1 + (p0 ** (K - 1)) * (q1 / X) * sum(
         min(r, m) * comb(K, r) * (X**r) * ((1.0 - X) ** (K - r)) for r in range(1, K + 1)
     )
-
-
-def model_p_table(gaps, B, K, m, grid=64):
-    """Per-pair P[hit] for gaps (pairs, d), dimensions iid from the pair's own gaps.
-
-    w = wall distance of the query, uniform on [0, 1/2]; a neighbour at offset
-    u = B*gap sits on either side with probability 1/2.
-    """
-    u = np.sort(B * gaps, axis=1)
-    pairs, d = u.shape
-    w = (np.arange(grid) + 0.5) / (2 * grid)
-    dw = 0.5 / grid
-
-    def tail(t):
-        out = np.empty((pairs, t.size))
-        for i in range(pairs):
-            out[i] = 1.0 - np.searchsorted(u[i], t, side="right") / d
-        return out
-
-    near, far = tail(w), tail(1.0 - w)
-    same = 1.0 - 0.5 * near - 0.5 * far
-    adj = 1.0 - same if B == 2 else 0.5 * (near - tail(1.0 + w))
-    below = np.cumsum(2 * same * dw, axis=1) - same * dw
-    total = (2 * same * dw).sum(axis=1)
-    above = total[:, None] - below
-    if m == 0:
-        return total**K
-    ways = sum(comb(K - 1, i) * below**i * above ** (K - 1 - i) for i in range(min(m, K)))
-    return total**K + K * (2 * adj * ways * dw).sum(axis=1)
 
 
 def empirical(Q, X, B, K, m, tables, rng):
@@ -116,7 +88,7 @@ def one(d, n, p, data, probes, pairs, tables, seed):
     m = min(probes, K)
     emp = empirical(Q, X, B, K, m, tables, rng)
     code = code_p_table(mu, K, m)
-    model = model_p_table(gap[: min(pairs, 256)], B, K, m)
+    model = _wall_hit_rate(gap[: min(pairs, 256)], B, K, m)
     # Radius path of _tune: delta guessed from an L^p radius.
     guess = r_lp / d if p == 1.0 else r_lp / d ** (1.0 / p) * p**-0.32
 
