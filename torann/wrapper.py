@@ -52,7 +52,10 @@ call leaves the index as it was): coordinates may be any finite real
 numbers and are reduced mod 1, with a result of exactly ``1.0`` stored as
 ``0.0`` (the same torus point); NaN or inf raises ``ValueError``. Every
 result row is sorted by distance, equal distances by ascending id, on
-every backend and path -- callers may rely on that order.
+every backend and path -- callers may rely on that order. At $p < 1$ an LSH
+distance is a float32 sum of roots, which no two summation orders round alike,
+so the backends can rank points whose distances tie within float32 rounding
+differently; they never differ otherwise.
 
 Note the compiled core is gated on AVX2 (see ``torann.rust``): published
 x86-64 wheels are built with that floor, and a CPU without it falls back
@@ -784,73 +787,102 @@ def tune_thresholds(
     backend: str = "auto",
     repeats: int = 3,
     seed: int = 0,
+    min_recall: float = 0.95,
+    epochs: int | None = None,
 ) -> dict[str, int]:
-    """Measure brute vs LSH query latency on a workload and return threshold overrides.
+    """Measure the brute/LSH crossover on a workload and return threshold overrides.
 
-    Compares exact brute-force search against the configured LSH backend on
-    ``points`` (and ``queries``, or a candidate self-join slice when
-    ``queries is None``) for both k-NN and range search, returning a dict
-    ``{"brute_threshold_knn": ..., "brute_threshold_radius": ...}`` ready to
-    splat into :class:`ToroidalNN`:
+    Times exact search against the LSH backend on random subsets of ``points``
+    of doubling size, up to ``len(points)``, for both k-NN and range search.
+    LSH wins a size when it is faster and its recall is at least ``min_recall``.
+    Each threshold is the largest size below the run of wins that reaches
+    ``len(points)``, ready to splat into :class:`ToroidalNN`:
 
-    * ``0`` when LSH is faster than exact brute at ``len(points)``, activating
-      LSH immediately at this size.
-    * ``len(points)`` when exact brute is faster at ``len(points)``, keeping
-      exact search active at this size.
+    * ``0`` when LSH wins every size.
+    * ``len(points)`` when exact search wins at ``len(points)``. Nothing is
+      known above that size, so exact search keeps serving up to it.
+
+    Args:
+        points: ``(n, d)`` workload points.
+        queries: ``(m, d)`` queries; default is a self-join of a candidate
+            slice of each subset.
+        k: Neighbours per query; default ``2 * d``.
+        radius: Range-query radius; default the median k-th distance of each
+            subset.
+        p, recall, backend: As in :class:`ToroidalNN`.
+        repeats: Timing repeats per measurement; the fastest counts.
+        seed: Seeds the subsets and the indexes.
+        min_recall: Recall LSH must reach to win a size.
+        epochs: Queries served per fit, when the index is rebuilt that often:
+            a fit's time is shared among them. Default ignores fit time.
     """
     if isinstance(repeats, bool) or not isinstance(repeats, (int, np.integer)) or int(repeats) < 1:
         raise ValueError(f"repeats must be an integer >= 1, got {repeats!r}")
+    if epochs is not None and (isinstance(epochs, bool) or not isinstance(epochs, (int, np.integer)) or epochs < 1):
+        raise ValueError(f"epochs must be an integer >= 1, got {epochs!r}")
     rep = int(repeats)
     P = np.atleast_2d(_to_torus(points))
     if P.ndim != 2 or P.shape[0] < 2:
         raise ValueError("points must be an (n, d) array with n >= 2")
     n, d = P.shape
-    kq = int(k) if k is not None else min(2 * d, n - 1)
-    if kq < 1:
+    if k is not None and k < 1:
         raise ValueError("k must be >= 1")
+    Q = None
     if queries is not None:
         Q = np.atleast_2d(_to_torus(queries))
         if Q.ndim != 2 or Q.shape[1] != d:
             raise ValueError(f"queries must have {d} dimensions")
-        static_pts, cand_pts, q_arg = P, None, Q
-    else:
-        m = min(256, max(1, n // 4))
-        static_pts, cand_pts, q_arg = P[: n - m], P[n - m :], None
 
-    brute_nn = ToroidalNN(seed=seed, brute_threshold=n + 1, backend=backend, recall=recall, p=p).fit(
-        static_pts, cand_pts, k=kq
-    )
-    lsh_nn = ToroidalNN(seed=seed, brute_threshold=0, backend=backend, recall=recall, p=p).fit(
-        static_pts, cand_pts, k=kq, radius=radius
-    )
+    def timed(call: Any, *args: Any, **kwargs: Any) -> tuple[float, Any]:
+        fastest, out = float("inf"), None
+        for _ in range(rep):
+            t0 = perf_counter()
+            out = call(*args, **kwargs)
+            fastest = min(fastest, perf_counter() - t0)
+        return fastest, out
 
-    brute_knn = float("inf")
-    b_dst = np.empty((0, 0))
-    for _ in range(rep):
+    def hit_rate(got: Any, want: Any) -> float:
+        hits = sum(np.intersect1d(g, w).size for g, w in zip(got, want, strict=True))
+        return hits / max(1, sum(w.size for w in want))
+
+    def build(pts: np.ndarray, m: int, threshold: int, kq: int, r: float | None) -> tuple[ToroidalNN, float]:
+        nn = ToroidalNN(seed=seed, brute_threshold=threshold, backend=backend, recall=recall, p=p)
+        cand = None if m == 0 else pts[pts.shape[0] - m :]
         t0 = perf_counter()
-        _, b_dst = brute_nn.query(k=kq, queries=q_arg)
-        brute_knn = min(brute_knn, perf_counter() - t0)
+        nn.fit(pts[: pts.shape[0] - m], cand, k=kq, radius=r)
+        return nn, perf_counter() - t0
 
-    lsh_knn = float("inf")
-    for _ in range(rep):
-        t0 = perf_counter()
-        lsh_nn.query(k=kq, queries=q_arg)
-        lsh_knn = min(lsh_knn, perf_counter() - t0)
+    order = np.random.default_rng(seed).permutation(n)
+    sizes = [n]
+    while sizes[-1] // 2 >= 256:
+        sizes.append(sizes[-1] // 2)
 
-    r_q = float(radius) if radius is not None else float(np.median(b_dst[:, min(kq - 1, b_dst.shape[1] - 1)]))
-    brute_rad = float("inf")
-    for _ in range(rep):
-        t0 = perf_counter()
-        brute_nn.query_radius(r_q, queries=q_arg, pad=True)
-        brute_rad = min(brute_rad, perf_counter() - t0)
+    knn_wins = radius_wins = True
+    best = {"brute_threshold_knn": 0, "brute_threshold_radius": 0}
+    for size in sizes:  # largest first: a threshold is the first size LSH loses
+        pts = P[order[:size]]
+        m = 0 if Q is not None else min(256, max(1, size // 4))
+        kq = min(int(k) if k is not None else 2 * d, size - 1)
+        brute, _ = build(pts, m, size + 1, kq, None)
 
-    lsh_rad = float("inf")
-    for _ in range(rep):
-        t0 = perf_counter()
-        lsh_nn.query_radius(r_q, queries=q_arg, pad=True)
-        lsh_rad = min(lsh_rad, perf_counter() - t0)
+        lsh, fit_s = build(pts, m, 0, kq, None)
+        t_exact, (want_ids, want_dst) = timed(brute.query, k=kq, queries=Q)
+        t_lsh, (got_ids, _) = timed(lsh.query, k=kq, queries=Q)
+        share = 0.0 if epochs is None else fit_s / epochs
+        knn_wins = knn_wins and t_lsh + share < t_exact and hit_rate(got_ids, want_ids) >= min_recall
+        if not knn_wins and best["brute_threshold_knn"] == 0:
+            best["brute_threshold_knn"] = size
 
-    return {
-        "brute_threshold_knn": 0 if lsh_knn < brute_knn else n,
-        "brute_threshold_radius": 0 if lsh_rad < brute_rad else n,
-    }
+        r_q = float(radius) if radius is not None else float(np.median(want_dst[:, -1]))
+        lsh, fit_s = build(pts, m, 0, kq, r_q)
+        t_exact, want = timed(brute.query_radius, r_q, queries=Q)
+        t_lsh, got = timed(lsh.query_radius, r_q, queries=Q)
+        share = 0.0 if epochs is None else fit_s / epochs
+        radius_wins = (
+            radius_wins
+            and t_lsh + share < t_exact
+            and hit_rate([g.ids for g in got], [w.ids for w in want]) >= min_recall
+        )
+        if not radius_wins and best["brute_threshold_radius"] == 0:
+            best["brute_threshold_radius"] = size
+    return best

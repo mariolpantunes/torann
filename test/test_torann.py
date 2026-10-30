@@ -1625,7 +1625,7 @@ class TestCrossoverThresholds(unittest.TestCase):
             cfg_self = tune_thresholds(pts, k=6, p=p, repeats=1, seed=3)
             self.assertEqual(set(cfg_self.keys()), {"brute_threshold_knn", "brute_threshold_radius"})
             for v in cfg_self.values():
-                self.assertIn(v, (0, len(pts)))
+                self.assertIn(v, (0, len(pts)))  # a single size was measured
             cfg_ext = tune_thresholds(pts, q, k=6, radius=0.8, p=p, repeats=1, seed=3)
             nn = ToroidalNN(seed=3, p=p, **cfg_ext).fit(pts, k=6)
             self.assertEqual(nn.query(k=6, queries=q).ids.shape, (len(q), 6))
@@ -1633,11 +1633,67 @@ class TestCrossoverThresholds(unittest.TestCase):
             {"points": rng.random((1, 4))},
             {"points": pts, "repeats": 0},
             {"points": pts, "repeats": True},
+            {"points": pts, "epochs": 0},
+            {"points": pts, "epochs": True},
             {"points": pts, "k": 0},
             {"points": pts, "queries": rng.random((10, 5))},
         ):
             with self.subTest(bad_kw=list(bad_kw.keys())), self.assertRaises((ValueError, TypeError)):
                 tune_thresholds(**bad_kw)  # type: ignore[arg-type]
+
+    def test_tune_thresholds_finds_a_crossover_inside_the_data(self):
+        """A size is judged on real timings: pin the search, not the clock."""
+        pts = np.random.default_rng(42).random((1024, 8))
+        # Stub a clock that makes LSH lose below 600 points.
+        real_query = ToroidalNN.query
+
+        def query(nn, *a, **kw):
+            out = real_query(nn, *a, **kw)
+            clock.now += 1.0 if nn._use_lsh and nn.n_points > 600 else 3.0 if nn._use_lsh else 2.0
+            return out
+
+        clock = unittest.mock.Mock(now=0.0)
+        with (
+            unittest.mock.patch.object(ToroidalNN, "query", query),
+            unittest.mock.patch("torann.wrapper.perf_counter", lambda: clock.now),
+        ):
+            cfg = tune_thresholds(pts, k=4, repeats=1, seed=3, min_recall=0.0)
+        self.assertEqual(cfg["brute_threshold_knn"], 512)
+
+    def test_tune_thresholds_honours_the_recall_floor(self):
+        pts = np.random.default_rng(43).random((2048, 16))
+        cfg = tune_thresholds(pts, k=8, recall=0.2, repeats=1, seed=3, min_recall=1.0)
+        self.assertEqual(cfg["brute_threshold_knn"], 2048)
+
+
+class TestLpBackendAgreement(unittest.TestCase):
+    """At p < 1 the backends may split ties within float32 rounding, and nothing else."""
+
+    def setUp(self):
+        if rust.brute_knn is None:
+            self.skipTest("no compiled kernel")
+
+    def test_results_differ_only_within_rounding(self):
+        rng = np.random.default_rng(5)
+        sets = {
+            "uniform": rng.random((2048, 16)),
+            "dyadic": rng.integers(0, 16, (2048, 16)) / 16.0,
+            "tiny gaps": 0.5 + rng.normal(0, 1e-7, (2048, 16)),
+        }
+        for name, pts in sets.items():
+            for p in (0.75, 0.5, 0.3, 0.25):
+                with self.subTest(name=name, p=p):
+                    a = ToroidalNN(seed=9, brute_threshold=0, backend="python", p=p).fit(pts, k=8)
+                    b = ToroidalNN(seed=9, brute_threshold=0, backend="rust", p=p).fit(pts, k=8)
+                    ai, ad = a.query(k=8, queries=pts[:128])
+                    bi, bd = b.query(k=8, queries=pts[:128])
+                    np.testing.assert_allclose(ad, bd, rtol=1e-5)
+                    r = float(np.median(ad[:, -1])) * 1.001
+                    for x, y in zip(
+                        a.query_radius(r, queries=pts[:128]), b.query_radius(r, queries=pts[:128]), strict=True
+                    ):
+                        np.testing.assert_array_equal(np.sort(x.ids), np.sort(y.ids))
+                    self.assertLess(np.mean(ai != bi), 0.02)
 
 
 if __name__ == "__main__":
