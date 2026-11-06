@@ -108,6 +108,8 @@ _MAX_TABLES = 24
 _DEFAULT_PROBES = 4
 _DEEP_PROBES = 8  # worth its lookups only where the table cap would bind
 _WALL_GRID = 64
+_DRIFT_FRACTION = 0.15  # retune update() when median candidate drift reaches 15% of neighbour scale
+_PROMOTE_GROWTH = 1.5  # retune promote() when n_points grows by >= 50% since last tune
 _BRUTE_PYTHON = 12288
 # Rust brute/LSH crossover: (largest d, n up to which exact search serves), from
 # the smallest n where LSH is faster with recall >= 0.95 at every larger n tried
@@ -363,6 +365,9 @@ class ToroidalNN:
         self._use_lsh = False
         self._k_hint: int | None = None
         self._radius_hint: float | None = None
+        self._cand_ref: np.ndarray | None = None
+        self._drift_limit = 0.0
+        self._tuned_n = 0
         self._impl: Any = None  # BaseIndex instance; set at fit()
 
     # ------------------------------------------------------------------ #
@@ -377,7 +382,8 @@ class ToroidalNN:
         radius: float | None = None,
     ) -> ToroidalNN:
         """Build the index from zero. Hash functions are drawn (and tuned)
-        here and kept stable for the whole run.
+        here and retuned automatically if candidate drift or batch promotion
+        later outgrows the initial scale.
 
         Args:
             static_points: (n, d) anchors; never move. May be empty
@@ -411,6 +417,7 @@ class ToroidalNN:
             self._build_lsh(self._radius_hint)
         else:
             self._use_lsh = False
+            self._cand_ref = None
             self._impl = BruteIndex(p=self.p)
             self._impl.build(self._arena, self._n_static)
         return self
@@ -420,7 +427,9 @@ class ToroidalNN:
 
         In LSH mode the refresh is *selective*: only points whose key
         actually changed — i.e. that moved far enough to leave a cell — are
-        re-placed, by delete + merge. The index is exact after every update.
+        re-placed, by delete + merge. When candidate drift from the last
+        tuned snapshot exceeds ``_DRIFT_FRACTION`` of the neighbour scale,
+        the index retunes and rebuilds its tables instead.
 
         Args:
             coordinates: (n_candidates, d) new positions, same order as the
@@ -431,22 +440,35 @@ class ToroidalNN:
         if new.shape != (self.n_candidates, self._d):
             raise ValueError(f"expected coordinates of shape {(self.n_candidates, self._d)}")
         self._arena[self._n_static :] = new
+        if self._use_lsh and self._can_retune() and self._cand_ref is not None:
+            disp = float(np.median(_torus_gaps(new[: len(self._cand_ref)], self._cand_ref).sum(axis=1)))
+            if disp >= self._drift_limit:
+                self._build_lsh(self._radius_hint)
+                return
         self._impl.update(np.ascontiguousarray(new))
 
     def promote(self, new_candidates: np.ndarray | None = None) -> None:
         """Freeze the candidate tier into the static tier and install a new
-        batch. The merge is linear (searchsorted + insert), never a re-sort.
+        batch. The merge is linear (searchsorted + insert) unless the index
+        crosses the LSH threshold or grows by ``_PROMOTE_GROWTH`` over the
+        last tuned size, in which case it retunes.
         """
         self._check_fitted()
         C = self._as_batch(new_candidates)
+        was_lsh = self._use_lsh
         self._impl.promote(np.ascontiguousarray(C))
         self._n_static = self.n_points  # old candidates are static now
         if C.size:
             self._arena = np.vstack([self._arena, C])
         fit_thr = self._threshold("radius") if self._radius_hint is not None else self._threshold("knn")
-        if not self._use_lsh and self.n_points > fit_thr:
-            # Crossed the threshold: first (and only) full LSH build.
+        if not was_lsh and self.n_points > fit_thr:
+            # Crossed the threshold: first full LSH build.
             self._build_lsh(self._radius_hint)
+        elif was_lsh:
+            if self._can_retune() and self._tuned_n > 0 and self.n_points >= _PROMOTE_GROWTH * self._tuned_n:
+                self._build_lsh(self._radius_hint)
+            else:
+                self._snapshot_candidates()
 
     # ------------------------------------------------------------------ #
     # Queries
@@ -640,6 +662,8 @@ class ToroidalNN:
             assert gaps is not None  # set on every path that reaches tuning L
             K, L = self._plan_tables(_wall_profile(gaps, B), K, goal)
         self._B, self._K, self._L = B, K, L
+        self._tuned_n = n
+        self._drift_limit = _DRIFT_FRACTION * d * delta
 
         self._S = self._rng.integers(0, d, size=(L, K))
         self._U = self._rng.random((L, K))
@@ -691,11 +715,24 @@ class ToroidalNN:
         rows = _CROSSOVER[(mode or "knn", self.p < 1.0)]
         return next(n for top, n in rows if self._d <= top)
 
+    def _can_retune(self) -> bool:
+        """Whether at least one LSH parameter is auto-tuned rather than pinned."""
+        return self.resolution is None or self.dims_per_table is None or self.num_tables is None
+
+    def _snapshot_candidates(self) -> None:
+        """Record a candidate reference slice to measure subsequent update drift."""
+        if self.n_candidates > 0:
+            take = min(_TUNE_QUERIES, self.n_candidates)
+            self._cand_ref = self._arena[self._n_static : self._n_static + take].copy()
+        else:
+            self._cand_ref = None
+
     def _build_lsh(self, radius: float | None) -> None:
         """Tune and instantiate the LSH backend from the current arena."""
         self._use_lsh = True
         self._tune(radius)
         self._make_lsh()
+        self._snapshot_candidates()
 
     def _make_lsh(self) -> None:
         """Instantiate the LSH implementation and build both tiers."""

@@ -1434,6 +1434,72 @@ class TestTuneContract(unittest.TestCase):
                     total = sum(b.ids.size for b in ref)
                 self.assertGreaterEqual(hits / total, floor)
 
+    def test_update_retunes_when_candidates_drift(self):
+        rng = np.random.default_rng(21)
+        d, n, k = 8, 1024, 16
+        tight = rng.random((n, d)) * 0.04
+        spread = rng.random((n, d))
+        nn = ToroidalNN(seed=7, brute_threshold=0, backend="python").fit(np.empty((0, d)), tight, k=k)
+        s0, b0 = nn._S.copy(), nn._B
+        self.assertEqual(b0, 8)
+
+        nn.update(tight + 1e-4)
+        np.testing.assert_array_equal(nn._S, s0)
+        self.assertEqual(nn._B, b0)
+
+        nn.update(spread)
+        self.assertLess(nn._B, b0)
+        ids = np.arange(128, dtype=np.int64)
+        want, _ = exact_knn(spread, spread[:128], k, exclude_ids=ids)
+        got, _ = nn.query(k=k, queries=spread[:128], exclude_ids=ids)
+        self.assertGreaterEqual(recall(got, want), 0.90)
+
+        if rust.brute_knn is not None:
+            nat = ToroidalNN(seed=7, brute_threshold=0, backend="rust").fit(np.empty((0, d)), tight, k=k)
+            nat.update(tight + 1e-4)
+            nat.update(spread)
+            self.assertEqual((nn._B, nn._K, nn._L, nn.probes), (nat._B, nat._K, nat._L, nat.probes))
+            np.testing.assert_array_equal(nn._S, nat._S)
+
+    def test_promote_retunes_when_lsh_index_grows(self):
+        rng = np.random.default_rng(22)
+        d, k = 16, 16
+        anchors = rng.random((1024, d))
+        nn = ToroidalNN(seed=5, brute_threshold=0, backend="python").fit(anchors, k=k)
+        k0, s0 = nn._K, nn._S.copy()
+
+        batch1 = rng.random((128, d)) * 0.02
+        nn.promote(batch1)
+        self.assertEqual(nn._K, k0)
+        np.testing.assert_array_equal(nn._S, s0)
+
+        nn.update(rng.random((128, d)))
+        self.assertFalse(np.array_equal(nn._S, s0))
+        s1 = nn._S.copy()
+
+        nn.promote(rng.random((3072, d)))
+        self.assertGreater(nn._K, k0)
+        self.assertFalse(np.array_equal(nn._S, s1))
+
+    def test_explicit_settings_govern_drift_retune(self):
+        rng = np.random.default_rng(23)
+        d, n = 8, 512
+        tight = rng.random((n, d)) * 0.04
+        spread = rng.random((n, d))
+        pinned = ToroidalNN(
+            seed=3, brute_threshold=0, resolution=2, dims_per_table=4, num_tables=4, probes=2, backend="python"
+        ).fit(np.empty((0, d)), tight, k=8)
+        s0 = pinned._S.copy()
+        pinned.update(spread)
+        np.testing.assert_array_equal(pinned._S, s0)
+        pinned.promote(rng.random((1024, d)))
+        np.testing.assert_array_equal(pinned._S, s0)
+
+        partial = ToroidalNN(seed=3, brute_threshold=0, probes=2, backend="python").fit(np.empty((0, d)), tight, k=8)
+        partial.update(spread)
+        self.assertLess(partial._B, 8)
+        self.assertEqual(partial.probes, 2)
+
 
 class TestExactLp(unittest.TestCase):
     """Exact toroidal L^p search (`pairwise_lp`, `exact_knn`, `exact_radius`, `BruteIndex`)."""
