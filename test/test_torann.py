@@ -16,6 +16,7 @@ import numpy as np
 
 from torann import Neighbours, ToroidalNN, available_backends, rust, tune_thresholds
 from torann.brute import BruteIndex, exact_knn, exact_radius, knn_scan, pairwise_l1, pairwise_lp
+from torann.lsh import PythonLshIndex
 from torann.wrapper import _torus_gaps, _wall_hit_rate, _wall_profile
 
 logging.basicConfig(level=logging.INFO)
@@ -1294,18 +1295,32 @@ class TestTuneContract(unittest.TestCase):
         """Per-pair hit rate of the normative hash and probe rule (`lsh.py`)."""
         d, rows = Q.shape[1], np.arange(Q.shape[0])
         hits = np.zeros(Q.shape[0])
+        m1, m2 = min(m, K), min(max(0, m - K), K * (K - 1) // 2)
+        pairs2 = [(a, b) for b in range(1, K) for a in range(b)][:m2]
         for _ in range(tables):
             S, U = rng.integers(0, d, K), rng.random(K)
             fq, fx = np.mod(Q[:, S] + U, 1.0) * B, np.mod(X[:, S] + U, 1.0) * B
             cq, cx = np.minimum(fq.astype(np.int64), B - 1), np.minimum(fx.astype(np.int64), B - 1)
             differ = cq != cx
-            hit = ~differ.any(axis=1)
-            if m:
+            ndiff = differ.sum(axis=1)
+            hit = ndiff == 0
+            if m1:
                 f = fq - cq
-                walls = np.argpartition(np.minimum(f, 1.0 - f), m - 1, axis=1)[:, :m]
+                order = np.argsort(np.minimum(f, 1.0 - f), axis=1, kind="stable")
+                walls = order[:, :m1]
                 j = differ.argmax(axis=1)
                 across = (cq + np.where(f >= 0.5, 1, -1)) % B
-                hit |= (differ.sum(axis=1) == 1) & (walls == j[:, None]).any(axis=1) & (across[rows, j] == cx[rows, j])
+                hit |= (ndiff == 1) & (walls == j[:, None]).any(axis=1) & (across[rows, j] == cx[rows, j])
+                if m2:
+                    for r in np.flatnonzero(ndiff == 2):
+                        a, b = np.flatnonzero(differ[r])
+                        if across[r, a] == cx[r, a] and across[r, b] == cx[r, b]:
+                            ord_r = order[r]
+                            if any(
+                                (ord_r[pa] == a and ord_r[pb] == b) or (ord_r[pa] == b and ord_r[pb] == a)
+                                for pa, pb in pairs2
+                            ):
+                                hit[r] = True
             hits += hit
         return hits / tables
 
@@ -1313,9 +1328,12 @@ class TestTuneContract(unittest.TestCase):
         rng = np.random.default_rng(8)
         for d, n, p, B, K, m in (
             (8, 4096, 1.0, 3, 4, 4),
+            (8, 4096, 1.0, 3, 4, 8),  # 2-wall probes past K
             (8, 4096, 0.25, 2, 7, 1),
             (16, 4096, 0.5, 2, 7, 4),
+            (16, 4096, 0.5, 2, 7, 11),  # 2-wall probes at B=2
             (32, 4096, 1.0, 2, 6, 0),
+            (32, 4096, 1.0, 2, 6, 12),  # 2-wall probes at d=32
             (32, 4096, 0.25, 2, 6, 4),
             (2, 4096, 1.0, 8, 4, 4),  # more hash digits than dimensions
         ):
@@ -1330,6 +1348,44 @@ class TestTuneContract(unittest.TestCase):
                     1.0,
                     delta=0.08,
                 )
+
+    def test_two_wall_probes_find_diagonal_seam_neighbours_and_match_backends(self):
+        # Query in cell (0, 0, 0) near the seam in dims 0 and 1, far from walls in dim 2;
+        # neighbour across both seam walls in cell (B-1, B-1, 0): 0-wall and 1-wall probes
+        # cannot reach it, while a 2-wall probe (probes = K + 1) finds it in both backends.
+        for B in (2, 4):
+            with self.subTest(B=B):
+                S = np.array([[0, 1, 2]], dtype=np.int64)
+                U = np.zeros((1, 3), dtype=np.float64)
+                pts = np.array(
+                    [
+                        [0.01 / B, 0.02 / B, 0.50 / B],  # id 0: query in (0, 0, 0)
+                        [(B - 0.01) / B, (B - 0.02) / B, 0.50 / B],  # id 1: diagonal across seam in dims 0 and 1
+                        [0.50 / B, 0.50 / B, 0.50 / B],  # id 2: filler
+                    ],
+                    dtype=np.float64,
+                )
+                q = pts[:1]
+                py1 = PythonLshIndex(B, 3, 1, 3, S, U)
+                py1.build(pts, 3)
+                _, r_ids1, _ = py1.query_radius(q, 0.5)
+                self.assertNotIn(1, r_ids1.tolist())
+
+                py2 = PythonLshIndex(B, 3, 1, 4, S, U)
+                py2.build(pts, 3)
+                _, r_ids2, _ = py2.query_radius(q, 0.5)
+                self.assertIn(1, r_ids2.tolist())
+
+                if rust.RustLshIndex is not None:
+                    for block in (1, 1024):
+                        # Repeat query 64 times on the batched path so the block join runs.
+                        qb = np.repeat(q, 64 if block > 1 else 1, axis=0)
+                        py_b = PythonLshIndex(B, 3, 1, 5, S, U, block=block)
+                        py_b.build(pts, 3)
+                        nat_b = rust.RustLshIndex(B, 3, 1, 5, S, U, block)
+                        nat_b.build(pts, 3)
+                        np.testing.assert_array_equal(py_b.query_knn(qb, 2)[0], nat_b.query_knn(qb, 2)[0])
+                        np.testing.assert_array_equal(py_b.query_radius(qb, 0.5)[1], nat_b.query_radius(qb, 0.5)[1])
 
     def test_a_requested_recall_is_met_where_the_cap_allows(self):
         rng = np.random.default_rng(9)
@@ -1373,6 +1429,13 @@ class TestTuneContract(unittest.TestCase):
         self.assertLess(nn._K, pinned._K)
         self.assertLessEqual(nn._L, 24)
         self.assertGreaterEqual(nn.expected_recall, 0.96)
+
+        pts64 = np.random.default_rng(17).random((8192, 64))
+        w1 = ToroidalNN(seed=4, brute_threshold=0, p=0.5, probes=7, dims_per_table=7, backend="python").fit(pts64, k=64)
+        w2 = ToroidalNN(seed=4, brute_threshold=0, p=0.5, dims_per_table=7, backend="python").fit(pts64, k=64)
+        self.assertLess(w1.expected_recall, 0.98)
+        self.assertEqual(w2.probes, 8)
+        self.assertGreaterEqual(w2.expected_recall, 0.98)
 
     def test_probes_the_target_does_not_need_are_dropped(self):
         rng = np.random.default_rng(14)

@@ -64,8 +64,8 @@ case "$TASK" in
             --json "$SCRATCH/out/recall_ablation.json" \
             | tee "$SCRATCH/out/recall_ablation.log"
         python examples/report_recall_ablation.py \
-            --in "$SCRATCH/out/recall_ablation.json" \
-            --out "$SCRATCH/out/recall_ablation_report.md"
+            --json "$SCRATCH/out/recall_ablation.json" \
+            --out "$SCRATCH/out/recall_ablation.html"
         ;;
     crossover)
         # S3: Exact brute vs LSH crossover n*(d, mode, p) across d=2..100
@@ -81,10 +81,16 @@ case "$TASK" in
         ;;
     exploration)
         # Math/tuner validation scripts (1D/2D seam laws, cell size, L^p recall, updates)
-        for s in exp_1d.py exp_2d.py exp_cellsize.py exp_lp_recall.py exp_metric_contrast.py exp_update.py; do
+        for s in exp_cellsize.py exp_lp_recall.py exp_metric_contrast.py; do
             echo "--- running exploration/$s ---"
             python "exploration/$s" 2>&1 | tee "$SCRATCH/out/${s%.py}.log"
         done
+        if python -c "import matplotlib" 2>/dev/null; then
+            for s in exp_1d.py exp_2d.py exp_update.py; do
+                echo "--- running exploration/$s ---"
+                python "exploration/$s" 2>&1 | tee "$SCRATCH/out/${s%.py}.log"
+            done
+        fi
         ;;
     tune-model)
         # Predicted vs measured per-table hit rate, and _tune stability
@@ -164,6 +170,25 @@ for d in (8, 16, 32):
                    "tuned_thr_radius": cfg["brute_threshold_radius"]}
             rows.append(row)
             print(f"d={d:2d} n={n:4d} p={p:.2f} -> default(knn={nn.is_approximate_knn}, rad={nn.is_approximate_radius}) | tune_thresholds={cfg}")
+
+print("\n=== 4. S7 2-wall multi-probe sweep (n=30000, m=1000, k=16, K=5) ===")
+for d in (8, 16, 32):
+    pts = rng.random((30000, d))
+    q = rng.random((1000, d))
+    ref_idx, _ = rust.brute_knn(pts, q, 16, None, 1.0)
+    for probes in (0, 2, 4, 5, 6, 8, 10, 12):
+        t0 = time.perf_counter()
+        nn = ToroidalNN(seed=7, brute_threshold=0, dims_per_table=5, probes=probes).fit(pts[:25000], pts[25000:], k=16)
+        t_fit = (time.perf_counter() - t0) * 1e3
+        t1 = time.perf_counter()
+        idx, _ = nn.query(k=16, queries=q)
+        t_q = (time.perf_counter() - t1) * 1e3
+        emp = sum(len(np.intersect1d(idx[i], ref_idx[i])) for i in range(len(q))) / ref_idx.size
+        row = {"exp": "s7_2wall", "d": d, "probes": probes, "B": nn._B, "K": nn._K, "L": nn._L,
+               "expected_recall": round(float(nn.expected_recall or 0.0), 4),
+               "emp_recall": round(float(emp), 4), "fit_ms": round(t_fit, 2), "query_ms": round(t_q, 2)}
+        rows.append(row)
+        print(f"d={d:2d} probes={probes:2d} -> B={nn._B} K={nn._K:2d} L={nn._L:2d} | exp={nn.expected_recall:.4f} emp={emp:.4f} | query={t_q:6.2f} ms")
 
 with open(out_path, "w") as f:
     json.dump(rows, f, indent=2)

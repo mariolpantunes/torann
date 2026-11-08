@@ -40,6 +40,9 @@ def empirical(Q, X, B, K, m, tables, rng):
     """Per-pair hit rate over `tables` independent draws of the normative hash."""
     pairs, d = Q.shape
     hits = np.zeros(pairs)
+    rows = np.arange(pairs)
+    m1, m2 = min(m, K), min(max(0, m - K), comb(K, 2))
+    pairs2 = [(a, b) for b in range(1, K) for a in range(b)][:m2]
     for _ in range(tables):
         S = rng.integers(0, d, size=K)
         U = rng.random(K)
@@ -48,17 +51,27 @@ def empirical(Q, X, B, K, m, tables, rng):
         cq = np.minimum(fq.astype(np.int64), B - 1)
         cx = np.minimum(fx.astype(np.int64), B - 1)
         diff = cq != cx
-        hit = ~diff.any(axis=1)
-        if m > 0:
+        ndiff = diff.sum(axis=1)
+        hit = ndiff == 0
+        if m1 > 0:
             f = fq - cq
             alt = (cq + np.where(f >= 0.5, 1, -1)) % B
             close = np.minimum(f, 1.0 - f)
-            top = np.argpartition(close, m - 1, axis=1)[:, :m]
-            rows = np.arange(pairs)
-            one = diff.sum(axis=1) == 1
+            order = np.argsort(close, axis=1, kind="stable")
+            top = order[:, :m1]
             j = diff.argmax(axis=1)
             in_top = (top == j[:, None]).any(axis=1)
-            hit |= one & in_top & (alt[rows, j] == cx[rows, j])
+            hit |= (ndiff == 1) & in_top & (alt[rows, j] == cx[rows, j])
+            if m2 > 0:
+                for r in np.flatnonzero(ndiff == 2):
+                    a, b = np.flatnonzero(diff[r])
+                    if alt[r, a] == cx[r, a] and alt[r, b] == cx[r, b]:
+                        ord_r = order[r]
+                        if any(
+                            (ord_r[pa] == a and ord_r[pb] == b) or (ord_r[pa] == b and ord_r[pb] == a)
+                            for pa, pb in pairs2
+                        ):
+                            hit[r] = True
         hits += hit
     return hits / tables
 
@@ -85,7 +98,7 @@ def one(d, n, p, data, probes, pairs, tables, seed):
     B, K, L = nn._B, nn._K, nn._L
     delta = float(np.median(gap.sum(axis=1))) / d
     mu = B * delta * (1.0 if p == 1.0 else p**-0.15)
-    m = min(probes, K)
+    m = min(probes, K + comb(K, 2))
     emp = empirical(Q, X, B, K, m, tables, rng)
     code = code_p_table(mu, K, m)
     model = _wall_hit_rate(gap[: min(pairs, 256)], B, K, m)

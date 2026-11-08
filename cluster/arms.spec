@@ -9,9 +9,12 @@ c2           0d566d1
 c3           fc611bb
 s3           726c836
 
-# The S3 fix, and its copy for A/A noise calibration. HEAD must hold the fix.
-s3fix        HEAD
-s3fix_aa     HEAD
+# The S3 fix, drift/promote retune, and S7 2-wall probing (with A/A copy).
+s3fix        e108e98
+s3fix_aa     e108e98
+retune       b70775b
+s7           -
+s7_aa        -
 
 # S0 / W8 8-bit prefilter dimension-cutoff study:
 s0_off       fc42da3  TORANN_PREFILTER_MIN_D=9999 --features bench-knobs

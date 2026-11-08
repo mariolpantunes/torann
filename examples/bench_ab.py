@@ -121,6 +121,10 @@ def build_arm(name, rev=None, rustflags=None, profile=None, features=None):
         env["RUSTFLAGS"] = rustflags
     wheels = tempfile.mkdtemp(prefix="wheels-")
     try:
+        # Clean the torann crate artifact in the shared target dir so a working
+        # tree with an older mtime than a preceding temporary worktree checkout
+        # never reuses the previous arm's compiled cdylib.
+        subprocess.run(["cargo", "clean", "--release", "-p", "torann"], cwd=src, env=env, check=False)
         cmd = ["maturin", "build", "--release", "-o", wheels]
         if features:
             cmd += ["--features", features]

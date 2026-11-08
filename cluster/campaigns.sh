@@ -16,9 +16,13 @@
 #   core34      recall knob + L^p LSH        (c2 vs c3)
 #   core5       Crossover thresholds, S3     (c3 vs s3)
 #   s3-fix      S3 fix, needs the fix on HEAD (s3 vs s3fix)
+#   retune      Drift/promote retuning       (s3fix vs retune)
+#   s7          S7 2-wall multi-probe        (retune vs s7)
+#   c0-s7       Cumulative baseline vs S7    (c0 vs s7)
+#   s7-aa       S7 A/A noise calibration     (s7 vs s7_aa)
 #   w8-cutoff   S0 prefilter cutoff study    (s0_off vs s0_1, s0_off vs s0_17, A/A)
 #   s5-soa      S5 SoA tiles on their own base (c2 vs s5_soa)
-#   experiments 7-task array on arm s3fix (see experiments.sbatch)
+#   experiments 7-task array on arm s7 (see experiments.sbatch)
 #   all         Everything above but smoke, sharing one arm-build job
 #
 # Options:
@@ -50,7 +54,7 @@ while [[ $# -gt 0 ]]; do
         --no-sync) DO_SYNC=0; shift ;;
         --no-build) DO_BUILD=0; shift ;;
         --pairs) PAIRS_ARG="${2:?--pairs needs an even integer}"; shift 2 ;;
-        smoke|aa|core1|core2|core34|core5|s3-fix|w8-cutoff|s5-soa|experiments|all)
+        smoke|aa|core1|core2|core34|core5|s3-fix|retune|s7|c0-s7|s7-aa|w8-cutoff|s5-soa|experiments|all)
             CAMPAIGNS+=("$1"); shift ;;
         *)
             echo "error: unknown argument '$1' (see --help)" >&2
@@ -61,7 +65,7 @@ done
 [[ ${#CAMPAIGNS[@]} -eq 0 ]] && CAMPAIGNS=(all)
 for c in "${CAMPAIGNS[@]}"; do
     if [[ "$c" == "all" ]]; then
-        CAMPAIGNS=(aa core1 core2 core34 core5 s3-fix w8-cutoff s5-soa experiments)
+        CAMPAIGNS=(aa core1 core2 core34 core5 s3-fix retune s7 c0-s7 s7-aa w8-cutoff s5-soa experiments)
         break
     fi
 done
@@ -142,6 +146,18 @@ for c in "${CAMPAIGNS[@]}"; do
         s3-fix)
             run_submit s3 s3fix "s3fix" "$SUITES_BASE W8 W9" "$BUILD_ID"
             ;;
+        retune)
+            run_submit s3fix retune "retune" "$SUITES_BASE W8 W9" "$BUILD_ID"
+            ;;
+        s7)
+            run_submit retune s7 "s7" "$SUITES_BASE W8 W9" "$BUILD_ID"
+            ;;
+        c0-s7)
+            run_submit c0 s7 "c0_s7" "$SUITES_BASE W8 W9" "$BUILD_ID"
+            ;;
+        s7-aa)
+            run_submit s7 s7_aa "s7_aa" "$SUITES_BASE W8 W9" "$BUILD_ID"
+            ;;
         w8-cutoff)
             run_submit s0_off s0_1  "w8_off_vs_1"  "W8" "$BUILD_ID"
             run_submit s0_off s0_17 "w8_off_vs_17" "W8" "$BUILD_ID"
@@ -159,7 +175,7 @@ for c in "${CAMPAIGNS[@]}"; do
             else
                 EXP_ID=$(ssh_remote "cd '$ROOT/logs' && sbatch --parsable $DEP_EXP -p '$PARTITION' \
                     -w '${NODES%%,*}' --array=0-6%1 \
-                    --export=ALL,BENCH_ROOT='$ROOT',ARM=s3fix \
+                    --export=ALL,BENCH_ROOT='$ROOT',ARM='${EXP_ARM:-s7}' \
                     '$ROOT/torann/cluster/experiments.sbatch'")
                 echo "== queued standalone experiments array $EXP_ID (recall-ablation, crossover, refine-rounds, exploration, lp-recall, tune-model, tune-cost)"
             fi
@@ -175,6 +191,6 @@ Monitor when on VPN/IT network:
   ssh $REMOTE "ls -lh $ROOT/torann/examples/out/"
 Fetch A/B reports once complete:
   cluster/fetch.sh aa
-  for t in core1 core2 core34 core5 s3fix w8_off_vs_1 w8_off_vs_17 s5_soa; do
+  for t in core1 core2 core34 core5 s3fix retune s7 s7_aa w8_off_vs_1 w8_off_vs_17 s5_soa; do
       cluster/fetch.sh \$t --aa examples/out/cluster/ab_aa.json; done
 EOF

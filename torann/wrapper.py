@@ -171,12 +171,12 @@ def _wall_hit_rate(gaps: np.ndarray, B: int, K: int, m: int) -> np.ndarray:
     step across that wall with probability $a(w) = (G(w) - G(1+w))/2$; at
     $B = 2$ both walls lead to the same cell, so $a(w) = 1 - s(w)$.
 
-    A probe flips one of the m closest walls, so the pair is found in the base
-    bucket, or when exactly one dimension differs, across its nearest wall,
-    and at most m-1 of the other dimensions have a closer wall:
+    A probe flips one of the closest walls up to $K$, and then pairs of the
+    closest walls in colexicographic order $(r_1 < r_2)$ when $m > K$:
 
-    $$P = \bar s^K + K \int_0^{1/2} 2\,a(w) \sum_{i<m} \binom{K-1}{i}
-          A(w)^i D(w)^{K-1-i}\, dw$$
+    $$P = \bar s^K + K \int_0^{1/2} 2\,a(w) \sum_{i<m_1} \binom{K-1}{i}
+          A(w)^i D(w)^{K-1-i}\, dw + K(K-1) \int_{0 \le w_1 < w_2 \le 1/2}
+          4\,a(w_1)\,a(w_2)\,W_2(w_1, w_2)\, dw_1\, dw_2$$
 
     with $A(w) = \int_0^w 2 s$, $D(w) = \int_w^{1/2} 2 s$ and $\bar s = A(1/2)$.
     See exploration/exp_tune_model.py for the check against the real hash.
@@ -204,12 +204,30 @@ def _wall_profile(gaps: np.ndarray, B: int) -> tuple[np.ndarray, np.ndarray, np.
 def _hit_rate(wall: tuple[np.ndarray, np.ndarray, np.ndarray], K: int, m: int) -> np.ndarray:
     """`_wall_hit_rate` from a `_wall_profile`, for one hash depth and probe count."""
     adjacent, closer, total = wall
-    m = min(m, K)
-    if m == 0:
+    if m <= 0:
         return total**K
+    m1 = min(m, K)
     farther = total[:, None] - closer
-    ways = sum(comb(K - 1, i) * closer**i * farther ** (K - 1 - i) for i in range(m))
-    return total**K + K * (adjacent * ways).sum(axis=1)
+    ways1 = sum(comb(K - 1, i) * closer**i * farther ** (K - 1 - i) for i in range(m1))
+    hit = total**K + K * (adjacent * ways1).sum(axis=1)
+    m2 = min(max(0, m - K), comb(K, 2))
+    if m2 == 0 or K < 2:
+        return hit
+    adj_cum = np.cumsum(adjacent, axis=1) - 0.5 * adjacent
+    ways2 = np.zeros_like(closer)
+    for r2 in range(1, K):
+        rem = m2 - r2 * (r2 - 1) // 2
+        if rem <= 0:
+            break
+        r1_max = min(r2, rem)
+        outer = comb(K - 2, r2 - 1) * (farther ** (K - 1 - r2))
+        part = adj_cum * (closer ** (r2 - 1))
+        for k in range(r1_max, r2):
+            c_k = comb(r2 - 1, k) * comb(k - 1, r1_max - 1) * ((-1) ** (k - r1_max + 1))
+            ak = adjacent * (closer**k)
+            part = part + c_k * (closer ** (r2 - 1 - k)) * (np.cumsum(ak, axis=1) - 0.5 * ak)
+        ways2 = ways2 + outer * part
+    return hit + K * (K - 1) * (adjacent * ways2).sum(axis=1)
 
 
 def _resolve(name: str = "auto"):
@@ -685,15 +703,30 @@ class ToroidalNN:
 
         Past the table cap a shallower hash is the cheap way back to the goal:
         buckets double per digit dropped, but the tables needed fall faster,
-        and the memory falls with them. Below the cap, probes that the goal
-        does not need are dropped; a probe costs a bucket scan per table.
+        and the memory falls with them. When 1-wall probing across the allowed
+        depths still caps, ``_DEEP_PROBES`` adds 2-wall probes. Below the cap,
+        probes that the goal does not need are dropped; a probe costs a bucket
+        scan per table.
         """
         depths = [K] if self.dims_per_table is not None else [k for k in range(K, K - 4, -1) if k >= 1]
-        probes = (_DEFAULT_PROBES, _DEEP_PROBES) if self._auto_probes else (self.probes,)
-        plans = [(k, m, *self._reach(wall, k, m, goal)) for k in depths for m in probes]
-        k, m, L, reach = next((plan for plan in plans if plan[3] >= goal), max(plans, key=lambda plan: plan[3]))
-        if self._auto_probes and (k, m) == (K, _DEFAULT_PROBES):
-            for fewer in range(_DEFAULT_PROBES):
+        if self._auto_probes:
+            cands = [(k, m) for k in depths for m in dict.fromkeys((min(_DEFAULT_PROBES, k), min(_DEEP_PROBES, k)))]
+            cands += [(k, _DEEP_PROBES) for k in depths if _DEEP_PROBES > k]
+        else:
+            cands = [(k, self.probes) for k in depths]
+        best: tuple[int, int, int, float] | None = None
+        for k, m in cands:
+            L, reach = self._reach(wall, k, m, goal)
+            plan = (k, m, L, reach)
+            if reach >= goal:
+                best = plan
+                break
+            if best is None or reach > best[3]:
+                best = plan
+        assert best is not None
+        k, m, L, reach = best
+        if self._auto_probes and (k, m) == (K, min(_DEFAULT_PROBES, K)):
+            for fewer in range(m):
                 L_f, reach_f = self._reach(wall, K, fewer, goal)
                 if L_f <= L and reach_f >= reach - 0.01:
                     m, L, reach = fewer, L_f, reach_f

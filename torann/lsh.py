@@ -41,6 +41,10 @@ class PythonLshIndex(BaseIndex):
         self.block = int(block) or 1024
         self.p = float(p)
         self._pw = self.B ** np.arange(self.K, dtype=np.int64)
+        self._probe1 = min(max(0, self.probes), self.K)
+        pairs2 = [(a, b) for b in range(1, self.K) for a in range(b)][: max(0, self.probes - self.K)]
+        self._pair_a = np.array([a for a, _ in pairs2], dtype=np.int64)
+        self._pair_b = np.array([b for _, b in pairs2], dtype=np.int64)
         self.n_points = 0
         self.n_static = 0
         self._pts = np.empty((0, 0))
@@ -325,14 +329,21 @@ class PythonLshIndex(BaseIndex):
         for t in range(self.L):
             codes, f = self._table_codes(Qb, t)
             keys = (codes * self._pw).sum(axis=1)
-            nprobe = min(self.probes, self.K)
-            if nprobe > 0:
+            nprobe1, nprobe2 = self._probe1, self._pair_a.size
+            if nprobe1 > 0:
                 dirs = np.where(f >= 0.5, 1, -1)
                 alt = (codes + dirs) % self.B
                 key_delta = (alt - codes) * self._pw
                 closeness = np.minimum(f, 1.0 - f)
-                top = np.argpartition(closeness, nprobe - 1, axis=1)[:, :nprobe]
-                probe_keys = keys[:, None] + np.take_along_axis(key_delta, top, axis=1)
+                if nprobe2 > 0:
+                    order = np.argsort(closeness, axis=1, kind="stable")
+                    d_ord = np.take_along_axis(key_delta, order, axis=1)
+                    probe_keys = keys[:, None] + np.concatenate(
+                        [d_ord[:, :nprobe1], d_ord[:, self._pair_a] + d_ord[:, self._pair_b]], axis=1
+                    )
+                else:
+                    top = np.argpartition(closeness, nprobe1 - 1, axis=1)[:, :nprobe1]
+                    probe_keys = keys[:, None] + np.take_along_axis(key_delta, top, axis=1)
                 all_keys = np.concatenate([keys[:, None], probe_keys], axis=1)
             else:
                 all_keys = keys[:, None]

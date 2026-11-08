@@ -1158,10 +1158,11 @@ impl RustLshIndex {
     }
 
     /// The normative probe set of one query in one table: the query's own
-    /// bucket key, then `min(probes, K)` neighbour-cell keys, each obtained
-    /// by stepping the digit whose in-cell fraction sits closest to a cell
-    /// wall (nearest wall first). Emitted through a callback so both the
-    /// per-query gather and the batched join build their own layout.
+    /// bucket key, then up to `K` 1-wall neighbour-cell keys (nearest wall
+    /// first), followed by up to `K(K-1)/2` 2-wall neighbour-cell keys in
+    /// colexicographic order `(r1 < r2)` of the sorted walls when `probes > K`.
+    /// Emitted through a callback so both the per-query gather and the batched
+    /// join build their own layout.
     #[inline]
     fn probe_keys<F: FnMut(i64)>(
         &self,
@@ -1174,15 +1175,29 @@ impl RustLshIndex {
     ) {
         let key = self.query_codes(x, t, codes, frac);
         emit(key);
-        let nprobe = self.probes.min(self.kdim);
-        if nprobe == 0 {
+        let nprobe1 = self.probes.min(self.kdim);
+        if nprobe1 == 0 {
             return;
         }
+        let max2 = self.kdim * self.kdim.saturating_sub(1) / 2;
+        let nprobe2 = self.probes.saturating_sub(self.kdim).min(max2);
+        let need_walls = if nprobe2 == 0 {
+            nprobe1
+        } else {
+            let mut r2 = 1usize;
+            while r2 < self.kdim && r2 * (r2 - 1) / 2 < nprobe2 {
+                r2 += 1;
+            }
+            nprobe1.max(r2 + 1).min(self.kdim)
+        };
         for j in 0..self.kdim {
             let f = frac[j];
             clos[j] = f.min(1.0 - f);
+            let dir: i64 = if f >= 0.5 { 1 } else { -1 };
+            let alt = (codes[j] + dir).rem_euclid(self.b);
+            codes[j] = (alt - codes[j]) * self.pw[j];
         }
-        for _ in 0..nprobe {
+        for step in 0..need_walls {
             let mut best = 0usize;
             let mut best_c = 2.0f64;
             for j in 0..self.kdim {
@@ -1192,9 +1207,27 @@ impl RustLshIndex {
                 }
             }
             clos[best] = 2.0; // consume
-            let dir: i64 = if frac[best] >= 0.5 { 1 } else { -1 };
-            let alt = (codes[best] + dir).rem_euclid(self.b);
-            emit(key + (alt - codes[best]) * self.pw[best]);
+            let delta = codes[best];
+            if step < nprobe1 {
+                emit(key + delta);
+            }
+            if nprobe2 > 0 {
+                frac[step] = f64::from_bits(delta as u64);
+            }
+        }
+        if nprobe2 > 0 {
+            let mut rem = nprobe2;
+            'pairs: for r2 in 1..need_walls {
+                let d2 = frac[r2].to_bits() as i64;
+                for r1 in 0..r2 {
+                    let d1 = frac[r1].to_bits() as i64;
+                    emit(key + d1 + d2);
+                    rem -= 1;
+                    if rem == 0 {
+                        break 'pairs;
+                    }
+                }
+            }
         }
     }
 
